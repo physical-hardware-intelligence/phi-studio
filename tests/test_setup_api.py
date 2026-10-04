@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,20 @@ BT = {"device": "/dev/cu.Bluetooth-Incoming-Port", "tty": "/dev/tty.Bluetooth-In
       "usb": False, "arm": None}  # fmt: skip
 
 
+class FakeTerm:
+    """Studio's terminal with `command` in the foreground. WHY not set term_running: with no
+    terminal panel open Studio asks the terminal itself, since term_running may be stale."""
+
+    def __init__(self, command: str | None) -> None:
+        self.command = command
+
+    def running(self) -> dict[str, Any] | None:
+        return {"pgid": 1, "command": self.command} if self.command else None
+
+    def close(self) -> None:
+        pass
+
+
 def jpeg(color: tuple[int, int, int]) -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", (160, 120), color).save(buf, format="JPEG")
@@ -104,7 +119,8 @@ def test_camera_choices_name_config_cameras_once_each() -> None:
     assert setup_api.check_camera_choice(spec, {"front": 0, "observation.images.top": 1}) == {
         "observation.images.front": 0, "observation.images.top": 1}  # fmt: skip
     bad = [({"side": 0}, "no camera called side"), ({"front": "0; ls"}, "not a camera"),
-           ({"front": True}, "not a camera"), ({"front": 1, "top": 1}, "same device")]  # fmt: skip
+           ({"front": True}, "not a camera"),
+           ({"front": 1, "top": 1}, "both read camera 1")]  # fmt: skip
     for ask, why in bad:
         with pytest.raises(SetupError, match=why):
             setup_api.check_camera_choice(spec, ask)
@@ -165,7 +181,7 @@ def test_saving_ports_keeps_comments_backs_up_and_remembers_serials(tmp_path: Pa
                                                         "/dev/tty.usbmodemL"]  # fmt: skip
 
             # A LeRobot command in the terminal may hold the ports: no saving under it.
-            studio.term_running = {"pgid": 1, "command": "/x/python /x/bin/lerobot-teleoperate"}
+            studio.terminal = FakeTerm("/x/python /x/bin/lerobot-teleoperate")  # type: ignore[assignment]
             ask = {"cmd": "setup_ports_save", "ports": {"follower": "/dev/tty.usbmodemMOVED"}}
             await a.send_str(json.dumps(ask))
             err = await until(a, lambda d: d["type"] == "error")
@@ -282,7 +298,7 @@ def test_camera_align_matches_streams_offsets_and_releases(tmp_path: Path,
             assert sorted(FakeCam.closed) == [4, 5]  # reopened under the new names
 
             # A LeRobot command starting in the terminal takes the cameras back.
-            studio.term_running = {"pgid": 1, "command": "lerobot-record --robot.type=x"}
+            studio.terminal = FakeTerm("lerobot-record --robot.type=x")  # type: ignore[assignment]
             stop = await until(a, lambda d: d["type"] == "align_stopped", timeout=5)
             assert "lerobot-record" in stop["why"]
             assert sorted(FakeCam.closed) == [4, 4, 5, 5]
@@ -325,6 +341,132 @@ def test_a_crash_while_measuring_frees_the_cameras_and_says_why(tmp_path: Path,
             stop = await until(a, lambda d: d["type"] == "align_stopped", timeout=5)
             assert "cv2 fell over" in stop["why"]
             assert FakeCam.closed == [4] and studio.setup_api.align is None  # type: ignore[attr-defined]
+        finally:
+            await session.close()
+            await server.close()
+
+    asyncio.run(go())
+
+
+def test_one_device_under_its_two_mac_names_is_one_port() -> None:
+    spec = rigspec.parse(CONFIG.replace("port: /dev/tty.usbmodemL", "port: /dev/cu.usbmodemL"))
+    rows = [row("/dev/tty.usbmodemL", "L")]
+    with pytest.raises(SetupError, match="would share"):
+        setup_api.check_port_choice(spec, {"follower": "/dev/tty.usbmodemL"}, rows)
+    # and a config written with /dev/cu. still reads as plugged in, so no false "moved"
+    mem = {"leader:phi_leader": {"serial": "L"}}
+    assert setup_api.moved_ports(spec.arms, rows, mem) == []
+
+
+def test_two_boards_with_one_serial_get_no_moved_suggestion() -> None:
+    spec = rigspec.parse(CONFIG.replace("port: /dev/tty.usbmodemL", "port: /dev/tty.usbmodemGONE"))
+    mem = {"follower:phi_follower": {"serial": "X"}, "leader:phi_leader": {"serial": "X"}}
+    assert setup_api.moved_ports(spec.arms, [row("/dev/tty.usbmodemNEW", "X")], mem) == []
+
+
+def test_a_camera_number_already_in_the_config_cannot_be_given_twice() -> None:
+    spec = rigspec.parse(CONFIG)  # top is camera 2 already
+    with pytest.raises(SetupError, match="Top camera and Front camera would both read camera 2"):
+        setup_api.check_camera_choice(spec, {"front": 2})
+    assert setup_api.check_camera_choice(spec, {"front": 2, "top": 0}) == {
+        "observation.images.front": 2, "observation.images.top": 0}  # fmt: skip
+
+
+def align_fakes(monkeypatch: Any, root: str, probe_s: float = 0.0) -> None:
+    from phi_studio import align, cameras
+
+    refs = {"observation.images.front": np.full((480, 640, 3), 90, np.uint8)}
+
+    def probe(idx: Any, timeout_s: float = 3.0) -> list[dict[str, Any]]:
+        time.sleep(probe_s)
+        return [{"source": 4, "ok": True, "thumbnail": jpeg((90, 90, 90))}]
+
+    monkeypatch.setattr(align, "list_datasets", lambda: [{"root": root, "name": "ds"}])
+    monkeypatch.setattr(align, "references", lambda r, e, cache_dir=None: {
+        "root": r, "episode": e, "frame": 0, "motion": 0.0, "images": refs, "physical": {}})
+    monkeypatch.setattr(cameras, "probe", probe)
+    monkeypatch.setattr(align, "match_cameras", lambda live, r: {
+        "assignment": {4: "observation.images.front"}, "scores": {4: {}}, "unsure": False,
+        "why": None, "unmatched_refs": []})  # fmt: skip
+    monkeypatch.setattr(align, "measure", lambda live, ref: {
+        "dx": 0.0, "dy": 0.0, "response": 1.0, "aligned": True, "low_match": False,
+        "hint": "Aligned", "size": [640, 480], "note": None})  # fmt: skip
+    monkeypatch.setattr(cameras, "RealCamera", FakeCam)
+    FakeCam.opened, FakeCam.closed = [], []
+
+
+def test_overlapping_starts_and_a_stop_leave_no_camera_open(tmp_path: Path,
+                                                            monkeypatch: Any) -> None:
+    root = str(tmp_path / "ds")
+    align_fakes(monkeypatch, root, probe_s=0.3)
+
+    async def go() -> None:
+        studio, server, session = await started(tmp_path)
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            start = json.dumps({"cmd": "align_start", "root": root, "episode": 0})
+            await a.send_str(start)
+            await a.send_str(start)  # a reloaded page pressing Start again mid-start
+            await a.send_str(json.dumps({"cmd": "align_stop"}))  # Stop while both are starting
+            await until(a, lambda d: d["type"] == "align_stopped", timeout=5)
+            await asyncio.sleep(0.5)
+            api = studio.setup_api  # type: ignore[attr-defined]
+            if api.align is not None:  # the stop ran between the starts; stop the survivor
+                await a.send_str(json.dumps({"cmd": "align_stop"}))
+                await asyncio.sleep(0.5)
+            assert api.align is None
+            assert sorted(FakeCam.opened) == sorted(FakeCam.closed)  # every open camera closed
+            loops = [t for t in asyncio.all_tasks() if "AlignSession.run" in repr(t.get_coro())]
+            assert loops == []
+        finally:
+            await session.close()
+            await server.close()
+
+    asyncio.run(go())
+
+
+def test_align_frees_the_cameras_when_no_window_shows_it(tmp_path: Path, monkeypatch: Any) -> None:
+    root = str(tmp_path / "ds")
+    align_fakes(monkeypatch, root)
+    monkeypatch.setattr(setup_api, "ALIGN_IDLE_S", 0.6)
+
+    async def go() -> None:
+        studio, server, session = await started(tmp_path)
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            await a.send_str(json.dumps({"cmd": "align_start", "root": root, "episode": 0}))
+            await until(a, lambda d: d["type"] == "align_session")
+            for _ in range(3):  # a window showing it keeps it alive past the limit
+                await asyncio.sleep(0.4)
+                await a.send_str(json.dumps({"cmd": "align_alive"}))
+            assert studio.setup_api.align is not None  # type: ignore[attr-defined]
+            stop = await until(a, lambda d: d["type"] == "align_stopped", timeout=5)
+            assert "no window showed camera align" in stop["why"] and FakeCam.closed == [4]
+        finally:
+            await session.close()
+            await server.close()
+
+    asyncio.run(go())
+
+
+def test_refusals_read_as_written_and_name_their_command(tmp_path: Path) -> None:
+    async def go() -> None:
+        studio, server, session = await started(tmp_path)
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            b = await ws(session, server.port)
+            await until(b, lambda d: d["type"] == "hello")
+            await a.send_str(json.dumps({"cmd": "align_assign", "assignment": {}}))
+            err = await until(a, lambda d: d["type"] == "error")
+            assert err == {"type": "error", "cmd": "align_assign", "fix": "",
+                           "message": "Camera align is not running."}  # fmt: skip
+            await b.send_str(json.dumps({"cmd": "setup_ports_save", "ports": {}}))
+            err = await until(b, lambda d: d["type"] == "error")
+            assert err["cmd"] == "setup_ports_save"
+            assert "Another window has control" in err["message"]
         finally:
             await session.close()
             await server.close()

@@ -6,7 +6,7 @@ import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { CommandBlock } from "../components/CommandBlock";
 import { Notices } from "../components/Notices";
 import { label, labels } from "../lib/labels";
-import { setup, useSetup, type AlignSession } from "../lib/setup";
+import { portKey, setup, useSetup, type AlignSession } from "../lib/setup";
 import { go, studio, useSection, useStudio, type LeRobotArm, type LeRobotView, type Route } from "../lib/studio";
 import "../styles/setup.css";
 
@@ -101,9 +101,9 @@ function useStatuses(lr: LeRobotView | null): Record<StepId, Status> {
     const out = Object.fromEntries(STEPS.map((s) => [s.id, null])) as Record<StepId, Status>;
     if (!lr || lr.error) return out;
     out.install = lr.problems.length ? "warn" : "ok";
-    const here = new Set(ports?.ports.map((p) => p.name) ?? []);
+    const here = new Set(ports?.ports.map((p) => portKey(p.name)) ?? []);
     out.ports = lr.arms.some((a) => !a.port) ? "todo"
-      : !ports ? null : lr.arms.every((a) => here.has(a.port!)) ? "ok" : "warn";
+      : !ports ? null : lr.arms.every((a) => here.has(portKey(a.port!))) ? "ok" : "warn";
     out.calibrate = lr.arms.every((a) => a.calibrated) ? "ok" : "todo";
     const opencv = lr.cameras.filter((c) => c.type === "opencv");
     if (opencv.length) out.cameras = opencv.every((c) => isSource(c.source)) ? "ok" : "todo";
@@ -304,9 +304,9 @@ function PortsStep({ lr }: { lr: LeRobotView }) {
   }, [link]);
 
   const names = ports?.ports.map((p) => p.name) ?? [];
-  const byName = new Map(ports?.ports.map((p) => [p.name, p]) ?? []);
-  const armOn = new Map(lr.arms.filter((a) => a.port).map((a) => [a.port!, a.key]));
-  const others = names.filter((n) => !armOn.has(n));
+  const byName = new Map(ports?.ports.map((p) => [portKey(p.name), p]) ?? []);
+  const armOn = new Map(lr.arms.filter((a) => a.port).map((a) => [portKey(a.port!), a.key]));
+  const others = names.filter((n) => !armOn.has(portKey(n)));
   const why = !control ? "control" : ports?.busy ? `The terminal is running ${ports.busy}, which holds the ports. Stop it first.`
     : !ports ? "Reading the USB ports" : names.length < lr.arms.length
       ? `${names.length} USB serial ${names.length === 1 ? "port is" : "ports are"} plugged in, and this rig has ${lr.arms.length} arms. Plug in and power every arm.`
@@ -336,7 +336,7 @@ function PortsStep({ lr }: { lr: LeRobotView }) {
           <thead><tr><th>Arm</th><th>Port in robot-config.yaml</th><th>Now</th><th>USB serial</th></tr></thead>
           <tbody>
             {lr.arms.map((a) => {
-              const p = a.port ? byName.get(a.port) : undefined;
+              const p = a.port ? byName.get(portKey(a.port)) : undefined;
               return (
                 <tr key={a.key}>
                   <td className="strong">{label(a.key)}</td>
@@ -494,8 +494,10 @@ function CamerasStep({ lr }: { lr: LeRobotView }) {
   const initial = () => Object.fromEntries(opencv.filter((c) => isSource(c.source)).map((c) => [c.feature, String(c.source)]));
   const [pick, setPick] = useState<Record<string, string>>(initial);
   const answered = cams.list?.filter((c) => c.ok) ?? [];
-  const chosen = Object.values(pick).filter(Boolean);
-  const dup = chosen.length !== new Set(chosen).size;
+  // WHY count saved numbers too: a camera left on "Not set" keeps its saved number, and the server
+  // refuses two cameras on one device.
+  const effective = opencv.map((c) => pick[c.feature] || (isSource(c.source) ? String(c.source) : "")).filter(Boolean);
+  const dup = effective.length !== new Set(effective).size;
   const changed = opencv.some((c) => (pick[c.feature] ?? "") !== (isSource(c.source) ? String(c.source) : ""));
 
   const save = () => {
@@ -652,7 +654,16 @@ function AlignStep({ lr }: { lr: LeRobotView }) {
 
 function AlignLive({ lr, session }: { lr: LeRobotView; session: AlignSession }) {
   const control = useStudio((s) => s.control);
-  const toSave = Object.fromEntries(session.assignment.filter((a) => session.config[a.key]).map((a) => [a.key, a.live]));
+  // A window showing the session keeps it alive; with none, the server frees the cameras (ALIGN_IDLE_S).
+  useEffect(() => {
+    const ping = () => { if (!document.hidden) studio.send({ cmd: "align_alive" }); };
+    ping();
+    const t = window.setInterval(ping, 30_000);
+    document.addEventListener("visibilitychange", ping);
+    return () => { window.clearInterval(t); document.removeEventListener("visibilitychange", ping); };
+  }, []);
+  const opencv = new Set(lr.cameras.filter((c) => c.type === "opencv").map((c) => c.feature));
+  const toSave = Object.fromEntries(session.assignment.filter((a) => session.config[a.key] && opencv.has(a.key)).map((a) => [a.key, a.live]));
   const noConfig = session.assignment.filter((a) => !session.config[a.key]).map((a) => camName(a.key));
   const current = Object.fromEntries(lr.cameras.map((c) => [c.feature, c.source]));
   const same = Object.entries(toSave).every(([k, v]) => String(current[k]) === String(v));

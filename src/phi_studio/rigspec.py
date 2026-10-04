@@ -444,7 +444,7 @@ def lerobot_commands(spec: RigSpec) -> list[dict[str, str]]:
                         [*robot_args, *cams, *teleop_args, "--display_data=true"]))  # fmt: skip
     out.append(_cmd("record", "hf_login", "Sign in to Hugging Face",
                     "Once per Mac. It asks for a token from huggingface.co/settings/tokens. The "
-                    "shell hides what you type, and Studio never sees it.",
+                    "shell hides what you type, and Studio does not save or log it.",
                     "hf", ["auth", "login"]))  # fmt: skip
     if robots and teleops:
         rec = [*robot_args, *cams, *teleop_args, "--dataset.repo_id=<hf_user>/<dataset>",

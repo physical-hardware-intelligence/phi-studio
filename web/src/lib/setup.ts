@@ -1,7 +1,10 @@
 // The Set up page's state: the port finder, the camera finder, camera align, and the blanks every command
 // shares. The server side is src/phi_studio/setup_api.py; its message types arrive through studio.onMessage.
 import { useRef, useSyncExternalStore } from "react";
+import { advance, type Wizard } from "./portfinder";
 import { studio } from "./studio";
+
+export { advance, portKey, type Wizard } from "./portfinder";
 
 export interface UsbPort {
   name: string; // what robot-config.yaml uses: the /dev/tty. form on macOS
@@ -34,18 +37,6 @@ export interface AlignTick {
 }
 export interface Saved { what: "ports" | "cameras"; keys: string[]; backup: string | null; no_serial?: string[]; at: number }
 
-/** The port finder: unplug each arm in turn, and the port that goes away is that arm's. */
-export interface Wizard {
-  arms: string[]; // arm keys, in the order asked
-  i: number; // the arm being found
-  phase: "unplug" | "replug";
-  seen: string[]; // ports present since this arm's turn began
-  gone: string | null; // the port that went away when it was unplugged
-  found: Record<string, string>; // arm key -> port
-  problem: string | null;
-  saving: boolean;
-}
-
 export interface SetupState {
   ports: PortsView | null;
   wizard: Wizard | null;
@@ -68,33 +59,6 @@ function loadBlanks(): Record<string, string> {
   } catch { return {}; }
 }
 
-/** One step of the port finder, given the ports present now. Pure, so every case reads in one place. */
-export function advance(w: Wizard, now: string[]): Wizard {
-  if (w.i >= w.arms.length || w.saving) return w;
-  const arm = w.arms[w.i];
-  if (w.phase === "unplug") {
-    // WHY keep adding to seen: a cable plugged in meanwhile is not this arm, and must not read as one that left.
-    const seen = [...new Set([...w.seen, ...now])];
-    const missing = seen.filter((p) => !now.includes(p));
-    if (missing.length === 1) return { ...w, seen, phase: "replug", gone: missing[0], problem: null };
-    if (missing.length > 1) {
-      return { ...w, seen, problem: `${missing.length} ports went away at once (${missing.join(", ")}). Plug all back in except ${armLabel(arm)}.` };
-    }
-    return { ...w, seen, problem: null };
-  }
-  // replug: the new port is one that was not there while the arm was out. Usually the same name comes back.
-  const before = w.seen.filter((p) => p !== w.gone);
-  const back = now.filter((p) => !before.includes(p));
-  if (back.length === 1) {
-    const found = { ...w.found, [arm]: back[0] };
-    return { ...w, found, i: w.i + 1, phase: "unplug", seen: now, gone: null, problem: null };
-  }
-  if (back.length > 1) return { ...w, problem: `${back.length} ports appeared at once (${back.join(", ")}). Plug in only ${armLabel(arm)}.` };
-  return { ...w, problem: null };
-}
-
-const armLabel = (key: string) => key.replace(/_/g, " ");
-
 class SetupStore {
   private listeners = new Set<() => void>();
   snap: SetupState = {
@@ -111,10 +75,13 @@ class SetupStore {
       if (m.what === "ports") this.refreshPorts();
     });
     studio.onMessage("setup_cameras", (m) => this.set({
-      cameras: m.probing ? { ...this.snap.cameras, probing: true } : { probing: false, list: m.cameras, at: m.at * 1000 },
+      cameras: m.probing ? { ...this.snap.cameras, probing: true }
+        : m.cameras ? { probing: false, list: m.cameras, at: m.at * 1000 }
+        : { ...this.snap.cameras, probing: false }, // the probe failed: keep the last pictures
     }));
     studio.onMessage("align_datasets", (m) => this.set({ datasets: m.datasets }));
-    studio.onMessage("align_status", (m) => this.set({ alignStatus: m.text, alignStopped: null }));
+    // text null: the start failed, in whichever window asked
+    studio.onMessage("align_status", (m) => this.set({ alignStatus: m.text ?? null, alignStopped: m.text ? null : this.snap.alignStopped }));
     studio.onMessage("align_session", (m) => {
       // WHY drop ticks for cameras that now show another dataset camera: their offsets were against the old one.
       const keep: Record<string, AlignTick> = {};
@@ -159,15 +126,17 @@ class SetupStore {
   private onPorts(m: PortsView): void {
     this.set({ ports: m });
     const w = this.snap.wizard;
-    if (!w || w.saving) return;
+    // WHY return once every arm is found: a refused save is retried only by the person (Save again),
+    // never by the next poll, which used to resend it twice a second.
+    if (!w || w.saving || w.i >= w.arms.length) return;
     const next = advance(w, m.ports.map((p) => p.name));
     if (next.i >= next.arms.length) this.saveWizard(next);
-    else if (next !== w) this.set({ wizard: next });
+    else this.set({ wizard: next });
   }
 
   startWizard(arms: string[]): void {
     const now = this.snap.ports?.ports.map((p) => p.name) ?? [];
-    this.set({ wizard: { arms, i: 0, phase: "unplug", seen: now, gone: null, found: {}, problem: null, saving: false }, saved: null });
+    this.set({ wizard: { arms, i: 0, phase: "unplug", base: now, extra: [], gone: null, found: {}, problem: null, saving: false }, saved: null });
   }
   cancelWizard(): void { this.set({ wizard: null }); }
 
@@ -179,6 +148,10 @@ class SetupStore {
   }
 
   private saveWizard(w: Wizard): void {
+    if (!studio.snap.control) {
+      this.set({ wizard: { ...w, problem: "Found every arm. Take control of Studio, then save." } });
+      return;
+    }
     if (!studio.send({ cmd: "setup_ports_save", ports: w.found })) {
       this.set({ wizard: { ...w, problem: "This window is offline, so nothing was saved. Reconnect and save again." } });
       return;

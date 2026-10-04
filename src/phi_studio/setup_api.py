@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from phi_studio import configedit, rigspec
+from phi_studio.errors import Refusal
 from phi_studio.files import list_ports, root_order
 
 if TYPE_CHECKING:
@@ -30,13 +31,16 @@ if TYPE_CHECKING:
 PORT_RE = re.compile(r"^(/dev/[\w.\-]+|COM\d{1,3})$")
 PROBE_RANGE = range(6)  # macOS numbers cameras from 0; six covers a rig of three and spares
 ALIGN_PERIOD_S = 0.3  # one offset per camera about three times a second
-ALIGN_IDLE_S = 600.0  # a session nobody stopped releases the cameras after ten minutes
+ALIGN_IDLE_S = 120.0  # no window has shown the session for this long: free the cameras
+ALIGN_ALIVE_S = 30  # how often a window showing it says so (lib/setup.ts sends align_alive)
+IDLE_STOP = ("Stopped: no window showed camera align for two minutes, so the cameras are free "
+             "again. Start it again to go on.")
 PREVIEW_W = 480  # live and reference pictures sent to the page are this wide
 MEMORY = "ports.json"  # each arm's USB serial number, so a moved port can be found again
 BACKUPS = "config-backups"
 
 
-class SetupError(ValueError):
+class SetupError(Refusal):
     """A request Studio refuses; the message is shown as is."""
 
 
@@ -97,19 +101,27 @@ def moved_ports(arms: tuple[rigspec.ArmSpec, ...], rows: list[dict[str, Any]],
     serial number) is plugged in under another name. Only an unambiguous match counts: one port
     with that serial, not already another arm's."""
     usb = usb_ports(rows)
-    here = {r["name"] for r in usb} | {r["device"] for r in usb}
-    taken = {a.port for a in arms if a.port in here}
+    here = {port_key(r["name"]) for r in usb}
+    taken = {port_key(a.port) for a in arms if a.port and port_key(a.port) in here}
     out = []
     for a in arms:
-        if not a.port or a.port in here:
+        if not a.port or port_key(a.port) in here:
             continue
         serial = (memory.get(arm_id(a)) or {}).get("serial")
         if not serial:
             continue
         hits = [r for r in usb if r.get("serial") == serial]
-        if len(hits) == 1 and hits[0]["name"] not in taken:
+        if len(hits) == 1 and port_key(hits[0]["name"]) not in taken:
             out.append({"arm": a.key, "old": a.port, "new": hits[0]["name"], "serial": serial})
-    return out
+    # WHY: two boards can report one serial (a cloned or blank one); then neither guess is safe.
+    news = [m["new"] for m in out]
+    return [m for m in out if news.count(m["new"]) == 1]
+
+
+def port_key(name: str) -> str:
+    """One spelling per device: macOS lists each USB serial port twice, as /dev/cu.X and
+    /dev/tty.X, and a config may use either."""
+    return re.sub(r"^/dev/cu\.", "/dev/tty.", name)
 
 
 def check_port_choice(spec: rigspec.RigSpec, ports: Any,
@@ -119,24 +131,24 @@ def check_port_choice(spec: rigspec.RigSpec, ports: Any,
     if not isinstance(ports, dict) or not ports:
         raise SetupError("Say which port each arm is on.")
     by_key = {a.key: a for a in spec.arms}
-    here = {r["name"] for r in usb_ports(rows)}
+    here = {port_key(r["name"]) for r in usb_ports(rows)}
     out: dict[str, str] = {}
     for key, port in ports.items():
         if key not in by_key:
             raise SetupError(f"robot-config.yaml has no arm called {key}.")
         if not isinstance(port, str) or not PORT_RE.match(port):
             raise SetupError(f"{port!r} is not a serial port name.")
-        if port not in here:
+        if port_key(port) not in here:
             raise SetupError(f"{port} is not plugged in now. Plug the arm in and try again.")
         out[key] = port
     # A port not being changed still counts: two arms on one port is the swap this guards against.
     final = {a.key: a.port for a in spec.arms if a.port} | out
     seen: dict[str, str] = {}
     for key, port in final.items():
-        if port in seen:
-            raise SetupError(f"{label(seen[port])} and {label(key)} would share {port}. Each arm "
-                             "needs its own port.")  # fmt: skip
-        seen[port] = key
+        if port_key(port) in seen:
+            raise SetupError(f"{label(seen[port_key(port)])} and {label(key)} would share {port}. "
+                             "Each arm needs its own port.")  # fmt: skip
+        seen[port_key(port)] = key
     return out
 
 
@@ -165,9 +177,22 @@ def check_camera_choice(spec: rigspec.RigSpec, cams: Any) -> dict[str, int | str
         ):
             raise SetupError(f"{src!r} is not a camera number.")
         out[cam.feature] = src
-    if len(set(out.values())) != len(out):
-        raise SetupError("Two cameras would read the same device. Give each its own.")
+    # A camera not being changed still counts, as for ports.
+    final = {c.feature: c.source for c in spec.cameras
+             if c.fields.get("type") == "opencv" and c.source is not None} | out  # fmt: skip
+    seen: dict[str, str] = {}
+    for feature, src in final.items():
+        if str(src) in seen:
+            raise SetupError(f"{camera_label(seen[str(src)])} and {camera_label(feature)} would "
+                             f"both read camera {src}. Give each its own.")  # fmt: skip
+        seen[str(src)] = feature
     return out
+
+
+def camera_label(feature: str) -> str:
+    """observation.images.left_front reads Left Front camera, as on the page (lib/labels.ts)."""
+    words = feature.removeprefix("observation.images.").split("_")
+    return " ".join(w[:1].upper() + w[1:] for w in words if w) + " camera"
 
 
 def picture(rgb: np.ndarray, width: int = PREVIEW_W) -> str:
@@ -189,10 +214,14 @@ def decode(jpeg: bytes) -> np.ndarray:
     return np.asarray(Image.open(io.BytesIO(jpeg)).convert("RGB"))
 
 
-def lerobot_busy(studio: Studio) -> str | None:
+async def lerobot_busy(studio: Studio) -> str | None:
     """The LeRobot command running in Studio's terminal, if any. It may hold the arms' ports or
-    the cameras, so Studio does not touch them while it runs."""
+    the cameras, so Studio does not touch them while it runs. WHY ask the terminal when no panel
+    is open: term_running is only kept fresh while one is, so it could name a finished command."""
     run = studio.term_running
+    if not studio.term_socks:
+        term = studio.terminal
+        run = await asyncio.to_thread(term.running) if term is not None else None
     cmd = (run or {}).get("command") or ""
     return cmd if "lerobot-" in cmd else None
 
@@ -202,6 +231,9 @@ class SetupApi:
     def __init__(self, studio: Studio) -> None:
         self.studio = studio
         self.align: AlignSession | None = None
+        # WHY one lock for every step that opens or frees the cameras: two overlapping starts
+        # used to leave a session nothing could stop, holding its camera.
+        self.cam_lock = asyncio.Lock()
 
     @property
     def memory_file(self) -> Path:
@@ -220,10 +252,10 @@ class SetupApi:
         except (SetupError, OSError, ValueError):
             pass  # no config, or one that does not parse: the page says so from the files index
         client.push({"type": "setup_ports", "ports": usb_ports(rows), "moved": moved,
-                     "at": time.time(), "busy": lerobot_busy(self.studio)})  # fmt: skip
+                     "at": time.time(), "busy": await lerobot_busy(self.studio)})  # fmt: skip
 
     async def save_ports(self, client: Client, msg: dict[str, Any]) -> None:
-        busy = lerobot_busy(self.studio)
+        busy = await lerobot_busy(self.studio)
         if busy:
             raise SetupError(f"The terminal is running {busy}. Stop it before changing ports.")
         rows = (await asyncio.to_thread(list_ports, self._ident())).get("ports", [])
@@ -253,15 +285,21 @@ class SetupApi:
         self._saved(client, "ports", backup, [k for k in choice], no_serial=no_serial)
 
     async def probe(self, client: Client, msg: dict[str, Any]) -> None:
-        busy = lerobot_busy(self.studio)
-        if busy:
-            raise SetupError(f"The terminal is running {busy}, which may hold the cameras. "
-                             "Stop it first.")  # fmt: skip
-        await self.stop_align(None, {})
         from phi_studio import cameras
 
-        self.studio._fanout({"type": "setup_cameras", "probing": True})
-        rows = await asyncio.to_thread(cameras.probe, PROBE_RANGE)
+        async with self.cam_lock:
+            busy = await lerobot_busy(self.studio)
+            if busy:
+                raise SetupError(f"The terminal is running {busy}, which may hold the cameras. "
+                                 "Stop it first.")  # fmt: skip
+            await self._stop_locked("Stopped to look for cameras.")
+            self.studio._fanout({"type": "setup_cameras", "probing": True})
+            try:
+                rows = await asyncio.to_thread(cameras.probe, PROBE_RANGE)
+            except BaseException:  # every window shows the spinner; every window must lose it
+                self.studio._fanout({"type": "setup_cameras", "probing": False, "cameras": None,
+                                     "at": time.time()})  # fmt: skip
+                raise
         out = []
         for r in rows:
             thumb = r.pop("thumbnail", None)
@@ -305,9 +343,18 @@ class SetupApi:
             client.push(self.align.summary())
 
     async def start_align(self, client: Client, msg: dict[str, Any]) -> None:
+        try:
+            async with self.cam_lock:
+                await self._start_locked(msg)
+        except BaseException:
+            # every window: not starting
+            self.studio._fanout({"type": "align_status", "text": None})
+            raise
+
+    async def _start_locked(self, msg: dict[str, Any]) -> None:
         from phi_studio import align, cameras
 
-        busy = lerobot_busy(self.studio)
+        busy = await lerobot_busy(self.studio)
         if busy:
             raise SetupError(f"The terminal is running {busy}, which may hold the cameras. "
                              "Stop it first.")  # fmt: skip
@@ -317,7 +364,7 @@ class SetupApi:
             raise SetupError("Pick one of the datasets on this Mac.")
         if isinstance(episode, bool) or not isinstance(episode, int) or episode < 0:
             raise SetupError("The episode is a whole number from 0.")
-        await self.stop_align(None, {})
+        await self._stop_locked("Stopped to start again.")
         say = self._status
         say("Reading the dataset's resting frame")
         try:
@@ -342,22 +389,38 @@ class SetupApi:
             spec = load_spec(config_file(self.studio))
         except (SetupError, OSError, ValueError):
             pass
-        self.align = AlignSession(self, ref, match, spec, client)
-        self.studio._fanout(self.align.summary())
-        self.align.task = asyncio.get_running_loop().create_task(self.align.run())
+        s = AlignSession(self, ref, match, spec)
+        try:
+            await asyncio.to_thread(s.open)
+        except BaseException:
+            await s.close()
+            raise
+        self.align = s
+        self.studio._fanout(s.summary())
+        s.task = asyncio.get_running_loop().create_task(s.run())
 
     async def stop_align(self, client: Client | None, msg: dict[str, Any]) -> None:
+        async with self.cam_lock:
+            await self._stop_locked(msg.get("why", "Stopped"))
+
+    async def _stop_locked(self, why: str) -> None:
         s, self.align = self.align, None
         if s is not None:
             await s.stop()
-            self.studio._fanout({"type": "align_stopped", "why": msg.get("why", "Stopped")})
+            self.studio._fanout({"type": "align_stopped", "why": why})
 
     async def assign(self, client: Client, msg: dict[str, Any]) -> None:
         """The user changed which dataset camera a live camera shows."""
-        if self.align is None:
-            raise SetupError("Camera align is not running.")
-        await self.align.reassign(msg.get("assignment"))
-        self.studio._fanout(self.align.summary())
+        async with self.cam_lock:
+            if self.align is None:
+                raise SetupError("Camera align is not running.")
+            await self.align.reassign(msg.get("assignment"))
+            self.studio._fanout(self.align.summary())
+
+    async def alive(self, client: Client, msg: dict[str, Any]) -> None:
+        """A window still shows the session, so it is not idle."""
+        if self.align is not None:
+            self.align.seen = time.monotonic()
 
     def _status(self, text: str) -> None:
         self.studio._fanout({"type": "align_status", "text": text})
@@ -367,7 +430,7 @@ class AlignSession:
     """Live cameras against one dataset's resting frame: which way to move each one."""
 
     def __init__(self, api: SetupApi, ref: dict[str, Any], match: dict[str, Any],
-                 spec: rigspec.RigSpec | None, client: Client) -> None:  # fmt: skip
+                 spec: rigspec.RigSpec | None) -> None:  # fmt: skip
         self.api = api
         self.ref = ref
         self.match = match
@@ -375,9 +438,8 @@ class AlignSession:
         self.assignment: dict[Any, str] = dict(match["assignment"])  # live source -> dataset key
         self.cams: dict[Any, Any] = {}
         self.task: asyncio.Task[None] | None = None
-        self.started = time.monotonic()
+        self.seen = time.monotonic()  # the last time a window said it shows this session
         self.refs_sent = {k: picture(img) for k, img in ref["images"].items()}
-        self._open()
 
     def _fields(self, key: str, source: Any) -> dict[str, Any]:
         """Open a live camera the way the rig's config does for that dataset key, at its size."""
@@ -388,7 +450,7 @@ class AlignSession:
                 base = {**base, **cam.lerobot_fields()}
         return {**base, "index_or_path": source}
 
-    def _open(self) -> None:
+    def open(self) -> None:
         from phi_studio.cameras import RealCamera
 
         for src, key in self.assignment.items():
@@ -404,9 +466,10 @@ class AlignSession:
             raise SetupError("Two cameras cannot show the same dataset camera.")
         live = {str(s): s for s in self.match["scores"]}
         new = {live[str(s)]: k for s, k in assignment.items() if str(s) in live}
-        await self._close()
+        await self.close()
         self.assignment = new
-        self._open()
+        self.seen = time.monotonic()
+        await asyncio.to_thread(self.open)
 
     def config_names(self) -> dict[str, str | None]:
         """Dataset key -> the config camera with that dataset key, or None when the config has
@@ -430,11 +493,10 @@ class AlignSession:
         studio = self.api.studio
         try:
             while True:
-                if time.monotonic() - self.started > ALIGN_IDLE_S:
-                    await self._end("Stopped after ten minutes, to free the cameras. Start it "
-                                    "again to go on.")  # fmt: skip
+                if time.monotonic() - self.seen > ALIGN_IDLE_S:
+                    await self._end(IDLE_STOP)
                     return
-                busy = lerobot_busy(studio)
+                busy = await lerobot_busy(studio)
                 if busy:
                     await self._end(f"Stopped: the terminal started {busy}, which needs the "
                                     "cameras.")  # fmt: skip
@@ -460,12 +522,15 @@ class AlignSession:
             await self._end(f"Camera align stopped on an error: {type(e).__name__}: {e}")
 
     async def _end(self, why: str) -> None:
-        """Stop this session from inside its own loop. WHY the check: a newer session may have
-        replaced this one, and stopping it would be wrong."""
-        if self.api.align is self:
-            await self.api.stop_align(None, {"why": why})
+        """Stop this session from inside its own loop. WHY the identity check: a newer session may
+        have replaced this one; then only this one's cameras close."""
+        async with self.api.cam_lock:
+            if self.api.align is self:
+                await self.api._stop_locked(why)
+                return
+        await self.close()
 
-    async def _close(self) -> None:
+    async def close(self) -> None:
         cams, self.cams = self.cams, {}
         for c in cams.values():
             await asyncio.to_thread(c.close)
@@ -473,7 +538,7 @@ class AlignSession:
     async def stop(self) -> None:
         if self.task is not None and self.task is not asyncio.current_task():
             self.task.cancel()
-        await self._close()
+        await self.close()
 
 
 def register(studio: Studio) -> None:
@@ -487,4 +552,5 @@ def register(studio: Studio) -> None:
     studio.handle("align_start", api.start_align, control=True)
     studio.handle("align_assign", api.assign, control=True)
     studio.handle("align_stop", api.stop_align, control=True)
+    studio.handle("align_alive", api.alive, control=False)
     studio.on_close.append(lambda: api.stop_align(None, {}))
