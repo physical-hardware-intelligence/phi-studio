@@ -21,6 +21,7 @@ once. The worker's heartbeat timeout is the backstop for a window that hangs wit
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import multiprocessing as mp
@@ -29,7 +30,6 @@ import secrets
 import socket
 import struct
 import threading
-import importlib
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -529,9 +529,9 @@ class Studio:
             await fn(client, msg)
         except Exception as e:  # WHY all: a dropped error leaves the window waiting forever
             log.exception("%s failed", cmd)
-            client.push({"type": "error", "cmd": cmd,
-                         "message": f"Studio could not answer {cmd}: {type(e).__name__}: {e}",
-                         "fix": "Try again. If it repeats, ask Claude or restart Studio."})  # fmt: skip
+            fix = "Try again. If it repeats, ask Claude or restart Studio."
+            client.push({"type": "error", "cmd": cmd, "fix": fix,
+                         "message": f"Studio could not answer {cmd}: {type(e).__name__}: {e}"})
 
     # -- evals ----------------------------------------------------------------------------------
     def _unjudged(self) -> bool:
