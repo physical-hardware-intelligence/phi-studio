@@ -29,8 +29,10 @@ import secrets
 import socket
 import struct
 import threading
+import importlib
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,11 @@ from phi_studio.terminal import Terminal
 
 STATIC = Path(__file__).parent / "static"
 log = logging.getLogger(__name__)
+Handler = Callable[["Client", dict[str, Any]], Awaitable[None]]
+# Modules that add commands to Studio, each with register(studio). A missing one is skipped, so a
+# feature can land on its own.
+FEATURES = ("setup_api", "hub_api", "train_api", "scene_api")
+
 COMMANDS = {"heartbeat", "connect", "identify", "confirm", "arm", "start", "stop", "resume",
             "release", "clear", "disconnect", "inject",
             "cal_start", "cal_middle", "cal_finish", "cal_save", "cal_cancel"}  # fmt: skip
@@ -103,6 +110,17 @@ class Client:
                 await self.ws.send_bytes(frame_packet(f))
 
 
+def register_features(studio: Studio) -> None:
+    for name in FEATURES:
+        try:
+            mod = importlib.import_module(f"phi_studio.{name}")
+        except ModuleNotFoundError as e:
+            if e.name == f"phi_studio.{name}":
+                continue
+            raise
+        mod.register(studio)
+
+
 class Studio:
     def __init__(
         self,
@@ -148,6 +166,11 @@ class Studio:
         self.proc: Any = None
         self.conn: Any = None
         self._send_lock = threading.Lock()
+        # Feature modules (hub_api, train_api, scene_api, setup_api) add commands and routes here.
+        self.handlers: dict[str, tuple[Handler, bool]] = {}  # cmd -> (handler, needs control)
+        self.routes: list[web.RouteDef] = []
+        self.config_lock = asyncio.Lock()  # one robot-config.yaml write at a time
+        register_features(self)
 
     # -- worker ---------------------------------------------------------------------------------
     def start_worker(self) -> None:
@@ -245,6 +268,7 @@ class Studio:
         app.router.add_get("/", self.index)
         if (STATIC / "assets").is_dir():
             app.router.add_static("/assets", STATIC / "assets")
+        app.router.add_routes(self.routes)
         app.on_startup.append(self._on_startup)
         app.on_shutdown.append(self._on_shutdown)
         return app
@@ -464,6 +488,14 @@ class Studio:
             client.push({"type": "control", "control": True})
             self._term_status()
             return
+        if cmd in self.handlers:
+            fn, needs_control = self.handlers[cmd]
+            if needs_control and client is not self.controller:
+                self._tell(client, "Another window has control.",
+                           "Take control to change the rig from here.")  # fmt: skip
+                return
+            asyncio.get_running_loop().create_task(self._feature(client, cmd, fn, msg))
+            return
         if cmd in READ_ONLY:
             asyncio.get_running_loop().create_task(self._read_only(client, cmd, msg))
             return
@@ -484,6 +516,22 @@ class Studio:
                        "Judge it on the Evaluate page, or end the eval.")  # fmt: skip
             return
         self.to_worker({k: v for k, v in msg.items() if isinstance(k, str)})
+
+    def handle(self, cmd: str, fn: Handler, *, control: bool) -> None:
+        """Answer `cmd` with `fn(client, msg)`. control=True: only the window with control may
+        send it (it changes files, the rig or a job); False: any window (it only reads)."""
+        if cmd in self.handlers or cmd in COMMANDS or cmd in READ_ONLY or cmd in EVAL_COMMANDS:
+            raise ValueError(f"{cmd} is already a command")
+        self.handlers[cmd] = (fn, control)
+
+    async def _feature(self, client: Client, cmd: str, fn: Handler, msg: dict[str, Any]) -> None:
+        try:
+            await fn(client, msg)
+        except Exception as e:  # WHY all: a dropped error leaves the window waiting forever
+            log.exception("%s failed", cmd)
+            client.push({"type": "error", "cmd": cmd,
+                         "message": f"Studio could not answer {cmd}: {type(e).__name__}: {e}",
+                         "fix": "Try again. If it repeats, ask Claude or restart Studio."})  # fmt: skip
 
     # -- evals ----------------------------------------------------------------------------------
     def _unjudged(self) -> bool:

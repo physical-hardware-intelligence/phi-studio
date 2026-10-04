@@ -524,7 +524,7 @@ fieldset.form { border: 0; margin: 0; min-width: 0; }
 .check-fix svg { width: 14px; height: 14px; flex: none; margin-top: 2px; color: var(--text-tertiary); }
 .check-actions { display: flex; gap: var(--space-1); margin: -3px -6px -3px 0; }
 
-/* LeRobot setup: the rig as LeRobot reads it, and the commands for it */
+/* Set up: the rig as LeRobot reads it, and the commands for it */
 .setup-title { display: flex; align-items: center; gap: var(--space-2); }
 .setup-arms td { font-size: var(--text-base); }
 .setup-arms .ident { color: var(--text-primary); }

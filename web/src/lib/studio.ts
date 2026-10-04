@@ -204,6 +204,7 @@ class Studio {
   private ws: WebSocket | null = null;
   private listeners = new Set<Listener>();
   private frameListeners = new Map<string, Set<(f: Frame) => void>>();
+  private typeListeners = new Map<string, Set<(m: any) => void>>();
   private beat: Worker | null = null;
   private errorId = 0;
   private retry = 0;
@@ -452,7 +453,16 @@ class Studio {
     this.setFiles({ searching: query, error: null });
   }
 
+  /** Feature modules (lib/hub.ts, lib/train.ts, lib/scene.ts, lib/setup.ts) hear their own message types
+   * here, so each keeps its state in its own store. Returns the unsubscribe. */
+  onMessage(type: string, fn: (m: any) => void): () => void {
+    if (!this.typeListeners.has(type)) this.typeListeners.set(type, new Set());
+    this.typeListeners.get(type)!.add(fn);
+    return () => this.typeListeners.get(type)!.delete(fn);
+  }
+
   private onJson(m: any): void {
+    this.typeListeners.get(m.type)?.forEach((fn) => fn(m));
     switch (m.type) {
       // WHY clear these: the server replays its own identity and worker_exit right after hello, and
       // telemetry and camera status stream again within a tick, so a value kept from an earlier server
@@ -571,8 +581,8 @@ export function useStudio<T>(select: (s: Snapshot) => T): T {
 }
 
 // -- routing and theme -------------------------------------------------------------------------
-export type Route = "overview" | "checks" | "calibrate" | "teleop" | "policy" | "evaluate" | "setup" | "files" | "guide";
-export const ROUTES: Route[] = ["overview", "checks", "calibrate", "teleop", "policy", "evaluate", "setup", "files", "guide"];
+export type Route = "overview" | "checks" | "setup" | "calibrate" | "teleop" | "scene" | "train" | "models" | "policy" | "evaluate" | "files" | "guide";
+export const ROUTES: Route[] = ["overview", "checks", "setup", "calibrate", "teleop", "scene", "train", "models", "policy", "evaluate", "files", "guide"];
 
 // A route is the hash's first segment; the guide also takes a section, as in #/guide/teleop.
 function hashParts(): string[] { return location.hash.replace(/^#\/?/, "").split("/"); }

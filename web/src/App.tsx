@@ -11,9 +11,12 @@ import { Evaluate } from "./pages/Evaluate";
 import { Files } from "./pages/Files";
 import { Guide } from "./pages/Guide";
 import { Overview } from "./pages/Overview";
+import { Models } from "./pages/Models";
 import { Policy } from "./pages/Policy";
+import { Scene } from "./pages/Scene";
 import { Setup } from "./pages/Setup";
 import { Teleop } from "./pages/Teleop";
+import { Train } from "./pages/Train";
 
 // WHY lazy: the panel carries the markdown renderer, a third of the bundle, and most sessions never open it.
 const AssistantPanel = lazy(() => import("./components/Assistant").then((m) => ({ default: m.AssistantPanel })));
@@ -25,7 +28,10 @@ const PAGES: Record<Route, { title: string; sub: string; el: ComponentType }> = 
   teleop: { title: "Teleoperate", sub: "Drive each follower with its leader", el: Teleop },
   policy: { title: "Run policy", sub: "Run a trained policy on the followers", el: Policy },
   evaluate: { title: "Evaluate", sub: "Judge episodes and measure the success rate", el: Evaluate },
-  setup: { title: "LeRobot setup", sub: "Your rig as LeRobot reads robot-config.yaml, and the commands for it", el: Setup },
+  setup: { title: "Set up", sub: "Every step from a new rig to a recorded dataset, in order", el: Setup },
+  scene: { title: "3D view", sub: "The arms as they move, in 3D", el: Scene },
+  train: { title: "Train", sub: "Train a policy on this Mac or on the Northeastern cluster", el: Train },
+  models: { title: "Models", sub: "Find a policy on Hugging Face, check it fits this rig, and download it", el: Models },
   files: { title: "Files", sub: "Serial ports, rig notes, calibration files and code on this Mac", el: Files },
   guide: { title: "Guide", sub: "How to set up a rig and use each page", el: Guide },
 };

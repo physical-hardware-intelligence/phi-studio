@@ -98,7 +98,7 @@ function Start() {
         <span>
           Studio runs a mock rig today: simulated arms and cameras, so every page works with no hardware. The real-arm
           backend is not built yet, and <Id>--hardware</Id> stops with a message. For real arms, use the LeRobot
-          commands on the LeRobot setup page.
+          commands on the Set up page.
         </span>
       </p>
       <Steps items={[
@@ -163,9 +163,9 @@ function Rig() {
             centre of the range you will use with the gripper level. Wrist Roll has no stops: you get 180° either way
             from that pose and no more.
           </> },
-        { title: "Set a step limit", to: "setup", open: "LeRobot setup", body: <>
+        { title: "Set a step limit", to: "setup", open: "Set up", body: <>
             Without <Id>max_relative_target</Id> LeRobot sends every goal to the follower as it is. Set one number, or
-            all six joints by name, each above 0; the commands on the LeRobot setup page pass it on.
+            all six joints by name, each above 0; the commands on the Set up page pass it on.
           </> },
         { title: "Fill in the camera devices", to: "checks", open: "Checks", body: <>
             Each camera in <Id>robot-config.yaml</Id> needs its device: <Id>index_or_path</Id> for an opencv camera,{" "}
@@ -209,7 +209,7 @@ const PAGE_HELP: { id: Route; title: string; what: string; how: ReactNode }[] = 
       success rate comes with a 95% interval. Every judgement is saved at once, and an unfinished eval resumes the
       next time you start one.
     </> },
-  { id: "setup", title: "LeRobot setup", what: "Your rig as LeRobot reads robot-config.yaml.", how: <>
+  { id: "setup", title: "Set up", what: "Your rig as LeRobot reads robot-config.yaml.", how: <>
       Each arm's type, port, calibration file, units and step limit; what LeRobot would refuse; the commands for this
       rig in order, with a copy button; and the dataset keys a recording writes.
     </> },

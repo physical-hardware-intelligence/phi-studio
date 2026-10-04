@@ -1,4 +1,4 @@
-import { BookOpen, Bot, ClipboardCheck, FolderOpen, Gamepad2, LayoutGrid, ListChecks, Moon, Ruler, Sun, TerminalSquare } from "lucide-react";
+import { BookOpen, Bot, Box, ClipboardCheck, Cpu, FolderOpen, Gamepad2, LayoutGrid, ListChecks, ListOrdered, Moon, PackageSearch, Ruler, Sun } from "lucide-react";
 import type { ComponentType } from "react";
 import { go, setTheme, useRoute, useStudio, useTheme, type Route } from "../lib/studio";
 
@@ -8,21 +8,27 @@ const TOP: Item[] = [
   { route: "overview", label: "Overview", icon: LayoutGrid },
   { route: "checks", label: "Checks", icon: ListChecks },
 ];
-const WORKFLOWS: Item[] = [
+// In pipeline order: a rig first, then data and training, then policies on the arms.
+const RIG: Item[] = [
+  { route: "setup", label: "Set up", icon: ListOrdered },
   { route: "calibrate", label: "Calibrate", icon: Ruler },
   { route: "teleop", label: "Teleoperate", icon: Gamepad2 },
+  { route: "scene", label: "3D view", icon: Box },
+];
+const POLICIES: Item[] = [
+  { route: "train", label: "Train", icon: Cpu },
+  { route: "models", label: "Models", icon: PackageSearch },
   { route: "policy", label: "Run policy", icon: Bot },
   { route: "evaluate", label: "Evaluate", icon: ClipboardCheck },
 ];
 const REFERENCE: Item[] = [
   { route: "guide", label: "Guide", icon: BookOpen },
-  { route: "setup", label: "LeRobot setup", icon: TerminalSquare },
   { route: "files", label: "Files", icon: FolderOpen },
 ];
 
 // WHY one list: the Claude panel names the current page; a second copy of the labels missed two pages.
 export const PAGE_LABELS = Object.fromEntries(
-  [...TOP, ...WORKFLOWS, ...REFERENCE].map((i) => [i.route, i.label]),
+  [...TOP, ...RIG, ...POLICIES, ...REFERENCE].map((i) => [i.route, i.label]),
 ) as Record<Route, string>;
 
 // Places on the left, the work on the right (Foxglove's layout). Each item may carry one live hint drawn
@@ -60,8 +66,12 @@ export function Sidebar() {
       </div>
       <div className="nav-group">{TOP.map(item)}</div>
       <div className="nav-group">
-        <div className="nav-group-label">Workflows</div>
-        {WORKFLOWS.map(item)}
+        <div className="nav-group-label">Rig</div>
+        {RIG.map(item)}
+      </div>
+      <div className="nav-group">
+        <div className="nav-group-label">Policies</div>
+        {POLICIES.map(item)}
       </div>
       <div className="nav-group">
         <div className="nav-group-label">Reference</div>

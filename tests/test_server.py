@@ -581,3 +581,39 @@ def test_claudes_context_reports_the_largest_load_by_size_not_sign() -> None:
         "gripper": {**hp, "load": -95.0}, "shoulder_pan": {**hp, "load": 5.0}}}}}
     arm = json.loads(studio.context())["arms"]["follower"]
     assert arm["max_load_pct"] == 95.0
+
+
+def test_a_feature_command_needs_control_when_it_says_so() -> None:
+    async def go() -> None:
+        studio, server, session = await started()
+        seen: list[str] = []
+
+        async def change(client: Any, msg: dict) -> None:
+            seen.append("change")
+            client.push({"type": "changed"})
+
+        async def read(client: Any, msg: dict) -> None:
+            raise RuntimeError("boom")
+
+        studio.handle("x_change", change, control=True)
+        studio.handle("x_read", read, control=False)
+        with pytest.raises(ValueError):
+            studio.handle("stop", read, control=False)
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            b = await ws(session, server.port)
+            await until(b, lambda d: d["type"] == "hello")
+            await b.send_str(json.dumps({"cmd": "x_change"}))
+            err = await until(b, lambda d: d["type"] == "error")
+            assert "control" in err["message"] and seen == []
+            await a.send_str(json.dumps({"cmd": "x_change"}))
+            await until(a, lambda d: d["type"] == "changed")
+            await b.send_str(json.dumps({"cmd": "x_read"}))
+            err = await until(b, lambda d: d["type"] == "error" and d.get("cmd") == "x_read")
+            assert "RuntimeError: boom" in err["message"]
+        finally:
+            await session.close()
+            await server.close()
+
+    run(go())
