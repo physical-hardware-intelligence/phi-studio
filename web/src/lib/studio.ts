@@ -603,7 +603,8 @@ const THEME_KEY = "phi-studio-theme";
 const themeListeners = new Set<() => void>();
 
 export function getTheme(): Theme {
-  try { return localStorage.getItem(THEME_KEY) === "dark" ? "dark" : "light"; } catch { return "light"; }
+  // Dark unless this browser chose light. WHY dark first: see tokens.css.
+  try { return localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark"; } catch { return "dark"; }
 }
 
 export function setTheme(t: Theme): void {
