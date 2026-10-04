@@ -272,7 +272,8 @@ class Studio:
         page = STATIC / "index.html"
         if page.exists():
             return web.FileResponse(page, headers={"Cache-Control": "no-store"})
-        return web.Response(text="Studio UI is not built. Run: npm --prefix web run build", status=503)
+        return web.Response(text="Studio UI is not built. Run: npm --prefix web run build",
+                            status=503)  # fmt: skip
 
     def _refuse(self, request: web.Request) -> str | None:
         if request.host not in self.allowed_hosts:

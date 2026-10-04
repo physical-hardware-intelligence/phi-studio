@@ -41,9 +41,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--no-browser", dest="browser", action="store_false",
                    help="Do not open the browser.")  # fmt: skip
     p.add_argument("--data-dir", default=str(STUDIO_DATA),
-                   help="Where Studio keeps evals, config backups and mock calibrations.")  # fmt: skip
+                   help="Where Studio keeps evals, config backups, mock calibrations.")  # fmt: skip
     p.add_argument("--rig-dir", default=None,
-                   help="The folder with robot-config.yaml. Default: this folder, then ~/phi.")  # fmt: skip
+                   help="Folder with robot-config.yaml. Default: here, then ~/phi.")  # fmt: skip
     p.add_argument("--assistant-model", default="",
                    help="Model for the Claude assistant, such as sonnet or opus.")  # fmt: skip
     return p
