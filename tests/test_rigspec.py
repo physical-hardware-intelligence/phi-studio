@@ -160,9 +160,13 @@ def test_placeholder_cameras_stay_out_of_commands():
     cmds = {c["id"]: c for c in spec.commands()}
     assert "--robot.cameras" not in cmds["teleoperate"]["cmd"]
     assert "--robot.cameras" not in cmds["record"]["cmd"]
+    assert "teleoperate_cameras" not in cmds  # no usable camera, so no camera check step
     left_out = [c.feature for c in spec.cameras]
     assert left_out and all(f in cmds["record"]["why"] for f in left_out)
-    assert "leaves out" not in rigspec.parse(SINGLE).commands()[-1]["why"]
+    whole = {c["id"]: c for c in rigspec.parse(SINGLE).commands()}
+    assert "leaves out" not in whole["record"]["why"]
+    assert "--robot.cameras" not in whole["teleoperate"]["cmd"]  # plain teleop: no cameras
+    assert "--robot.cameras" in whole["teleoperate_cameras"]["cmd"]
 
 
 def _args(text: str, cmd_id: str) -> list[str]:
@@ -186,7 +190,8 @@ def test_commands_carry_every_option_the_config_sets():
 def test_camera_commands_keep_only_lerobots_fields():
     s = rigspec.parse(SINGLE_OPTS)
     assert [c.key for c in s.cameras] == ["wrist", "front"] and s.problems == ()
-    cams = [a for a in _args(SINGLE_OPTS, "teleoperate") if a.startswith("--robot.cameras=")]
+    cams = [a for a in _args(SINGLE_OPTS, "teleoperate_cameras")
+            if a.startswith("--robot.cameras=")]
     assert cams == ['--robot.cameras={"front":{"type":"opencv","index_or_path":1,"width":640,'
                     '"height":480,"fps":30}}']  # fmt: skip  # wrist is TBD; hardware is dropped
     rs = rigspec.parse(
@@ -238,7 +243,7 @@ def test_tilde_calibration_dir_is_flagged_and_not_expanded():
 
 def test_camera_name_on_both_levels_is_a_problem():
     s = rigspec.parse(BIMANUAL.replace("    top:", "    wrist:"))
-    assert any("wrist" in p and "bi_so_follower refuses" in p for p in s.problems)
+    assert any("wrist" in p and "bimanual follower refuses" in p for p in s.problems)
 
 
 # -- against LeRobot itself ----------------------------------------------------------------------
@@ -256,6 +261,7 @@ def _parse_cli(cmd: str):
     from lerobot.scripts import (
         lerobot_calibrate,
         lerobot_record,
+        lerobot_replay,
         lerobot_setup_motors,
         lerobot_teleoperate,
     )
@@ -264,8 +270,34 @@ def _parse_cli(cmd: str):
     cls = {"lerobot-calibrate": lerobot_calibrate.CalibrateConfig,
            "lerobot-setup-motors": lerobot_setup_motors.SetupConfig,
            "lerobot-teleoperate": lerobot_teleoperate.TeleoperateConfig,
-           "lerobot-record": lerobot_record.RecordConfig}[tool]  # fmt: skip
+           "lerobot-record": lerobot_record.RecordConfig,
+           "lerobot-replay": lerobot_replay.ReplayConfig}[tool]  # fmt: skip
     return draccus.parse(config_class=cls, args=args)
+
+
+def _parse_argparse_cli(cmd: str, monkeypatch) -> dict:
+    """Run an argparse LeRobot script's own main() on the generated arguments, with the work it
+    would do stubbed out, and return what it would have been called with."""
+    import sys
+
+    from lerobot.scripts import lerobot_dataset_viz, lerobot_find_cameras
+
+    tool, *args = shlex.split(cmd)
+    seen: dict = {}
+    if tool == "lerobot-dataset-viz":
+        monkeypatch.setattr(lerobot_dataset_viz, "LeRobotDataset",
+                            lambda repo_id, **kw: seen.update(repo_id=repo_id, **kw))  # fmt: skip
+        monkeypatch.setattr(lerobot_dataset_viz, "visualize_dataset",
+                            lambda dataset, **kw: seen.update(kw))  # fmt: skip
+        monkeypatch.setattr(lerobot_dataset_viz, "init_logging", lambda: None)
+        main = lerobot_dataset_viz.main
+    else:
+        monkeypatch.setattr(lerobot_find_cameras, "save_images_from_all_cameras",
+                            lambda **kw: seen.update(kw))  # fmt: skip
+        main = lerobot_find_cameras.main
+    monkeypatch.setattr(sys, "argv", [tool, *args])
+    main()  # argparse exits on an unknown flag
+    return seen
 
 
 ALL = pytest.mark.parametrize(
@@ -282,8 +314,11 @@ def test_every_generated_command_parses_with_lerobots_own_cli_config(text, tmp_p
 
     text = text.replace("CALDIR", str(tmp_path / "own"))
     for c in rigspec.parse(text).commands():
-        if c["cmd"] == "lerobot-find-port":
+        assert c["step"] in rigspec.STEPS
+        if c["cmd"] in ("lerobot-find-port", "hf auth login"):
             continue
+        if c["cmd"].startswith(("lerobot-dataset-viz", "lerobot-find-cameras")):
+            continue  # argparse scripts: test_argparse_commands_parse_with_lerobots_own_main
         cfg = _parse_cli(c["cmd"])  # raises on any flag LeRobot does not know
         if c["id"].startswith("setup_motors"):
             assert cfg.device.type in COMPATIBLE_DEVICES
@@ -324,6 +359,29 @@ def test_ids_paths_and_features_match_lerobots_robot_objects(text, tmp_path, mon
             if hasattr(dev.config, k):
                 assert getattr(dev.config, k) == v, (key, k)
     assert list(robot.action_features) == spec.action_features()
+
+
+@needs_lerobot
+def test_argparse_commands_parse_with_lerobots_own_main(monkeypatch):
+    cmds = {c["id"]: c["cmd"] for c in rigspec.parse(SINGLE).commands()}
+    viz = _parse_argparse_cli(cmds["visualize"].replace("<hf_user>/<recorded>", "u/d_1"),
+                              monkeypatch)  # fmt: skip
+    assert viz["repo_id"] == "u/d_1" and viz["episodes"] == [0]
+    cams = _parse_argparse_cli(cmds["find_cameras"], monkeypatch)
+    assert cams["camera_type"] == "opencv"
+
+
+def test_hf_login_is_the_installed_hub_cli():
+    import shutil
+    import subprocess
+
+    hf = shutil.which("hf")
+    if hf is None:
+        pytest.skip("the hf CLI is not installed here")
+    cmds = {c["id"]: c["cmd"] for c in rigspec.parse(SINGLE).commands()}
+    assert cmds["hf_login"] == "hf auth login"
+    r = subprocess.run([hf, "auth", "login", "--help"], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and "token" in r.stdout.lower()
 
 
 # -- lerobot-rollout -----------------------------------------------------------------------------
