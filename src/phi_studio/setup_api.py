@@ -299,6 +299,10 @@ class SetupApi:
 
         found = await asyncio.to_thread(align.list_datasets)
         client.push({"type": "align_datasets", "datasets": found})
+        # WHY: a reloaded page, or a second window, asks for datasets first; a session already
+        # running keeps streaming ticks, so tell it what they belong to.
+        if self.align is not None:
+            client.push(self.align.summary())
 
     async def start_align(self, client: Client, msg: dict[str, Any]) -> None:
         from phi_studio import align, cameras
@@ -427,13 +431,13 @@ class AlignSession:
         try:
             while True:
                 if time.monotonic() - self.started > ALIGN_IDLE_S:
-                    why = "Stopped after ten minutes, to free the cameras. Start it again to go on."
-                    await self.api.stop_align(None, {"why": why})
+                    await self._end("Stopped after ten minutes, to free the cameras. Start it "
+                                    "again to go on.")  # fmt: skip
                     return
                 busy = lerobot_busy(studio)
                 if busy:
-                    why = f"Stopped: the terminal started {busy}, which needs the cameras."
-                    await self.api.stop_align(None, {"why": why})
+                    await self._end(f"Stopped: the terminal started {busy}, which needs the "
+                                    "cameras.")  # fmt: skip
                     return
                 for src, key in list(self.assignment.items()):
                     cam = self.cams.get(src)
@@ -452,6 +456,14 @@ class AlignSession:
                 await asyncio.sleep(ALIGN_PERIOD_S)
         except asyncio.CancelledError:
             pass
+        except Exception as e:  # WHY: a crash must still free the cameras and say why
+            await self._end(f"Camera align stopped on an error: {type(e).__name__}: {e}")
+
+    async def _end(self, why: str) -> None:
+        """Stop this session from inside its own loop. WHY the check: a newer session may have
+        replaced this one, and stopping it would be wrong."""
+        if self.api.align is self:
+            await self.api.stop_align(None, {"why": why})
 
     async def _close(self) -> None:
         cams, self.cams = self.cams, {}

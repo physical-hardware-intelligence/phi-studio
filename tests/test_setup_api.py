@@ -267,6 +267,11 @@ def test_camera_align_matches_streams_offsets_and_releases(tmp_path: Path,
                                    "observation.images.top": "top"}  # fmt: skip
             assert set(s["references"]) == set(refs)
             tick = await until(a, lambda d: d["type"] == "align_tick")
+            late = await ws(session, server.port)  # a reloaded page learns of the running session
+            await until(late, lambda d: d["type"] == "hello")
+            await late.send_str(json.dumps({"cmd": "align_datasets"}))
+            await until(late, lambda d: d["type"] == "align_datasets")
+            assert (await until(late, lambda d: d["type"] == "align_session"))["root"] == root
             assert tick["dx"] == 4.0 and tick["picture"].startswith("data:image/jpeg")
             assert sorted(FakeCam.opened) == [4, 5]
 
@@ -282,6 +287,44 @@ def test_camera_align_matches_streams_offsets_and_releases(tmp_path: Path,
             assert "lerobot-record" in stop["why"]
             assert sorted(FakeCam.closed) == [4, 4, 5, 5]
             assert s2  # silence the unused name
+        finally:
+            await session.close()
+            await server.close()
+
+    asyncio.run(go())
+
+
+def test_a_crash_while_measuring_frees_the_cameras_and_says_why(tmp_path: Path,
+                                                                monkeypatch: Any) -> None:
+    from phi_studio import align, cameras
+
+    root = str(tmp_path / "ds")
+    refs = {"observation.images.front": np.full((480, 640, 3), 90, np.uint8)}
+    monkeypatch.setattr(align, "list_datasets", lambda: [{"root": root, "name": "ds"}])
+    monkeypatch.setattr(align, "references", lambda r, e, cache_dir=None: {
+        "root": r, "episode": e, "frame": 0, "motion": 0.0, "images": refs, "physical": {}})
+    monkeypatch.setattr(cameras, "probe", lambda idx, timeout_s=3.0: [
+        {"source": 4, "ok": True, "thumbnail": jpeg((90, 90, 90))}])  # fmt: skip
+    monkeypatch.setattr(align, "match_cameras", lambda live, r: {
+        "assignment": {4: "observation.images.front"}, "scores": {4: {}}, "unsure": False,
+        "why": None, "unmatched_refs": []})  # fmt: skip
+
+    def broken(live: Any, ref: Any) -> dict[str, Any]:
+        raise RuntimeError("cv2 fell over")
+
+    monkeypatch.setattr(align, "measure", broken)
+    monkeypatch.setattr(cameras, "RealCamera", FakeCam)
+    FakeCam.opened, FakeCam.closed = [], []
+
+    async def go() -> None:
+        studio, server, session = await started(tmp_path)
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            await a.send_str(json.dumps({"cmd": "align_start", "root": root, "episode": 0}))
+            stop = await until(a, lambda d: d["type"] == "align_stopped", timeout=5)
+            assert "cv2 fell over" in stop["why"]
+            assert FakeCam.closed == [4] and studio.setup_api.align is None  # type: ignore[attr-defined]
         finally:
             await session.close()
             await server.close()

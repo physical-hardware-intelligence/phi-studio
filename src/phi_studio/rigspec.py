@@ -457,10 +457,16 @@ def lerobot_commands(spec: RigSpec) -> list[dict[str, str]]:
                "so the dataset gets no frames from " + ("it." if len(left_out) == 1 else "them.")
                if left_out else "")  # fmt: skip
         # keyboard_input.py:160-170 keys; lerobot_record.py:431-438 refuses eval_ and stamps the
-        # name (configs/dataset.py stamp_repo_id); push_to_hub defaults to true (dataset.py:43)
+        # name (configs/dataset.py stamp_repo_id); push_to_hub defaults to true (dataset.py:43).
+        # Esc sets stop_recording, so the loop saves the episode in progress; Ctrl-C raises out of
+        # the loop, and the finally block (lerobot_record.py:517-538) finalizes and uploads only
+        # the episodes already saved. Studio's Stop, and Esc in Studio, send Ctrl-C (terminal.ts).
         out.append(_cmd("record", "record", "Record a dataset",
-                        "Right arrow ends an episode early, left arrow records it again, Esc "
-                        "stops. LeRobot adds the date and time to the name, like "
+                        "LeRobot's keys: right arrow ends an episode early, left arrow records "
+                        "it again, Esc stops and keeps the episode in progress. Studio's Stop, "
+                        "and Esc in this window, send Ctrl-C instead: saved episodes are kept "
+                        "and uploaded, the one in progress is dropped. LeRobot adds the date "
+                        "and time to the name, like "
                         "_20261004_153000, so later steps need that full name. Names starting "
                         "with eval_ are refused. It uploads to the Hub at the end unless you add "
                         "--dataset.push_to_hub=false." + gap,

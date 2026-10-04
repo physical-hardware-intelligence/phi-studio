@@ -1,5 +1,6 @@
 import { Check, Copy, Play } from "lucide-react";
 import { useState } from "react";
+import { setup, useSetup } from "../lib/setup";
 import { useStudio } from "../lib/studio";
 import { shortCommand, terminal, useTerminal } from "../lib/terminal";
 
@@ -8,6 +9,7 @@ const BLANKS: Record<string, { label: string; hint: string; pattern?: RegExp }> 
   hf_user: { label: "Hugging Face user", hint: "your user or org on the Hub", pattern: /^[A-Za-z0-9][\w.-]*$/ },
   dataset: { label: "Dataset name", hint: "letters, digits, - and _", pattern: /^[\w.-]+$/ },
   task: { label: "Task", hint: "what the robot should do, in words; the policy reads this" },
+  recorded: { label: "Recorded dataset", hint: "the full name with the date that record printed", pattern: /^[\w.-]+$/ },
 };
 const label = (name: string) => BLANKS[name]?.label ?? name.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 
@@ -18,10 +20,14 @@ export function fill(cmd: string, values: Record<string, string>): string {
 }
 
 /** One flag per line with a trailing backslash, the way LeRobot's docs print them. The copied text is the
- * same, and a shell runs it as one command. With `run`, a Run button types it into the terminal panel. */
+ * same, and a shell runs it as one command. With `run`, a Run button types it into the terminal panel.
+ * Blanks are shared by every command and kept across reloads (lib/setup.ts): a name typed for record is
+ * already there for replay. The Hugging Face user starts as robot-config.yaml's dataset.hf_user. */
 export function CommandBlock({ cmd, wrap = true, run = false }: { cmd: string; wrap?: boolean; run?: boolean }) {
   const blanks = [...new Set([...cmd.matchAll(/<([a-z_]+)>/g)].map((m) => m[1]))];
-  const [values, setValues] = useState<Record<string, string>>({});
+  const typed = useSetup((s) => s.blanks);
+  const hfUser = useStudio((s) => s.files.index?.lerobot?.hf_user ?? null);
+  const values: Record<string, string> = { ...(hfUser ? { hf_user: hfUser } : {}), ...typed };
   const filled = fill(cmd, values);
   const text = wrap ? filled.split(/ (?=--|'--)/).join(" \\\n  ") : filled;
   const [done, setDone] = useState(false);
@@ -43,7 +49,7 @@ export function CommandBlock({ cmd, wrap = true, run = false }: { cmd: string; w
             <label key={b} className="field cmd-blank">
               <span className="field-label">{label(b)}</span>
               <input className="input" value={values[b] ?? ""} placeholder={BLANKS[b]?.hint}
-                onChange={(e) => setValues({ ...values, [b]: e.target.value })} spellCheck={false} />
+                onChange={(e) => setup.setBlank(b, e.target.value)} spellCheck={false} />
             </label>
           ))}
         </div>

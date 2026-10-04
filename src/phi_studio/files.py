@@ -84,6 +84,11 @@ def lerobot_calibration_dir() -> Path:
     return Path(os.getenv("HF_LEROBOT_HOME", hf_home / "lerobot")).expanduser() / "calibration"
 
 
+def _text(v: Any) -> str | None:
+    """A free-text note from the config (such as a camera's hardware name), or None."""
+    return v.strip() if isinstance(v, str) and v.strip() else None
+
+
 def default_roots(code: Path, data_dir: Path | None, rig_dir: Path | None = None) -> list[Root]:
     """Studio's own code, the rig folder (the phi checkout with robot-config.yaml), LeRobot's
     calibration folder and Studio's data. WHY the main checkout of the rig folder: git keeps
@@ -259,7 +264,8 @@ class Files:
             return {"file": ref, "bimanual": spec.bimanual, "arms": arms,
                     "hf_user": hf_user if isinstance(hf_user, str) and hf_user != "TBD" else None,
                     "cameras": [{"key": c.key, "side": c.side, "feature": c.feature,
-                                 "type": c.fields.get("type"), "source": c.source}
+                                 "type": c.fields.get("type"), "source": c.source,
+                                 "hardware": _text(c.fields.get("hardware"))}
                                 for c in spec.cameras],
                     "features": spec.action_features(), "problems": list(spec.problems),
                     "commands": spec.commands()}  # fmt: skip
