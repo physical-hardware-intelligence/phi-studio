@@ -128,7 +128,7 @@ function CommandsPanel({ lr }: { lr: LeRobotView }) {
             <div className="cmd-body">
               <div className="cmd-title">{c.title}</div>
               <p className="cmd-why">{c.why}</p>
-              <CommandBlock cmd={c.cmd} />
+              <CommandBlock cmd={c.cmd} run />
             </div>
           </li>
         ))}

@@ -2,6 +2,7 @@ import * as Tooltip from "@radix-ui/react-tooltip";
 import { Suspense, lazy, useEffect, type ComponentType } from "react";
 import { Boundary } from "./components/Boundary";
 import { Sidebar } from "./components/Sidebar";
+import { TerminalDock } from "./components/TerminalDock";
 import { TopBar } from "./components/TopBar";
 import { getTheme, setTheme, studio, useRoute, useStudio, type Route } from "./lib/studio";
 import { Calibrate } from "./pages/Calibrate";
@@ -57,6 +58,7 @@ export function App() {
           <main className="content" key={route}>
             <Boundary what={`The ${page.title} page`}><Page /></Boundary>
           </main>
+          <Boundary what="The terminal"><TerminalDock /></Boundary>
         </div>
         {assist && (
           <Boundary what="Claude" className="assist">

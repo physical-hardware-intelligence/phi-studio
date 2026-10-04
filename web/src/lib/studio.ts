@@ -175,6 +175,7 @@ export interface ChecksState { running: boolean; at: number | null; ms: number |
 
 export interface Snapshot {
   link: Link;
+  client: string | null; // this window's id on the server, which the terminal socket presents
   mock: boolean;
   control: boolean;
   state: StateMsg | null;
@@ -209,7 +210,7 @@ class Studio {
   private retryTimer: number | null = null;
   private started = false;
   snap: Snapshot = {
-    link: "connecting", mock: false, control: false, state: null, identity: [],
+    link: "connecting", client: null, mock: false, control: false, state: null, identity: [],
     telemetry: null, errors: [], workerExit: null, cameras: {}, activity: [], rig: null, evals: null,
     calibrated: null,
     assist: { open: false, status: null, turns: [], focus: null, context: null },
@@ -244,7 +245,11 @@ class Studio {
     this.connect();
   }
 
+  /** Run before every Stop. The terminal registers one: Stop also ends a LeRobot command running there. */
+  readonly onStop: (() => void)[] = [];
+
   stop(): void {
+    for (const hook of this.onStop) hook();
     if (this.send({ cmd: "stop" })) return;
     // WHY say so: a silent no-op Stop is the worst failure a stop button can have.
     this.localError(
@@ -453,7 +458,7 @@ class Studio {
       // telemetry and camera status stream again within a tick, so a value kept from an earlier server
       // (a restarted Studio) would otherwise stay on screen for good. Checks keep their own timestamp.
       case "hello":
-        this.set({ mock: m.mock, control: m.control, workerExit: null, identity: [], telemetry: null, cameras: {} });
+        this.set({ mock: m.mock, control: m.control, client: m.client ?? null, workerExit: null, identity: [], telemetry: null, cameras: {} });
         break;
       case "control":
         if ("control" in m) this.set({ control: m.control });

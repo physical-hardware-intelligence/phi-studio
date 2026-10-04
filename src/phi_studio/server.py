@@ -40,6 +40,7 @@ from phi.studio.assistant import ClaudeCLI, Conversation
 from phi.studio.checks import Inputs, run_checks
 from phi.studio.evals import EvalError, EvalStore
 from phi.studio.files import FileError, Files, default_roots, list_ports
+from phi.studio.terminal import Terminal
 
 STATIC = Path(__file__).parent / "static"
 log = logging.getLogger(__name__)
@@ -68,6 +69,9 @@ class Client:
 
     def __init__(self, ws: web.WebSocketResponse) -> None:
         self.ws = ws
+        # WHY an id: the terminal is a second socket, and it must know whether its window has
+        # control (only that window may type). The page sends this id when it opens the terminal.
+        self.id = secrets.token_urlsafe(9)
         self.events: list[dict[str, Any]] = []  # state, identity, errors: every one delivered
         self.telemetry: dict[str, Any] | None = None
         self.frames: dict[str, dict[str, Any]] = {}
@@ -133,6 +137,10 @@ class Studio:
         self.code_root = code_root or CODE_ROOT
         roots = default_roots(self.code_root, self.data_dir)
         self.files = Files(roots)
+        self.terminal: Terminal | None = None  # started when a window first opens the panel
+        self.term_socks: dict[web.WebSocketResponse, str] = {}  # each terminal socket's window id
+        self.term_running: dict[str, Any] | None = None  # the command in the foreground, if any
+        self.term_watch: asyncio.Task[None] | None = None
         self.cli = ClaudeCLI(cwd=roots[0].path, dirs=[r.path for r in roots[1:]],
                              model=assistant_model)  # fmt: skip
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -231,6 +239,7 @@ class Studio:
     def app(self) -> web.Application:
         app = web.Application()
         app.router.add_get("/ws", self.ws_handler)
+        app.router.add_get("/terminal", self.terminal_handler)
         app.router.add_get("/api/health", self.health)
         app.router.add_get("/", self.index)
         if (STATIC / "assets").is_dir():
@@ -247,6 +256,12 @@ class Studio:
     async def _on_shutdown(self, app: web.Application) -> None:
         for c in list(self.clients):
             await c.ws.close()
+        for ws in list(self.term_socks):
+            await ws.close()
+        if self.term_watch is not None:
+            self.term_watch.cancel()
+        if self.terminal is not None:
+            self.terminal.close()  # the shell and anything it runs end with Studio
         self.stop_worker()
 
     async def health(self, request: web.Request) -> web.Response:
@@ -281,6 +296,7 @@ class Studio:
         sender = asyncio.create_task(client.run())
         try:  # WHY everything after clients.add is inside: a failure must still run the cleanup
             client.push({"type": "hello", "control": self.controller is client,
+                         "client": client.id,
                          "mock": self.spec.get("kind", "mock") == "mock"})  # fmt: skip
             for kind in REPLAYED:
                 if kind in self.last:
@@ -299,10 +315,135 @@ class Studio:
                 self.controller = None
                 for other in self.clients:
                     other.push({"type": "control", "available": True})
+                self._term_status()
             sender.cancel()
             if client.conversation is not None:
                 await client.conversation.aclose()
         return ws
+
+    # -- terminal -------------------------------------------------------------------------------
+    def _term_cwd(self) -> Path:
+        r = self.files.roots.get("repo") or self.files.roots["code"]
+        return r.path
+
+    def _may_type(self, window: str) -> bool:
+        return self.controller is not None and secrets.compare_digest(
+            self.controller.id.encode(), window.encode()
+        )
+
+    def _term_status(self) -> None:
+        t = self.terminal
+        for ws, window in list(self.term_socks.items()):
+            msg = {"t": "status", "alive": bool(t and t.alive), "running": self.term_running,
+                   "typing": self._may_type(window)}  # fmt: skip
+            asyncio.ensure_future(self._term_send(ws, msg))
+
+    @staticmethod
+    async def _term_send(ws: web.WebSocketResponse, msg: dict[str, Any]) -> None:
+        if ws.closed:
+            return
+        try:
+            await ws.send_str(json.dumps(msg))
+        except (ConnectionError, RuntimeError):  # the window closed while this was queued
+            pass
+
+    async def _watch_terminal(self) -> None:
+        """Polls which command holds the terminal, twice a second, while any panel is open."""
+        while self.term_socks and self.terminal is not None:
+            now = await asyncio.to_thread(self.terminal.running)
+            if (now or {}).get("command") != (self.term_running or {}).get("command"):
+                self.term_running = now
+                self._term_status()
+            await asyncio.sleep(0.5)
+        self.term_watch = None
+
+    async def terminal_handler(self, request: web.Request) -> web.StreamResponse:
+        why = self._refuse(request)
+        if why:
+            return web.Response(status=403, text=why)
+        window = request.query.get("client", "")
+        ws = web.WebSocketResponse(heartbeat=10, max_msg_size=1 << 20)
+        await ws.prepare(request)
+        loop = asyncio.get_running_loop()
+        if self.terminal is None:
+            self.terminal = Terminal(self._term_cwd())
+            self.terminal.on_exit = self._term_status
+        if not self.terminal.alive:
+            self.terminal.start(loop)
+        term = self.terminal
+        # WHY one queue per socket, filled with the history before the listener is added (no
+        # await between): output that arrives meanwhile is neither lost nor sent out of order.
+        queue: asyncio.Queue[bytes] = asyncio.Queue()
+        if term.history():
+            queue.put_nowait(term.history())
+        term.listeners.add(queue.put_nowait)
+
+        async def pump() -> None:
+            while not ws.closed:
+                data = await queue.get()
+                while not queue.empty() and len(data) < 65536:  # coalesce a burst into one frame
+                    data += queue.get_nowait()
+                await ws.send_bytes(data)
+
+        sender = loop.create_task(pump())
+        self.term_socks[ws] = window
+        self._term_status()
+        if self.term_watch is None:
+            self.term_watch = loop.create_task(self._watch_terminal())
+        try:
+            async for m in ws:
+                if m.type == WSMsgType.TEXT:
+                    await self._term_message(ws, window, m.data)
+        finally:
+            term.listeners.discard(queue.put_nowait)
+            self.term_socks.pop(ws, None)
+            sender.cancel()
+        return ws
+
+    async def _term_message(self, ws: web.WebSocketResponse, window: str, data: str) -> None:
+        try:
+            msg = json.loads(data)
+            kind = msg["t"]
+        except (ValueError, KeyError, TypeError):
+            return
+        term = self.terminal
+        if kind == "resize":  # any window may size its own view; the shell gets the newest
+            cols, rows = msg.get("cols"), msg.get("rows")
+            if term is not None and isinstance(cols, int) and isinstance(rows, int):
+                term.resize(cols, rows)
+            return
+
+        def refuse(message: str, fix: str = "") -> None:
+            asyncio.ensure_future(self._term_send(ws, {"t": "error", "message": message,
+                                                       "fix": fix}))  # fmt: skip
+
+        if not self._may_type(window):
+            refuse("Another window has control.", "Take control to use the terminal here.")
+            return
+        if kind == "restart":
+            if term is not None:
+                term.close()
+                term.start(asyncio.get_running_loop())
+                self._term_status()
+            return
+        if term is None or not term.alive:
+            refuse("The shell is not running.", "Press Restart.")
+            return
+        if kind == "in" and isinstance(msg.get("d"), str):
+            term.write(msg["d"].encode())
+        elif kind == "interrupt":
+            term.interrupt()
+        elif kind == "run" and isinstance(msg.get("cmd"), str) and msg["cmd"].strip():
+            cmd = msg["cmd"].strip()
+            busy = await asyncio.to_thread(term.running)
+            if busy:
+                # WHY refuse: typed into a running command, the text becomes its input (an
+                # "Enter" to lerobot-calibrate's prompt), not a new command.
+                refuse(f"The terminal is still running {busy['command'] or 'a command'}.",
+                       "Wait for it to finish, or stop it with Ctrl-C.")  # fmt: skip
+                return
+            self._note("state", f"Ran in the terminal: {cmd[:200]}")
+            term.write(cmd.encode() + b"\r")
 
     def _from_client(self, client: Client, data: str) -> None:
         try:
@@ -319,6 +460,7 @@ class Studio:
                 self.controller.push({"type": "control", "control": False})
             self.controller = client
             client.push({"type": "control", "control": True})
+            self._term_status()
             return
         if cmd in READ_ONLY:
             asyncio.get_running_loop().create_task(self._read_only(client, cmd, msg))

@@ -4,7 +4,7 @@
 .shell.has-assist { grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--assist-w); }
 /* WHY minmax(0, 1fr) columns: an implicit auto column grows to the top bar's min-content (a long subtitle
    never wraps), which pushed Stop under the Claude panel on Checks and Files. Measured 2026-10-04. */
-.main { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; height: 100%; container: main / inline-size; }
+.main { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; height: 100%; container: main / inline-size; }
 /* A narrow main column (a half-screen window, or Claude open) compacts the top bar before Stop can be
    pushed out of it: shortcut hints, the Ask Claude label and the p99 go first. */
 @container main (max-width: 760px) {
@@ -542,9 +542,11 @@ fieldset.form { border: 0; margin: 0; min-width: 0; }
 .cmd-body { min-width: 0; display: grid; gap: 6px; }
 .cmd-title { font-weight: 600; line-height: 1.6875rem; }
 .cmd-why { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.4375rem; }
-.cmd-block { position: relative; background: var(--bg-sunken); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); }
-.cmd-block pre { margin: 0; padding: 10px 44px 10px 12px; overflow-x: auto; font: 400 var(--text-sm)/1.5rem var(--font-mono); color: var(--text-primary); }
-.cmd-copy { position: absolute; top: 4px; right: 4px; }
+.cmd-block { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; background: var(--bg-sunken); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); }
+.cmd-block pre { margin: 0; padding: 10px 12px; overflow-x: auto; font: 400 var(--text-sm)/1.5rem var(--font-mono); color: var(--text-primary); }
+.cmd-actions { display: flex; gap: 4px; padding: 5px; }
+.cmd-blanks { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-3); margin-bottom: var(--space-3); }
+.cmd-why-not { margin-top: 6px; color: var(--text-tertiary); font-size: var(--text-sm); }
 .setup-keys { display: grid; gap: var(--space-2); }
 .setup-keys .field-label + .key-chips, .setup-keys .field-label + .setup-cams, .setup-keys .field-label + p { margin-bottom: var(--space-3); }
 .key-chips { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -610,3 +612,18 @@ fieldset.form { border: 0; margin: 0; min-width: 0; }
 .guide-table td:first-child { width: 30%; }
 .guide-keys td:first-child { width: 22%; white-space: nowrap; }
 
+/* Terminal panel (TerminalDock.tsx): along the bottom of the work area, under every page. */
+.term-dock { position: relative; display: grid; grid-template-rows: auto auto minmax(0, 1fr); border-top: 1px solid var(--border-strong); background: var(--bg-sunken); min-height: 160px; }
+.term-dock.is-hidden { display: none; }
+.term-grip { position: absolute; top: -4px; left: 0; right: 0; height: 8px; cursor: ns-resize; z-index: 1; }
+.term-head { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--border-subtle); background: var(--bg-panel); min-width: 0; }
+.term-head > svg { width: 18px; height: 18px; color: var(--text-secondary); flex: none; }
+.term-title { font-weight: 600; }
+.term-status { color: var(--text-secondary); font-size: var(--text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 40ch; }
+.term-status.is-busy { color: var(--info-text); }
+.term-note { color: var(--warn-text); font-size: var(--text-sm); white-space: nowrap; }
+.term-spacer { flex: 1; }
+.term-error { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-4); background: var(--warn-subtle); color: var(--warn-text); }
+.term-error > span { flex: 1; }
+.term-body { min-height: 0; padding: var(--space-2) 0 0 var(--space-3); }
+.term-body .xterm { height: 100%; }

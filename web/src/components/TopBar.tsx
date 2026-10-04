@@ -1,6 +1,7 @@
 import * as Tooltip from "@radix-ui/react-tooltip";
-import { CircleHelp, MessageSquareText, OctagonX } from "lucide-react";
+import { CircleHelp, MessageSquareText, OctagonX, SquareTerminal } from "lucide-react";
 import { go, studio, useStudio, type Route } from "../lib/studio";
+import { terminal, useTerminal } from "../lib/terminal";
 import { StatePill } from "./StatePill";
 
 // The page header. Left: where you are. Right, identical on every page: session state, loop rate,
@@ -12,8 +13,11 @@ export function TopBar({ route, title, sub, onStop }: { route: Route; title: str
   const link = useStudio((s) => s.link);
   const assist = useStudio((s) => s.assist.open);
   const anyTorque = useStudio((s) => Object.values(s.telemetry?.arms ?? {}).some((a) => a.torque));
-  // Stop is never disabled while any servo holds torque.
-  const live = anyTorque || state?.state === "ARMED" || state?.state === "MOVING";
+  const termOpen = useTerminal((s) => s.open);
+  const lerobotRunning = useTerminal((s) => !!s.running && /\blerobot-/.test(s.running.command));
+  // Stop is never disabled while any servo holds torque, or while a LeRobot command in the terminal may be
+  // driving the arms (Stop sends it Ctrl-C).
+  const live = anyTorque || state?.state === "ARMED" || state?.state === "MOVING" || lerobotRunning;
 
   return (
     <header className="topbar">
@@ -43,6 +47,10 @@ export function TopBar({ route, title, sub, onStop }: { route: Route; title: str
             <CircleHelp aria-hidden />
           </button>
         )}
+        <button className={`btn btn-sm ask-btn ${termOpen ? "is-on" : ""}`} onClick={() => terminal.setOpen(!termOpen)}
+          aria-pressed={termOpen} aria-label="Terminal" title="Terminal on this Mac">
+          <SquareTerminal aria-hidden /> <span className="ask-btn-label">Terminal</span>
+        </button>
         <button className={`btn btn-sm ask-btn ${assist ? "is-on" : ""}`} onClick={() => studio.toggleAssistant()}
           aria-pressed={assist} aria-keyshortcuts="Meta+J" aria-label="Ask Claude" title="Ask Claude (⌘J)">
           <MessageSquareText aria-hidden /> <span className="ask-btn-label">Ask Claude</span> <span className="kbd">⌘J</span>
