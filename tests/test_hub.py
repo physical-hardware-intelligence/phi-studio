@@ -698,8 +698,8 @@ def test_the_fit_after_mapping_checks_the_camera_that_feeds_it():
     spec = rigspec.parse(THREE)
     mapping = {_k("front")[0]: _k("camera1")[0], _k("top")[0]: _k("camera2")[0]}
     out = hub.compatibility(hub.as_seen_by_rig(model, mapping), spec)
-    assert _problems(out) == ["The model was trained on 224x224 frames from `top`; the rig's "
-                              "`top` camera is set to 640x480."]  # fmt: skip
+    assert _problems(out) == ["The model's `camera2` camera was trained on 224x224 frames; the "
+                              "rig's `top` camera, which feeds it, is set to 640x480."]  # fmt: skip
     assert [w for w in out if "wrist" in w and w.startswith(hub.WARNING)]
 
 
@@ -726,3 +726,40 @@ def test_inspect_local_reads_config_json_and_size_follows_links(tmp_path):
     assert hub.snapshot_size(snap) == 1000 + len(json.dumps(ACT_CONFIG))
     with pytest.raises(hub.HubError, match="Cannot read"):
         hub.inspect_local(tmp_path / "nowhere")
+
+
+def test_missing_cameras_share_one_line_and_the_fix_fits_the_rig():
+    three = _model({"camera1": (3, 480, 640), "camera2": (3, 480, 640), "camera3": (3, 480, 640)})
+    out = _problems(hub.compatibility(three, rigspec.parse(THREE)))
+    assert out == ["This model expects cameras named `camera1`, `camera2` and `camera3`; your rig "
+                   "has `wrist`, `front` and `top`. Map one of your cameras to each when you run "
+                   "the model, or rename cameras in robot-config.yaml."]  # fmt: skip
+    # robot-config.yaml with every index_or_path still TBD: mapping is not possible yet
+    tbd = rigspec.parse(THREE.replace("index_or_path: 0", "index_or_path: TBD")
+                        .replace("index_or_path: 1", "index_or_path: TBD")
+                        .replace("index_or_path: 2", "index_or_path: TBD"))  # fmt: skip
+    out = _problems(hub.compatibility(three, tbd))
+    assert len(out) == 1 and "gives none of them a device yet" in out[0] and "map them." in out[0]
+    no_cams = rigspec.parse(THREE.split("cameras:")[0])
+    out = _problems(hub.compatibility(_model({"camera1": (3, 480, 640)}), no_cams))
+    assert out == ["This model expects a camera named `camera1`; your rig has no cameras. Add a "
+                   "camera to robot-config.yaml first."]  # fmt: skip
+
+
+@pytest.mark.parametrize(("ptype", "extra", "resizes"), [
+    ("smolvla", {}, True),  # LeRobot's default resize_imgs_with_padding is (512, 512)
+    ("smolvla", {"resize_imgs_with_padding": None}, False),
+    ("pi05", {}, True),
+    ("xvla", {}, False),
+    ("xvla", {"resize_imgs_with_padding": [224, 224]}, True),
+    ("act", {}, False),
+    ("diffusion", {}, False),
+])  # fmt: skip
+def test_a_policy_that_resizes_frames_turns_a_size_mismatch_into_a_note(ptype, extra, resizes):
+    cfg = {"type": ptype, **extra, **_model({"front": (3, 256, 256)})}
+    info = hub._policy(cfg, "config.json")
+    assert info["resizes_images"] is resizes
+    out = hub.compatibility(info, rigspec.parse(SINGLE))
+    size = [x for x in out if "trained on 256x256 frames" in x]
+    assert len(size) == 1 and size[0].startswith(hub.WARNING) is resizes
+    assert (f"`{ptype}` scales and pads" in size[0]) is resizes

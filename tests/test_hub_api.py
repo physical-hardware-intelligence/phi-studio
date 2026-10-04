@@ -143,12 +143,35 @@ def test_inspect_splits_problems_from_warnings_and_proposes_a_mapping(api, monke
     run(api.inspect(c, {"repo_id": "https://huggingface.co/me/act"}))
     m = c.pushed[-1]
     assert m["type"] == "hub_model" and m["error"] is None and m["local"] is None
-    assert len(m["problems"]) == 2 and all("your rig has" in p for p in m["problems"])
-    assert all(not w.startswith(hub.WARNING) for w in m["warnings"]) and len(m["warnings"]) == 3
     # wrist has no device, so only front and top can be mapped, in the rig's order
     assert m["rename_map"] == {IMG + "front": IMG + "camera1", IMG + "top": IMG + "camera2"}
+    # the fit is checked after that guess, and the guess is the first note
+    assert m["problems"] == []
+    assert m["warnings"][0] == ("Studio guesses that `front` feeds `camera1` and `top` feeds "
+                                "`camera2`, from the camera names and their order. Check it, and "
+                                "change it when you run the model.")  # fmt: skip
+    assert len(m["warnings"]) == 2 and "`wrist`" in m["warnings"][1]
+    assert all(not w.startswith(hub.WARNING) for w in m["warnings"])
     assert [c["name"] for c in m["rig"]["cameras"]] == ["front", "top", "wrist"]
     assert m["rig"]["cameras"][2]["usable"] is False and m["rig"]["joints"] == 6
+
+
+def test_inspect_shows_what_is_still_wrong_after_the_guessed_mapping(api, monkeypatch):
+    info = _info(("gripper", "scene"))
+    info["input_features"][IMG + "scene"]["shape"] = [3, 720, 1280]
+    info["cameras"][IMG + "scene"] = [3, 720, 1280]
+    monkeypatch.setattr(hub, "inspect_model", lambda rid, rev: info)
+    c = Client()
+    run(api.inspect(c, {"repo_id": "me/act"}))
+    assert c.pushed[-1]["problems"] == ["The model's `scene` camera was trained on 1280x720 "
+                                        "frames; the rig's `top` camera, which feeds it, is set "
+                                        "to 640x480."]  # fmt: skip
+    # with no camera that has a device there is no guess, and the names problem stays
+    monkeypatch.setattr(api, "proposal", lambda info, spec: {})
+    run(api.inspect(c, {"repo_id": "me/act"}))
+    m = c.pushed[-1]
+    assert m["rename_map"] == {} and "cameras named `gripper` and `scene`" in m["problems"][0]
+    assert not any(w.startswith("Studio guesses") for w in m["warnings"])
 
 
 def test_inspect_error_is_one_message(api, monkeypatch):

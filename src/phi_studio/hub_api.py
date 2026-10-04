@@ -95,6 +95,20 @@ class HubApi:
         rig = [c.feature for c in spec.cameras if c.source is not None]
         return hub.propose_rename_map(list(info.get("cameras") or {}), rig)
 
+    def guessed_fit(self, info: dict[str, Any], spec: RigSpec | None) -> dict[str, Any]:
+        """The fit after Studio's proposed camera mapping, with the guess stated first.
+        WHY: checked before mapping, a model whose names differ shows only "map a camera" and
+        hides what is still wrong once the names line up, such as a frame size."""
+        rename = self.proposal(info, spec)
+        out = self.fit(info, spec, rename)
+        if rename:
+            pairs = [f"`{r.removeprefix(hub.IMAGES)}` feeds `{m.removeprefix(hub.IMAGES)}`"
+                     for r, m in rename.items()]  # fmt: skip
+            out["warnings"].insert(0, f"Studio guesses that {hub.join_and(pairs)}, from the "
+                                   "camera names and their order. Check it, and change it when "
+                                   "you run the model.")  # fmt: skip
+        return {**out, "rename_map": rename}
+
     # -- read-only commands ---------------------------------------------------------------------
     async def whoami(self, client: Any, msg: dict[str, Any]) -> None:
         if self.who_lock is None:
@@ -146,7 +160,7 @@ class HubApi:
         spec, rig = await asyncio.to_thread(self.rig)
         here = await asyncio.to_thread(self._local_paths)
         client.push({"type": "hub_model", "asked": asked, "error": None, "info": info,
-                     "rig": rig, **self.fit(info, spec), "rename_map": self.proposal(info, spec),
+                     "rig": rig, **self.guessed_fit(info, spec),
                      "local": here.get((info["repo_id"], info["revision"]))})  # fmt: skip
 
     def _local_paths(self) -> dict[tuple[str, str], str]:
@@ -165,8 +179,8 @@ class HubApi:
                 row["error"] = str(e)
             else:
                 row |= {"cameras": info["cameras"], "state_shape": info["state_shape"],
-                        "action_shape": info["action_shape"], **self.fit(info, spec),
-                        "rename_map": self.proposal(info, spec)}  # fmt: skip
+                        "action_shape": info["action_shape"],
+                        **self.guessed_fit(info, spec)}  # fmt: skip
             out.append(row)
         return out
 

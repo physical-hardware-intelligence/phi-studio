@@ -369,7 +369,24 @@ def _policy(cfg: dict[str, Any], where: str) -> dict[str, Any]:
         "cameras": {k: f["shape"] for k, f in inputs.items() if f["type"] == "VISUAL"},
         "state_shape": inputs[STATE]["shape"] if STATE in inputs else None,
         "action_shape": outputs[ACTION]["shape"] if ACTION in outputs else None,
+        "resizes_images": _resizes_images(ptype, cfg),
     }
+
+
+def _resizes_images(ptype: str, cfg: dict[str, Any]) -> bool:
+    """True when the policy scales and pads every camera frame to its own size before the model
+    sees it, so a camera at another resolution still runs. LeRobot itself never checks frame
+    sizes (rollout/context.py:308-326 compares camera names only)."""
+    if ptype in ("pi0", "pi05", "pi0_fast"):
+        # unconditional: modeling_pi0.py:1212-1213, modeling_pi05.py:1190-1191,
+        # modeling_pi0_fast.py:1078-1079
+        return True
+    # modeling_smolvla.py:431-432; default (512, 512) at configuration_smolvla.py:45
+    if ptype == "smolvla":
+        return cfg.get("resize_imgs_with_padding", [512, 512]) is not None
+    if ptype == "xvla":  # modeling_xvla.py:327-328; default None, configuration_xvla.py:89
+        return cfg.get("resize_imgs_with_padding") is not None
+    return False
 
 
 def inspect_model(repo_id: str, revision: str | None = None) -> dict[str, Any]:
@@ -432,17 +449,31 @@ def compatibility(info: dict[str, Any], spec: RigSpec) -> list[str]:
     rig_cams = {c.feature: c for c in spec.cameras}
     # WHY backticks: the Models page shows a `name` as code, so a camera key reads as a key.
     names = [f"`{k.removeprefix(IMAGES)}`" for k in rig_cams]
-    has = (f"your rig has {', '.join(names[:-1])} and {names[-1]}" if len(names) > 1
+    has = (f"your rig has {join_and(names)}" if len(names) > 1
            else f"your rig has only {names[0]}" if names
            else "your rig has no cameras")  # fmt: skip
+    # WHY one line for all of them: three near-identical lines for camera1..3 bury the fix.
+    missing = [f"`{k.removeprefix(IMAGES)}`" for k in model_cams if k not in rig_cams]
+    if missing:
+        one = len(missing) == 1
+        what = f"a camera named {missing[0]}" if one else f"cameras named {join_and(missing)}"
+        # lerobot-rollout maps camera names with --rename_map (rollout/configs.py:242), and the
+        # Models page offers only cameras that have a device.
+        fix = ("Add " + ("a camera" if one else "cameras") + " to robot-config.yaml first."
+               if not rig_cams
+               else "robot-config.yaml gives none of them a device yet, so set their "
+               "`index_or_path` first, then map " + ("one to it." if one else "them.")
+               if all(c.source is None for c in rig_cams.values())
+               else "Map one of them to it when you run the model, or rename a camera in "
+               "robot-config.yaml." if one
+               else "Map one of your cameras to each when you run the model, or rename cameras "
+               "in robot-config.yaml.")  # fmt: skip
+        out.append(f"This model expects {what}; {has}. {fix}")
+    fed_by: dict[str, str] = info.get("fed_by") or {}  # rig key -> model key, as_seen_by_rig()
     for key, shape in model_cams.items():
         name = f"`{key.removeprefix(IMAGES)}`"
         cam = rig_cams.get(key)
         if cam is None:
-            # lerobot-rollout maps camera names with --rename_map (rollout/configs.py:242).
-            out.append(f"This model expects a camera named {name}; {has}. Map one of them to it "
-                       "when you run the model, or rename a camera in "
-                       "robot-config.yaml.")  # fmt: skip
             continue
         if cam.source is None:
             out.append(f"The model takes the {name} camera, but robot-config.yaml gives it no "
@@ -462,8 +493,18 @@ def compatibility(info: dict[str, Any], spec: RigSpec) -> list[str]:
             out.append(WARNING + f"The rig's {name} camera sets no width and height, so Studio "
                        f"cannot check it against the model's {_size(shape)}.")  # fmt: skip
         elif [h, w] != shape[1:]:
-            out.append(f"The model was trained on {_size(shape)} frames from {name}; the "
-                       f"rig's {name} camera is set to {w}x{h}.")  # fmt: skip
+            own = fed_by.get(key)  # the model's own name for a camera the mapping renamed
+            size = (f"The model was trained on {_size(shape)} frames from {name}; the rig's "
+                    f"{name} camera is set to {w}x{h}." if own is None
+                    else f"The model's `{own.removeprefix(IMAGES)}` camera was trained on "
+                    f"{_size(shape)} frames; the rig's {name} camera, which feeds it, is set to "
+                    f"{w}x{h}.")  # fmt: skip
+            if info.get("resizes_images"):
+                out.append(WARNING + size + f" `{ptype}` scales and pads each frame to its own "
+                           "size, so it runs, but a view unlike its training data can still "
+                           "lower its success.")  # fmt: skip
+            else:
+                out.append(size)
     for key in rig_cams:
         if key not in model_cams:
             out.append(WARNING + f"The rig's `{key.removeprefix(IMAGES)}` camera (`{key}`) is not "
@@ -484,6 +525,11 @@ def compatibility(info: dict[str, Any], spec: RigSpec) -> list[str]:
         if key in feats and feats[key]["shape"] != [joints]:
             out.append(f"The model's {what} has {_size(feats[key]['shape'])} numbers; {rig}.")
     return out
+
+
+def join_and(items: list[str]) -> str:
+    """'a', 'a and b', 'a, b and c'."""
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 def _plain(key: str) -> str:
@@ -518,7 +564,8 @@ def as_seen_by_rig(info: dict[str, Any], rename_map: dict[str, str]) -> dict[str
     checks the camera that will really feed it."""
     back = {model: rig for rig, model in rename_map.items()}
     inputs = info.get("input_features") or {}
-    return {**info, "input_features": {back.get(k, k): f for k, f in inputs.items()}}
+    return {**info, "input_features": {back.get(k, k): f for k, f in inputs.items()},
+            "fed_by": {rig: model for model, rig in back.items() if model in inputs}}  # fmt: skip
 
 
 # -- download ------------------------------------------------------------------------------------
