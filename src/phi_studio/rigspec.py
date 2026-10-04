@@ -378,52 +378,103 @@ def _usable(cam: CameraSpec) -> bool:
     return cam.source is not None
 
 
-def _cmd(id_: str, title: str, why: str, tool: str, args: Sequence[str] = ()) -> dict[str, str]:
-    return {"id": id_, "title": title, "why": why,
+def _cmd(step: str, id_: str, title: str, why: str, tool: str,
+         args: Sequence[str] = ()) -> dict[str, str]:  # fmt: skip
+    return {"step": step, "id": id_, "title": title, "why": why,
             "cmd": " ".join([tool, *(shlex.quote(a) for a in args)])}  # fmt: skip
+
+
+# The setup steps a command belongs to, in the order of LeRobot's SO-101 and imitation-learning docs
+# (huggingface.co/docs/lerobot/v0.6.0/so101 and /il_robots). Studio's own steps (camera align,
+# train, models, evaluate) sit between and after these; the web app owns that full list.
+STEPS = ("ports", "motors", "calibrate", "teleop", "cameras", "record", "dataset")
 
 
 def lerobot_commands(spec: RigSpec) -> list[dict[str, str]]:
     robots = [a for a in spec.arms if a.section == "robot"]
     teleops = [a for a in spec.arms if a.section == "teleop"]
-    out = [_cmd("find_port", "Find each arm's port",
-                "Unplug one arm when it asks; the port that disappears is that arm's.",
+    robot_args = _device_args("robot", robots, spec.robot) if robots else []
+    teleop_args = _device_args("teleop", teleops, spec.teleop) if teleops else []
+    cams = _cameras_args(spec)
+    out = [_cmd("ports", "find_port", "Find each arm's port with LeRobot's tool",
+                "It asks you to unplug one arm, and the port that disappears is that arm's. "
+                "Studio's port finder above does the same for every arm and saves the result.",
                 "lerobot-find-port")]  # fmt: skip
     for a in robots + teleops:
         dev = "robot" if a.section == "robot" else "teleop"
-        why = "Once per new arm: connect one motor at a time when asked (ids 1 to 6)."
+        why = ("Once per new arm, before it is assembled: connect one motor at a time when it "
+               "asks, gripper first.")  # fmt: skip
         if a.side:
-            why += " lerobot-setup-motors refuses bimanual types, so each arm runs as a single arm."
+            # lerobot_setup_motors.py:55-66 lists single-arm types only
+            why += " LeRobot cannot do this for a bimanual type, so each arm runs on its own."
         args = [f"--{dev}.type={a.single_type}", f"--{dev}.port={a.port or '<port>'}"]
         title = f"Set motor ids, {a.key.replace('_', ' ')}"
-        out.append(_cmd(f"setup_motors_{a.key}", title, why, "lerobot-setup-motors", args))
+        out.append(_cmd("motors", f"setup_motors_{a.key}", title, why, "lerobot-setup-motors",
+                        args))  # fmt: skip
     for dev, arms, sec in (("robot", robots, spec.robot), ("teleop", teleops, spec.teleop)):
         if arms:
             noun = ("follower" if dev == "robot" else "leader") + ("s" if len(arms) > 1 else "")
             files = ", ".join(f"{a.lerobot_id}.json" for a in arms if a.lerobot_id)
-            out.append(_cmd(f"calibrate_{dev}", f"Calibrate the {noun}", f"Writes {files}.",
+            why = f"Writes {files}."
+            # so_follower.py:115-143: Enter keeps an existing file, c redoes it; wrist roll is
+            # not swept. bimanual.py:52-54: one run does left, then right.
+            why += (" Put every joint in the middle of its range and press Enter, then move each "
+                    "joint end to end except wrist roll, and press Enter again. If a file exists, "
+                    "Enter keeps it and c redoes it.")  # fmt: skip
+            if len(arms) > 1:
+                why += " It does the left arm, then the right."
+            out.append(_cmd("calibrate", f"calibrate_{dev}", f"Calibrate the {noun}", why,
                             "lerobot-calibrate", _device_args(dev, arms, sec)))  # fmt: skip
     if robots and teleops:
-        args = (
-            _device_args("robot", robots, spec.robot)
-            + _cameras_args(spec)
-            + _device_args("teleop", teleops, spec.teleop)
-        )
-        out.append(_cmd("teleoperate", "Teleoperate",
-                        "LeRobot's default rate is 60 fps (lerobot_teleoperate.py:140).",
-                        "lerobot-teleoperate", [*args, "--display_data=true"]))  # fmt: skip
-        rec = [*args, "--dataset.repo_id=<hf_user>/<dataset>", "--dataset.single_task=<task>",
-               "--dataset.num_episodes=10", "--display_data=true"]  # fmt: skip
+        # lerobot_teleoperate.py:140: 60 fps by default
+        out.append(_cmd("teleop", "teleoperate", "Teleoperate",
+                        "Move the leader and the follower copies it, 60 times a second. Stop or "
+                        "Ctrl-C ends it.",
+                        "lerobot-teleoperate", [*robot_args, *teleop_args]))  # fmt: skip
+    # lerobot_find_cameras.py:292-311: saves frames to outputs/captured_images over 6 s
+    out.append(_cmd("cameras", "find_cameras", "List cameras with LeRobot's tool",
+                    "Saves a picture from every camera it finds to outputs/captured_images. "
+                    "Studio's camera finder above shows the same pictures and saves the numbers.",
+                    "lerobot-find-cameras", ["opencv"]))  # fmt: skip
+    if robots and teleops and cams:
+        out.append(_cmd("cameras", "teleoperate_cameras", "Teleoperate with the cameras",
+                        "Check that every view shows the whole workspace.",
+                        "lerobot-teleoperate",
+                        [*robot_args, *cams, *teleop_args, "--display_data=true"]))  # fmt: skip
+    out.append(_cmd("record", "hf_login", "Sign in to Hugging Face",
+                    "Once per Mac. It asks for a token from huggingface.co/settings/tokens. The "
+                    "shell hides what you type, and Studio never sees it.",
+                    "hf", ["auth", "login"]))  # fmt: skip
+    if robots and teleops:
+        rec = [*robot_args, *cams, *teleop_args, "--dataset.repo_id=<hf_user>/<dataset>",
+               "--dataset.single_task=<task>", "--dataset.num_episodes=10",
+               "--dataset.streaming_encoding=true", "--dataset.encoder_threads=2",
+               "--display_data=true"]  # fmt: skip
         # WHY: a camera left out of --robot.cameras is a dataset with no frames from it, so the
         # command that writes the dataset says so, not only the Dataset keys panel.
         left_out = [c.feature for c in spec.cameras if not _usable(c)]
         gap = (f" It leaves out {', '.join(left_out)}: no usable device in robot-config.yaml, "
                "so the dataset gets no frames from " + ("it." if len(left_out) == 1 else "them.")
                if left_out else "")  # fmt: skip
-        # keyboard_input.py:160-170; push_to_hub defaults to true (configs/dataset.py:43)
-        out.append(_cmd("record", "Record a dataset",
+        # keyboard_input.py:160-170 keys; lerobot_record.py:431-438 refuses eval_ and stamps the
+        # name (configs/dataset.py stamp_repo_id); push_to_hub defaults to true (dataset.py:43)
+        out.append(_cmd("record", "record", "Record a dataset",
                         "Right arrow ends an episode early, left arrow records it again, Esc "
-                        "stops. It uploads to the Hub at the end unless "
+                        "stops. LeRobot adds the date and time to the name, like "
+                        "_20261004_153000, so later steps need that full name. Names starting "
+                        "with eval_ are refused. It uploads to the Hub at the end unless you add "
                         "--dataset.push_to_hub=false." + gap,
                         "lerobot-record", rec))  # fmt: skip
+    # lerobot_dataset_viz.py:305-427 (argparse); lerobot_replay.py:81-99
+    out.append(_cmd("dataset", "visualize", "Look through an episode",
+                    "Opens the episode in the Rerun viewer: every camera and joint over time.",
+                    "lerobot-dataset-viz",
+                    ["--repo-id", "<hf_user>/<recorded>", "--episode-index", "0"]))  # fmt: skip
+    if robots:
+        out.append(_cmd("dataset", "replay", "Replay an episode on the follower",
+                        "The follower repeats episode 0 on its own, with no leader. Clear the "
+                        "table first and keep a hand near its power.",
+                        "lerobot-replay",
+                        [*robot_args, "--dataset.repo_id=<hf_user>/<recorded>",
+                         "--dataset.episode=0"]))  # fmt: skip
     return out

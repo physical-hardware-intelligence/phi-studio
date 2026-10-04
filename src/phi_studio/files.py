@@ -250,7 +250,14 @@ class Files:
                              "calibration": rel, "calibrated": bool(path and path.is_file()),
                              "use_degrees": a.use_degrees,
                              "max_relative_target": a.max_relative_target})  # fmt: skip
+            try:  # dataset.hf_user, a phi convention LeRobot itself does not read
+                raw = yaml.safe_load((r.path / "robot-config.yaml").read_text()) or {}
+                ds = raw.get("dataset") if isinstance(raw, dict) else None
+                hf_user = ds.get("hf_user") if isinstance(ds, dict) else None
+            except yaml.YAMLError:
+                hf_user = None
             return {"file": ref, "bimanual": spec.bimanual, "arms": arms,
+                    "hf_user": hf_user if isinstance(hf_user, str) and hf_user != "TBD" else None,
                     "cameras": [{"key": c.key, "side": c.side, "feature": c.feature,
                                  "type": c.fields.get("type"), "source": c.source}
                                 for c in spec.cameras],

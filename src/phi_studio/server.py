@@ -170,6 +170,7 @@ class Studio:
         self.handlers: dict[str, tuple[Handler, bool]] = {}  # cmd -> (handler, needs control)
         self.routes: list[web.RouteDef] = []
         self.config_lock = asyncio.Lock()  # one robot-config.yaml write at a time
+        self.on_close: list[Callable[[], Awaitable[Any]]] = []  # run when Studio shuts down
         register_features(self)
 
     # -- worker ---------------------------------------------------------------------------------
@@ -279,6 +280,11 @@ class Studio:
             self.start_worker()
 
     async def _on_shutdown(self, app: web.Application) -> None:
+        for fn in self.on_close:  # features release cameras and stop their tasks first
+            try:
+                await fn()
+            except Exception:
+                log.exception("a feature failed to close")
         for c in list(self.clients):
             await c.ws.close()
         for ws in list(self.term_socks):
