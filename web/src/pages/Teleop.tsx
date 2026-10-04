@@ -1,9 +1,9 @@
 import { ActionBar } from "../components/ActionBar";
 import { ArmsPanel } from "../components/ArmsPanel";
-import { Cameras } from "../components/Cameras";
 import { JointTable } from "../components/JointTable";
 import { MockPanel } from "../components/MockPanel";
 import { Notices } from "../components/Notices";
+import { ViewSwitch } from "../scene/ViewSwitch";
 
 export function Teleop() {
   return (
@@ -12,7 +12,7 @@ export function Teleop() {
       <Notices />
       <div className="work-grid">
         <div className="col">
-          <Cameras />
+          <ViewSwitch page="teleop" />
           <JointTable />
         </div>
         <div className="col rail">
