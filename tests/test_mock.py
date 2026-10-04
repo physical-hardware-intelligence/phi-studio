@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import pytest
 
-from phi.studio.identity import fingerprint_distance
-from phi.studio.mock import FakeClock, MockArm, MockCamera, mock_rig
-from phi.studio.rig import JOINTS, decode_status
+from phi_studio.identity import fingerprint_distance
+from phi_studio.mock import FakeClock, MockArm, MockCamera, mock_rig
+from phi_studio.rig import JOINTS, decode_status
 
 
 def test_status_bits_decode_every_fault_not_just_the_first() -> None:

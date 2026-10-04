@@ -20,7 +20,7 @@ from typing import Any
 
 import yaml
 
-from phi.studio.rig import JOINTS
+from phi_studio.rig import JOINTS
 
 # Registered choice names in LeRobot 0.6.0 (config_so_follower.py:45-46, config_so_leader.py:33-34,
 # config_bi_so_follower.py:25, config_bi_so_leader.py:23).

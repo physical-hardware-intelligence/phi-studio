@@ -5,7 +5,7 @@ import { Notices } from "../components/Notices";
 import { label } from "../lib/labels";
 import { go, studio, useStudio, type LeRobotArm, type LeRobotView } from "../lib/studio";
 
-// robot-config.yaml read with LeRobot 0.6.0's own rules (src/phi/studio/rigspec.py): each arm's type, id,
+// robot-config.yaml read with LeRobot 0.6.0's own rules (src/phi_studio/rigspec.py): each arm's type, id,
 // port and calibration file, what LeRobot would refuse, and the CLI commands for this rig in the order a
 // new rig needs them. Read-only; tests check every command against LeRobot's own CLI parser.
 export function Setup() {

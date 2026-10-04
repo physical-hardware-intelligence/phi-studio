@@ -4,7 +4,7 @@ Everything opens through LeRobot's own camera classes, built from the same field
 gives lerobot-record, so the preview fails, frames and rotates the way a recording would. This
 module never touches cv2 (tests/test_no_raw_opencv.py).
 
-WHY not phi.utils.camera_backend.open_camera: it forces BGR (camera_backend.py:110) and passes only
+WHY not phi_studio.camera_backend.open_camera: it forces BGR (camera_backend.py:110) and passes only
 width, height, fps and fourcc, so a spec's rotation and backend would not apply; and its
 `_Cam.read` turns every failure into (False, None) (camera_backend.py:64-68), which hides the error
 a probe must report. Same rule as that module, though: if LeRobot does it, call LeRobot.
@@ -27,7 +27,7 @@ from typing import Any
 
 import numpy as np
 
-from phi.studio import rigspec
+from phi_studio import rigspec
 
 RETRY_S = 2.0  # wait between attempts to reopen a camera that failed
 STALL_FRAMES = 30  # frame periods with no frame before a camera counts as gone (1 s at 30 fps)

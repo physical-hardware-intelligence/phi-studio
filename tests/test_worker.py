@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from phi.studio.mock import FakeClock, mock_rig
-from phi.studio.worker import Outbox, RigWorker
+from phi_studio.mock import FakeClock, mock_rig
+from phi_studio.worker import Outbox, RigWorker
 
 HZ = 30
 DT = 1 / HZ

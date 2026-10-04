@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from phi.studio.identity import (
+from phi_studio.identity import (
     ArmRecord,
     PortInfo,
     fingerprint_distance,

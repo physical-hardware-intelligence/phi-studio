@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw, ImageFilter
 
-from phi.studio import align
+from phi_studio import align
 
 # WHY a mark, not a module-level importorskip: matching needs only numpy and Pillow and runs in CI;
 # camera_realign imports LeRobot and OpenCV when it loads (through camera_backend).
@@ -81,7 +81,7 @@ def test_a_camera_that_panned_reads_as_the_scene_moving_the_other_way() -> None:
 
 @needs_realign
 def test_sub_pixel_shift_by_warp() -> None:
-    from phi.utils.camera_backend import cv2
+    from phi_studio.camera_backend import cv2
 
     ref = _scene(4)
     live = cv2.warpAffine(ref, np.float32([[1, 0, -2.5], [0, 1, 6.5]]), (640, 480),
@@ -94,7 +94,7 @@ def test_sub_pixel_shift_by_warp() -> None:
 
 @needs_realign
 def test_offsets_are_in_live_pixels_when_sizes_differ() -> None:
-    from phi.utils.camera_backend import cv2
+    from phi_studio.camera_backend import cv2
 
     ref = _scene(5)
     live = cv2.resize(np.roll(ref, (0, 5), axis=(0, 1)), (1280, 960))
@@ -107,7 +107,7 @@ def test_offsets_are_in_live_pixels_when_sizes_differ() -> None:
 
 @needs_realign
 def test_aligned_is_within_aligned_px_on_both_axes(monkeypatch: pytest.MonkeyPatch) -> None:
-    from phi.utils import camera_realign as cr
+    from phi_studio import camera_realign as cr
 
     ref = _scene(6)
     for (dx, dy), want in [((2.0, -2.0), True), ((2.01, 0.0), False), ((0.0, -2.2), False)]:
@@ -229,7 +229,7 @@ def test_list_datasets_reads_every_layout_and_flags_transposed_keys(
 def test_references_decode_once_then_come_from_the_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from phi.utils import camera_realign as cr
+    from phi_studio import camera_realign as cr
 
     home, cache = tmp_path / "home", tmp_path / "cache"
     monkeypatch.setenv("HF_LEROBOT_HOME", str(home))
@@ -268,7 +268,7 @@ def test_references_decode_once_then_come_from_the_cache(
 def test_reference_problems_are_readable_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from phi.utils import camera_realign as cr
+    from phi_studio import camera_realign as cr
 
     monkeypatch.setenv("HF_LEROBOT_HOME", str(tmp_path))
     root = _dataset(tmp_path / "Parv-09" / "pens", THREE, episodes=2)

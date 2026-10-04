@@ -4,7 +4,7 @@ The rig is rebuilt every day, and a camera that moved since recording silently h
 trained on that dataset. Studio picks the dataset's resting frame (the arm at rest, the one pose
 you can put back by hand), works out which live camera shows which dataset camera by picture (so
 macOS renumbering camera indices stops mattering), and says per camera how far it is off and which
-way to move it. The dataset side reuses phi.utils.camera_realign, so the CLI and Studio agree on
+way to move it. The dataset side reuses phi_studio.camera_realign, so the CLI and Studio agree on
 the reference frame and on which way is left.
 
 WHY the fix is moving the camera, not warping the image in software. Shifting or warping the live
@@ -84,7 +84,7 @@ def _physical(mapping: dict[str, str], cameras: list[str]) -> dict[str, str]:
 def list_datasets() -> list[dict[str, Any]]:
     """Every local LeRobot dataset camera_realign can find, with its camera keys."""
     with _readable():
-        from phi.utils import camera_realign as cr
+        from phi_studio import camera_realign as cr
 
         found = cr.discover()
     out = []
@@ -145,7 +145,7 @@ def references(root: str, episode: int = 0, cache_dir: Path | None = None) -> di
     Hub dataset whose videos are not all local, LeRobot downloads the episode's video files first.
     """
     with _readable():
-        from phi.utils import camera_realign as cr
+        from phi_studio import camera_realign as cr
 
         want = os.path.realpath(root)
         ds = next((d for d in cr.discover() if os.path.realpath(d.root) == want), None)
@@ -207,8 +207,8 @@ def measure(live_rgb: np.ndarray, ref_rgb: np.ndarray) -> dict[str, Any]:
     response rather than as an offset.
     """
     with _readable():
-        from phi.utils import camera_realign as cr
-        from phi.utils.camera_backend import cv2
+        from phi_studio import camera_realign as cr
+        from phi_studio.camera_backend import cv2
 
     live = cv2.cvtColor(live_rgb, cv2.COLOR_RGB2GRAY) if live_rgb.ndim == 3 else live_rgb
     ref = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2GRAY) if ref_rgb.ndim == 3 else ref_rgb

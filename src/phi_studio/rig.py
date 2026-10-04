@@ -12,7 +12,7 @@ from typing import Protocol
 
 import numpy as np
 
-from phi.studio.identity import Calibration
+from phi_studio.identity import Calibration
 
 JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
 

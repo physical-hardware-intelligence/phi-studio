@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from phi.studio.terminal import Terminal, env_activation, zsh_dotdir
+from phi_studio.terminal import Terminal, env_activation, zsh_dotdir
 
 
 async def until(term: Terminal, seen: list[bytes], want: bytes, timeout: float = 10.0) -> None:
@@ -100,7 +100,7 @@ def test_exit_is_reported_and_writing_after_it_fails(tmp_path: Path) -> None:
 
 
 def test_scrollback_keeps_only_the_newest_output(tmp_path: Path, monkeypatch: Any) -> None:
-    monkeypatch.setattr("phi.studio.terminal.SCROLLBACK", 1000)
+    monkeypatch.setattr("phi_studio.terminal.SCROLLBACK", 1000)
 
     async def go() -> None:
         term = Terminal(tmp_path, shell="/bin/sh")

@@ -22,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from phi.studio.rigspec import CAMERA_SOURCE, ArmSpec, CameraSpec, RigSpec
+from phi_studio.rigspec import CAMERA_SOURCE, ArmSpec, CameraSpec, RigSpec
 
 KeyPath = tuple[str, ...]
 STR_TAG = "tag:yaml.org,2002:str"

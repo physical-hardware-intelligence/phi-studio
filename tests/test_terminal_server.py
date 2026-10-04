@@ -13,7 +13,7 @@ import pytest
 aiohttp = pytest.importorskip("aiohttp")
 pytest.importorskip("PIL")
 
-from test_studio_server import started, until, ws  # noqa: E402
+from test_server import started, until, ws  # noqa: E402
 
 
 async def term(session: Any, port: int, client: str, token: str = "t0k") -> Any:

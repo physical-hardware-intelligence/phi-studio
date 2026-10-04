@@ -16,8 +16,8 @@ from typing import Any
 import numpy as np
 import pytest
 
-from phi.studio import cameras, rigspec
-from phi.studio.cameras import RealCamera, cameras_from_spec, probe
+from phi_studio import cameras, rigspec
+from phi_studio.cameras import RealCamera, cameras_from_spec, probe
 
 JPEG = b"\xff\xd8"
 

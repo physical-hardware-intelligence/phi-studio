@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from phi.studio.session import IllegalTransition, Session, State
+from phi_studio.session import IllegalTransition, Session, State
 
 
 def ready() -> Session:

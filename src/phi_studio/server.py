@@ -36,11 +36,11 @@ from typing import Any
 
 from aiohttp import WSMsgType, web
 
-from phi.studio.assistant import ClaudeCLI, Conversation
-from phi.studio.checks import Inputs, run_checks
-from phi.studio.evals import EvalError, EvalStore
-from phi.studio.files import FileError, Files, default_roots, list_ports
-from phi.studio.terminal import Terminal
+from phi_studio.assistant import ClaudeCLI, Conversation
+from phi_studio.checks import Inputs, run_checks
+from phi_studio.evals import EvalError, EvalStore
+from phi_studio.files import FileError, Files, default_roots, list_ports
+from phi_studio.terminal import Terminal
 
 STATIC = Path(__file__).parent / "static"
 log = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ ANYONE = {"stop", "take_control"}  # allowed from a window without control
 # Answered by the server, from any window: they read, and none reaches the worker.
 READ_ONLY = {"assist_status", "assist_context", "assist_ask", "assist_stop", "assist_reset",
              "files_index", "file_read", "files_search", "ports", "checks_run"}  # fmt: skip
-CODE_ROOT = Path(__file__).resolve().parents[3]  # src/phi/studio/server.py -> the repo
+CODE_ROOT = Path(__file__).resolve().parents[2]  # src/phi_studio/server.py -> the repo
 LOG_SIZE = 200
 REPLAYED = ("rig", "state", "identity", "worker_exit")  # newest of each, sent to a new window
 
@@ -112,6 +112,7 @@ class Studio:
         data_dir: Path | str | None = None,
         assistant_model: str | None = None,
         code_root: Path | None = None,
+        rig_dir: Path | None = None,
     ) -> None:
         self.spec = {**spec, "data_dir": str(data_dir)} if data_dir else dict(spec)
         self.port = port
@@ -135,7 +136,7 @@ class Studio:
         self.frame_clock: dict[str, tuple[float, float | None]] = {}
         self.checks: dict[str, Any] | None = None  # the newest check run, for the assistant
         self.code_root = code_root or CODE_ROOT
-        roots = default_roots(self.code_root, self.data_dir)
+        roots = default_roots(self.code_root, self.data_dir, rig_dir)
         self.files = Files(roots)
         self.terminal: Terminal | None = None  # started when a window first opens the panel
         self.term_socks: dict[web.WebSocketResponse, str] = {}  # each terminal socket's window id
@@ -150,7 +151,7 @@ class Studio:
 
     # -- worker ---------------------------------------------------------------------------------
     def start_worker(self) -> None:
-        from phi.studio.worker import run_worker
+        from phi_studio.worker import run_worker
 
         ctx = mp.get_context("spawn")
         self.conn, child = ctx.Pipe()
@@ -271,7 +272,7 @@ class Studio:
         page = STATIC / "index.html"
         if page.exists():
             return web.FileResponse(page, headers={"Cache-Control": "no-store"})
-        return web.Response(text="Studio UI is not built. Run: make studio-web", status=503)
+        return web.Response(text="Studio UI is not built. Run: npm --prefix web run build", status=503)
 
     def _refuse(self, request: web.Request) -> str | None:
         if request.host not in self.allowed_hosts:
@@ -684,13 +685,15 @@ def serve(
     open_browser: bool = True,
     data_dir: Path | None = None,
     assistant_model: str | None = None,
+    rig_dir: Path | None = None,
 ) -> None:
     if not port_free(port):  # before printing a URL or opening a browser at the wrong server
         raise PortInUse(port)
     # WHY an env override: a fixed token lets a dev preview reload with the same URL.
     # The default is a fresh random token per launch.
     token = os.environ.get("PHI_STUDIO_TOKEN") or None
-    studio = Studio(spec, port, token=token, data_dir=data_dir, assistant_model=assistant_model)
+    studio = Studio(spec, port, token=token, data_dir=data_dir, assistant_model=assistant_model,
+                    rig_dir=rig_dir)
     url = f"http://127.0.0.1:{port}/#token={studio.token}"
     print(f"Phi Studio on {url}\nCtrl+C stops Studio and releases torque.", flush=True)
     if open_browser:

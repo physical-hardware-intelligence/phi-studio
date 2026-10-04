@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from phi.studio import rigspec
+from phi_studio import rigspec
 
 SINGLE = """\
 robot:

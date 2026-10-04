@@ -30,11 +30,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from phi.studio import rigspec
-from phi.studio.identity import Calibration, JointCal, match_fingerprint, save_calibration
-from phi.studio.policy import Policy, PolicyInfo, catalog, is_finite_number
-from phi.studio.rig import BUS_ERRORS, JOINTS, ArmBus, JointHealth, label, labels
-from phi.studio.session import IllegalTransition, Session, State
+from phi_studio import rigspec
+from phi_studio.identity import Calibration, JointCal, match_fingerprint, save_calibration
+from phi_studio.policy import Policy, PolicyInfo, catalog, is_finite_number
+from phi_studio.rig import BUS_ERRORS, JOINTS, ArmBus, JointHealth, label, labels
+from phi_studio.session import IllegalTransition, Session, State
 
 # WHY these step limits: LeRobot's max_relative_target defaults to None (config_so_follower.py:36),
 # and a gripper motor burned from over-tightening (RECORDING_DAY.md). The clip is measured from the
@@ -676,7 +676,7 @@ class Outbox:
 
 def build_rig(spec: dict[str, Any]) -> Any:
     if spec.get("kind", "mock") == "mock":
-        from phi.studio.mock import mock_rig
+        from phi_studio.mock import mock_rig
 
         cams = tuple(spec.get("cameras", ("front", "wrist", "top")))
         return mock_rig(pairs=int(spec.get("pairs", 1)), cameras=cams)

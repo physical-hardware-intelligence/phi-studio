@@ -3,7 +3,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { studio } from "../lib/studio";
 
-// A file path with a folder (src/phi/studio/worker.py:303, /Users/x/phi/robot-config.yaml), or one of
+// A file path with a folder (src/phi_studio/worker.py:303, /Users/x/phi/robot-config.yaml), or one of
 // the few machine files people name bare. WHY require a folder otherwise: "worker.py" alone could be
 // several files, and a link that opens the wrong one is worse than no link.
 const EXT = "py|tsx?|jsx?|json|ya?ml|md|sh|log|txt|toml|cfg|ini|css|html";

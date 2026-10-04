@@ -103,11 +103,11 @@ function Start() {
       </p>
       <Steps items={[
         { title: "Start Studio", body: <>
-            In the phi checkout run the command below. It prints a link and opens it in your browser. The link holds a
+            In a terminal with the phi env active, run the command below. It prints a link and opens it in your browser. The link holds a
             token that changes on every launch, and Studio only listens on this Mac.
-            <CommandBlock cmd="make studio" wrap={false} />
-            Add options through <Id>STUDIO_ARGS</Id>, for example a bimanual mock rig on another port:
-            <CommandBlock cmd='make studio STUDIO_ARGS="--pairs 2 --port 8766"' wrap={false} />
+            <CommandBlock cmd="phi-studio" wrap={false} />
+            Add options after it, for example a bimanual mock rig on another port:
+            <CommandBlock cmd="phi-studio --pairs 2 --port 8766" wrap={false} />
           </> },
         { title: "Take control", body: <>
             One window drives the rig at a time. Other windows are view only, and can still press Stop, ask Claude, read
@@ -309,7 +309,7 @@ function Keys() {
 }
 
 const TROUBLE: [string, ReactNode][] = [
-  ["Sidebar says Studio is not running", <>Start it again with <Id>make studio</Id> and open the link it prints.</>],
+  ["Sidebar says Studio is not running", <>Start it again with <Id>phi-studio</Id> and open the link it prints.</>],
   ["Sidebar says Not authorised", <>The token changes on every launch. Open the link Studio printed this time.</>],
   ["Port 8765 is in use", <>Another Studio is running. Close it, or pass another port: <Id>STUDIO_ARGS="--port 8766"</Id>.</>],
   ["View only: another window has control", <>Press <strong>Take control</strong> in the top bar.</>],

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from phi.studio.rigspec import RigSpec
+from phi_studio.rigspec import RigSpec
 
 # The `hf` entry point is huggingface_hub.cli.hf:main (entry_points.txt), its auth group is added at
 # cli/hf.py:100 and `login` is cli/auth.py:38-39. `huggingface-cli` only prints a deprecation

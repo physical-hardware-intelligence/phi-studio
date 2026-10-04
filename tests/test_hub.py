@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from phi.studio import hub, rigspec
+from phi_studio import hub, rigspec
 
 # WHY a mark, not a module-level importorskip: the compatibility and local_models tests need no
 # huggingface_hub and must still run where it is missing.

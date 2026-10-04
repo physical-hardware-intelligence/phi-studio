@@ -18,8 +18,8 @@ aiohttp = pytest.importorskip("aiohttp")
 pytest.importorskip("PIL")
 from aiohttp.test_utils import TestServer  # noqa: E402
 
-import phi.studio.server as server_mod  # noqa: E402
-from phi.studio.server import Studio  # noqa: E402
+import phi_studio.server as server_mod  # noqa: E402
+from phi_studio.server import Studio  # noqa: E402
 
 
 def free_port() -> int:
@@ -285,19 +285,18 @@ def test_non_ascii_token_is_refused_not_a_server_error() -> None:
     run(go())
 
 
-def test_a_busy_port_is_a_one_line_message_not_a_traceback() -> None:
-    from typer.testing import CliRunner
-
-    from phi.cli import app
+def test_a_busy_port_is_a_one_line_message_not_a_traceback(capsys: Any) -> None:
+    from phi_studio.cli import main
 
     with socket.socket() as held:
         held.bind(("127.0.0.1", 0))
         held.listen()
         port = held.getsockname()[1]
-        r = CliRunner().invoke(app, ["studio", "--mock", "--no-browser", "--port", str(port)])
-    assert r.exit_code == 1
-    assert f"Port {port} is in use" in r.output and "--port" in r.output
-    assert "Traceback" not in r.output
+        code = main(["--mock", "--no-browser", "--port", str(port)])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert f"Port {port} is in use" in err and "--port" in err
+    assert "Traceback" not in err
 
 
 async def started_with_data(tmp: Any) -> tuple[Studio, TestServer, aiohttp.ClientSession]:

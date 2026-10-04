@@ -25,10 +25,10 @@ from typing import Any
 
 import yaml
 
-from phi.studio import rigspec
-from phi.studio.files import root_order
-from phi.studio.identity import TICKS_PER_REV, load_calibration
-from phi.studio.rig import JOINTS, label
+from phi_studio import rigspec
+from phi_studio.files import root_order
+from phi_studio.identity import TICKS_PER_REV, load_calibration
+from phi_studio.rig import JOINTS, label
 
 # Thresholds. The UI colours the same values (JointTable.tsx, TopBar.tsx); keep them in step.
 TEMP_WARN_C = 60.0
@@ -918,11 +918,11 @@ def check_ui_build(inp: Inputs) -> dict[str, Any]:
             title,
             "fail",
             "The interface is not built.",
-            "Run make studio-web.",
+            "Build it: npm --prefix web run build",
         )
     built = index.stat().st_mtime
     root = inp.code_root
-    src = root / "studio" / "web" / "src" if root else None
+    src = root / "web" / "src" if root else None
     if root is None or src is None or not src.is_dir():
         return result(
             "ui_build",
@@ -940,7 +940,7 @@ def check_ui_build(inp: Inputs) -> dict[str, Any]:
             title,
             "warn",
             f"The build is older than its source: {rel} changed after it.",
-            "Run make studio-web, then reload this page.",
+            "Build it: npm --prefix web run build. Then reload this page.",
             {"root": "code", "path": rel, "line": None},
         )
     return result(

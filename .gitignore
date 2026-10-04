@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+build/
+dist/
+.DS_Store
+web/node_modules/
+web/*.tsbuildinfo
+src/phi_studio/static/
+# The rig's own settings stay on each Mac.
+robot-config.yaml
+.env
+.env.*

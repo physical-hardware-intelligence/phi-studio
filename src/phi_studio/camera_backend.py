@@ -1,6 +1,8 @@
+# Copied from physical-hardware-intelligence/phi/src/phi/utils/camera_backend.py with its git history; Studio's
+# align.py and the camera checks use it. Fixes here should go back to phi too.
 """Open cameras through LeRobot, with a probe-friendly wrapper.
 
-    from phi.utils.camera_backend import cv2, open_camera, probe_camera
+    from phi_studio.camera_backend import cv2, open_camera, probe_camera
 
     cap = open_camera(0, width=640, height=480)     # raises if it is not there
     cap = probe_camera(7)                           # returns None if it is not there

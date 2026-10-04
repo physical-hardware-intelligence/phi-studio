@@ -28,9 +28,9 @@ export function Notices() {
       {link === "closed" && <Notice tone="warn" title="Connection lost. Reconnecting." fix="" />}
       {link === "down" && (
         <Notice tone="danger" title="Studio is not running"
-          fix="Start it again in a terminal with make studio. A new launch prints a new link; open that one." />
+          fix="Start it again in a terminal with phi-studio. A new launch prints a new link; open that one." />
       )}
-      {exit && <Notice tone="danger" title={exit} fix="Run phi studio again. Motion stopped when the worker ended." ask />}
+      {exit && <Notice tone="danger" title={exit} fix="Run phi-studio again. Motion stopped when the worker ended." ask />}
       {s?.state === "FAULT" && s.fault && <Notice tone="danger" title={s.fault} fix={fixFor(s.fault)} ask />}
       {s?.state === "STOPPED" && s.stop_reason === "heartbeat" && (
         <Notice tone="warn" title="Motion stopped because this window stopped answering"

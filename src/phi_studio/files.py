@@ -84,11 +84,15 @@ def lerobot_calibration_dir() -> Path:
     return Path(os.getenv("HF_LEROBOT_HOME", hf_home / "lerobot")).expanduser() / "calibration"
 
 
-def default_roots(code: Path, data_dir: Path | None) -> list[Root]:
+def default_roots(code: Path, data_dir: Path | None, rig_dir: Path | None = None) -> list[Root]:
+    """Studio's own code, the rig folder (the phi checkout with robot-config.yaml), LeRobot's
+    calibration folder and Studio's data. WHY the main checkout of the rig folder: git keeps
+    robot-config.yaml out of the repo, so a worktree of it has no copy."""
     roots = [Root("code", "Studio code", code.resolve())]
-    main = main_checkout(code)
+    rig = rig_dir if rig_dir is not None else code
+    main = main_checkout(rig) or (rig if rig_dir is not None else None)
     if main is not None and main.resolve() != code.resolve():
-        roots.append(Root("repo", "Main checkout", main.resolve()))
+        roots.append(Root("repo", "Phi checkout", main.resolve()))
     cal = lerobot_calibration_dir()
     if cal.is_dir():
         roots.append(Root("calibration", "LeRobot calibration", cal.resolve()))
@@ -221,7 +225,7 @@ class Files:
         dataset feature names, what LeRobot would refuse, and the CLI commands for this rig."""
         import yaml
 
-        from phi.studio import rigspec
+        from phi_studio import rigspec
 
         for key in root_order("robot-config.yaml"):
             r = self.roots.get(key)

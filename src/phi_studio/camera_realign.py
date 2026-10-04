@@ -1,3 +1,5 @@
+# Copied from physical-hardware-intelligence/phi/src/phi/utils/camera_realign.py with its git history; Studio's
+# align.py and the camera checks use it. Fixes here should go back to phi too.
 """Put the rig back where the dataset thinks it is, every morning, in about a minute.
 
 The problem this solves: we tear the setup down daily, and a camera that moved
@@ -8,9 +10,9 @@ policy.
 So: pick a dataset, pull a frame where the follower arm was at REST, and overlay
 the live feed on it until they coincide.
 
-    python -m phi.utils.camera_realign --list
-    python -m phi.utils.camera_realign --dataset cubes_cylinder_v1 wrist=0 top=1 front=2
-    python -m phi.utils.camera_realign --dataset 8bin wrist=0 top=1 --episode 5
+    python -m phi_studio.camera_realign --list
+    python -m phi_studio.camera_realign --dataset cubes_cylinder_v1 wrist=0 top=1 front=2
+    python -m phi_studio.camera_realign --dataset 8bin wrist=0 top=1 --episode 5
 
     ⚠️ The indices in those examples are whatever they happened to be on one day.
        They are NOT a mapping to reuse. Get today's from `camera_align` first.
@@ -60,7 +62,7 @@ import os
 import sys
 from dataclasses import dataclass
 
-from phi.utils.camera_backend import cv2, open_camera
+from phi_studio.camera_backend import cv2, open_camera
 import numpy as np
 
 # Physical camera name -> dataset key, per dataset. Substring match on the

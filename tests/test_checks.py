@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from phi.studio import checks as C
-from phi.studio.checks import Inputs, calibration_problems, parse_rig_config, run_checks
+from phi_studio import checks as C
+from phi_studio.checks import Inputs, calibration_problems, parse_rig_config, run_checks
 
 CONFIG = """\
 machine: test-mac
@@ -232,7 +232,7 @@ def test_tty_and_cu_names_of_one_port_are_a_duplicate(tmp_path: Path) -> None:
 
 
 def test_checks_and_files_read_the_same_rig_config(tmp_path: Path) -> None:
-    from phi.studio.files import Files, Root
+    from phi_studio.files import Files, Root
 
     main, wt = tmp_path / "main", tmp_path / "wt"
     for d in (main, wt):
@@ -378,7 +378,7 @@ def test_cameras_stale_or_offline_fail() -> None:
 
 # -- Studio ------------------------------------------------------------------------
 def test_stale_interface_build_names_the_newer_source(tmp_path: Path) -> None:
-    static, src = tmp_path / "static", tmp_path / "studio" / "web" / "src"
+    static, src = tmp_path / "static", tmp_path / "web" / "src"
     static.mkdir()
     src.mkdir(parents=True)
     (static / "index.html").write_text("<html>")
@@ -386,7 +386,7 @@ def test_stale_interface_build_names_the_newer_source(tmp_path: Path) -> None:
     os.utime(static / "index.html", (old, old))
     (src / "App.tsx").write_text("x")
     r = C.check_ui_build(Inputs(static_dir=static, code_root=tmp_path))
-    assert r["status"] == "warn" and "studio/web/src/App.tsx" in r["detail"]
+    assert r["status"] == "warn" and "web/src/App.tsx" in r["detail"]
     os.utime(static / "index.html")
     assert C.check_ui_build(Inputs(static_dir=static, code_root=tmp_path))["status"] == "pass"
     assert C.check_ui_build(Inputs(static_dir=tmp_path / "none"))["status"] == "fail"

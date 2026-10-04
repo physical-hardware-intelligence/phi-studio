@@ -133,7 +133,7 @@ export interface Assist {
 export interface FileRoot { key: string; label: string; path: string }
 export interface FileRef { root: string; path: string; label?: string; id?: string; kind?: string; mtime: number }
 export interface FilesIndex { roots: FileRoot[]; notes: FileRef[]; calibrations: FileRef[]; lerobot: LeRobotView | null }
-/** robot-config.yaml as LeRobot reads it (src/phi/studio/rigspec.py). */
+/** robot-config.yaml as LeRobot reads it (src/phi_studio/rigspec.py). */
 export interface LeRobotArm {
   key: string; role: "leader" | "follower"; side: "left" | "right" | null; type: string; id: string | null;
   port: string | null; line: number | null; calibration: string | null; calibrated: boolean;

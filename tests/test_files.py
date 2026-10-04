@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from phi.studio import files as F
-from phi.studio.files import FileError, Files, Root
+from phi_studio import files as F
+from phi_studio.files import FileError, Files, Root
 
 
 def tree(tmp: Path) -> Files:

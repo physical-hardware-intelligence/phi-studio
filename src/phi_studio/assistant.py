@@ -55,7 +55,7 @@ How you work here:
   cannot run commands, change files, or move the arms. When a fix needs an action, say exactly
   which Studio button or which terminal command, and why.
 - Cite files as path:line, with the path relative to its folder (for example
-  src/phi/studio/worker.py:303) or absolute. Studio turns these into links.
+  src/phi_studio/worker.py:303) or absolute. Studio turns these into links.
 - Answer briefly: the cause, the evidence, the fix, in that order. Short paragraphs or a numbered
   list. If you are unsure, say what you checked and what would settle it.
 - Safety: never suggest bypassing Stop, the torque-off confirmation, or a calibration check.
@@ -68,8 +68,8 @@ Facts about this setup:
   port by unplugging the arm.
 - LeRobot keeps one calibration JSON per arm id in its calibration folder, with id, drive_mode,
   homing_offset, range_min and range_max per joint. Present_Position = Actual - Homing_Offset.
-- Studio's code: src/phi/studio/ (server.py, worker.py, session.py, identity.py, evals.py,
-  files.py) and the web UI in studio/web/src."""
+- Studio's code: src/phi_studio/ (server.py, worker.py, session.py, identity.py, evals.py,
+  files.py) and the web UI in web/src."""
 
 
 def find_cli() -> list[str] | None:

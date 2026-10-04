@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from phi.studio import assistant as A
-from phi.studio.assistant import ClaudeCLI, Conversation
+from phi_studio import assistant as A
+from phi_studio.assistant import ClaudeCLI, Conversation
 
 FAKE = [sys.executable, str(Path(__file__).parent / "support" / "fake_claude.py")]
 CONTEXT = '{"session": {"state": "FAULT"}}'

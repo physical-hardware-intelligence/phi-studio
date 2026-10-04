@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phi-studio"
+version = "0.1.0"
+description = "A local web app for SO-101 arms: setup, calibration, teleoperation, recording, training, policies and evals."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "aiohttp>=3.9",
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "pyserial>=3.5",
+    "pyyaml>=6.0",
+    "huggingface_hub>=1.0,<2",  # the range LeRobot 0.6.0 requires
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6", "mypy>=1.11", "pytest>=8.0"]
+# Real arms, cameras and datasets go through LeRobot. Install Studio into the env that has it.
+lerobot = ["lerobot[feetech]==0.6.0"]
+
+[project.scripts]
+phi-studio = "phi_studio.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+phi_studio = ["static/**/*", "assets/**/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["src/phi_studio/camera_realign.py", "src/phi_studio/camera_backend.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["phi_studio.camera_realign", "phi_studio.camera_backend"]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]

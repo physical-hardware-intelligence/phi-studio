@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from phi.studio.identity import fingerprint_distance, load_calibration
-from phi.studio.mock import FakeClock, mock_rig
-from phi.studio.rig import JOINTS
-from phi.studio.worker import RigWorker
+from phi_studio.identity import fingerprint_distance, load_calibration
+from phi_studio.mock import FakeClock, mock_rig
+from phi_studio.rig import JOINTS
+from phi_studio.worker import RigWorker
 
 HZ = 30
 DT = 1 / HZ

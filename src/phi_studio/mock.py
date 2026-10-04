@@ -24,9 +24,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from phi.studio import rigspec
-from phi.studio.identity import TICKS_PER_REV, Calibration, JointCal
-from phi.studio.rig import JOINTS, JointHealth
+from phi_studio import rigspec
+from phi_studio.identity import TICKS_PER_REV, Calibration, JointCal
+from phi_studio.rig import JOINTS, JointHealth
 
 MAX_SPEED_DEG_S = 180.0
 HALF_TURN = (TICKS_PER_REV - 1) // 2  # 2047, LeRobot's int(max_res / 2) (feetech.py:286-287)

@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from phi.studio.rig import JOINTS
+from phi_studio.rig import JOINTS
 
 State = dict[str, dict[str, float]]  # follower name -> joint -> degrees (gripper 0-100)
 

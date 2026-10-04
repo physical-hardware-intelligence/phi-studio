@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from phi.studio.policy import is_finite_number
+from phi_studio.policy import is_finite_number
 
 OUTCOMES = ("success", "failure")
 MAX_NOTE = 2000

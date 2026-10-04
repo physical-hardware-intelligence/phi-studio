@@ -11,8 +11,8 @@ from typing import Any
 import pytest
 import yaml
 
-from phi.studio import configedit, rigspec
-from phi.studio.configedit import ConfigEditError, camera_source_path, port_path, set_values
+from phi_studio import configedit, rigspec
+from phi_studio.configedit import ConfigEditError, camera_source_path, port_path, set_values
 
 SINGLE = """\
 # Phi rig, single arm.

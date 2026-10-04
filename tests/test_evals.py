@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from phi.studio.evals import EvalError, EvalStore, wilson
+from phi_studio.evals import EvalError, EvalStore, wilson
 
 _ids = count(1)
 
