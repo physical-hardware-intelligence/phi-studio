@@ -40,6 +40,22 @@ ACTION = "action"
 TIMEOUT_S = 15.0
 _TOKEN_RE = re.compile(r"hf_[A-Za-z0-9_]{8,}|(?i:bearer)\s+\S+")
 _URL_RE = re.compile(r"^https?://(?:www\.)?(?:huggingface\.co|hf\.co)/", re.IGNORECASE)
+# The policy types LeRobot 0.6.0 registers (policies/*/configuration_*.py register_subclass;
+# tests/test_hub.py checks this against PreTrainedConfig.get_known_choices() where LeRobot is
+# installed). LeRobot's model card adds the type as a tag and as model_name
+# (policies/pretrained.py:363-367), so a tag from this set names the policy type.
+POLICY_TYPES = frozenset({
+    "act", "diffusion", "eo1", "evo1", "fastwam", "gaussian_actor", "groot", "lingbot_va",
+    "molmoact2", "multi_task_dit", "pi0", "pi05", "pi0_fast", "smolvla", "tdmpc", "vla_jepa",
+    "vqbet", "wall_x", "xvla",
+})  # fmt: skip
+# The tag every LeRobot policy carries: the card sets library_name="lerobot" and adds the tag
+# (policies/pretrained.py:363-366). [RUN 2026-10-04] list_models(filter="lerobot") returned 30 of
+# 30 rows with library_name lerobot; filter="robotics" returned GGUF language models.
+LIBRARY = "lerobot"
+SORTS = ("downloads", "likes", "last_modified", "trending_score", "created_at")  # hf_api.py:2462
+# What a search row needs, and no more: without expand the Hub leaves last_modified empty.
+_EXPAND = ["author", "downloads", "likes", "lastModified", "tags", "gated", "private", "cardData"]
 
 
 class HubError(Exception):
@@ -151,6 +167,71 @@ def whoami() -> dict[str, Any]:
         return {"user": None, "orgs": [], "error": "The Hub did not say who this token belongs to."}
     orgs = [str(o["name"]) for o in info.get("orgs") or [] if isinstance(o, dict) and o.get("name")]
     return {"user": str(name), "orgs": orgs, "error": None}
+
+
+# -- search --------------------------------------------------------------------------------------
+
+
+def policy_type_of(tags: list[str], card: Any = None) -> str | None:
+    """The policy type a Hub listing states, or None when it does not say or says two things.
+    LeRobot's model card puts the type in the tags and in model_name (policies/pretrained.py:
+    363-367). [RUN 2026-10-04] lerobot/smolvla_base and lerobot/pi0_base carry neither, so this is
+    often None; inspect_model reads config.json for the real answer."""
+    votes = {t for t in tags if t in POLICY_TYPES}
+    name = card.get("model_name") if card is not None else None
+    if isinstance(name, str) and name in POLICY_TYPES:
+        votes.add(name)
+    return votes.pop() if len(votes) == 1 else None
+
+
+def _search_error(hh: Any, e: BaseException) -> str:
+    if _offline(hh, e):
+        why = ("HF_HUB_OFFLINE is set" if isinstance(e, hh.errors.OfflineModeIsEnabled)
+               else "no connection")  # fmt: skip
+        return (f"Cannot search the Hugging Face Hub ({why}). Models already on this Mac are "
+                "still listed under On this Mac.")  # fmt: skip
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    if status == 429:
+        return "The Hub is limiting requests from this Mac. Wait a minute, then search again."
+    if isinstance(status, int) and status >= 500:
+        return f"The Hub had a server error (HTTP {status}). Try again in a minute."
+    return _readable(e)
+
+
+def search_models(
+    query: str = "", limit: int = 30, sort: str = "downloads"
+) -> list[dict[str, Any]]:
+    """LeRobot policies on the Hub whose id matches `query`, most downloaded first; an empty query
+    lists the most popular. Raises HubError with a readable message.
+    WHY filter="lerobot": the Hub matches it against tags, and every LeRobot policy card carries
+    it (see LIBRARY). The search words go to the Hub's own `search` (hf_api.py:2559-2565)."""
+    hh = _hub()
+    q = " ".join(str(query or "").split())
+    if len(q) > 200:
+        raise HubError("Search for 200 characters or fewer.")
+    if sort not in SORTS:
+        raise HubError(f"Sort by one of {', '.join(SORTS)}.")
+    n = max(1, min(int(limit), 100))
+    try:
+        rows = list(hh.HfApi().list_models(filter=LIBRARY, search=q or None, sort=sort, limit=n,
+                                           expand=_EXPAND))  # fmt: skip
+    except Exception as e:
+        raise HubError(_search_error(hh, e)) from None
+    out = []
+    for m in rows:
+        tags = [str(t) for t in m.tags or []]
+        out.append({
+            "repo_id": m.id,
+            "author": m.author or m.id.split("/")[0],
+            "downloads": m.downloads,
+            "likes": m.likes,
+            "last_modified": m.last_modified.isoformat() if m.last_modified else None,
+            "tags": tags,
+            "policy_type": policy_type_of(tags, m.card_data),
+            "gated": m.gated,  # False, "auto" or "manual"
+            "private": m.private,
+        })  # fmt: skip
+    return out
 
 
 # -- inspect -------------------------------------------------------------------------------------
@@ -273,6 +354,24 @@ def _as_list(v: Any) -> list[str]:
     return [str(v)] if v else []
 
 
+def _policy(cfg: dict[str, Any], where: str) -> dict[str, Any]:
+    """The policy type and the features a LeRobot config.json declares."""
+    ptype = cfg.get("type")  # draccus writes the registered choice name here (policies.py:218-220)
+    if not isinstance(ptype, str) or not ptype:
+        raise HubError(f"{where} has no policy `type`, so it is not a LeRobot policy.")
+    inputs = _features(cfg.get("input_features"), "input_features")
+    outputs = _features(cfg.get("output_features"), "output_features")
+    return {
+        "policy_type": ptype,
+        "input_features": inputs,
+        "output_features": outputs,
+        # Image shapes are channels, height, width (utils/feature_utils.py:159-167).
+        "cameras": {k: f["shape"] for k, f in inputs.items() if f["type"] == "VISUAL"},
+        "state_shape": inputs[STATE]["shape"] if STATE in inputs else None,
+        "action_shape": outputs[ACTION]["shape"] if ACTION in outputs else None,
+    }
+
+
 def inspect_model(repo_id: str, revision: str | None = None) -> dict[str, Any]:
     """What a LeRobot policy on the Hub expects, read from its metadata and config.json only; no
     weights are downloaded. Raises HubError with a readable message."""
@@ -286,23 +385,12 @@ def inspect_model(repo_id: str, revision: str | None = None) -> dict[str, Any]:
     if CONFIG not in {f.path for f in files}:
         raise HubError(f"{rid} has no config.json, so it is not a LeRobot policy.")
     cfg = _read_config(hh, rid, mi.sha)
-    ptype = cfg.get("type")  # draccus writes the registered choice name here (policies.py:218-220)
-    if not isinstance(ptype, str) or not ptype:
-        raise HubError(f"{rid}'s config.json has no policy `type`, so it is not a LeRobot policy.")
-    inputs = _features(cfg.get("input_features"), "input_features")
-    outputs = _features(cfg.get("output_features"), "output_features")
     card = mi.card_data  # README metadata; CardData.get at repocard_data.py:228
     lic = card.get("license") if card is not None else None
     return {
         "repo_id": rid,
         "revision": mi.sha,
-        "policy_type": ptype,
-        "input_features": inputs,
-        "output_features": outputs,
-        # Image shapes are channels, height, width (utils/feature_utils.py:159-167).
-        "cameras": {k: f["shape"] for k, f in inputs.items() if f["type"] == "VISUAL"},
-        "state_shape": inputs[STATE]["shape"] if STATE in inputs else None,
-        "action_shape": outputs[ACTION]["shape"] if ACTION in outputs else None,
+        **_policy(cfg, f"{rid}'s config.json"),
         "files": [{"path": f.path, "size": f.size, "lfs": f.sha256 is not None} for f in files],
         "total_size": sum(f.size for f in files),
         "has_weights": WEIGHTS in {f.path for f in files},
@@ -330,19 +418,31 @@ def compatibility(info: dict[str, Any], spec: RigSpec) -> list[str]:
     out: list[str] = []
     inputs: dict[str, Any] = info.get("input_features") or {}
     outputs: dict[str, Any] = info.get("output_features") or {}
+    ptype = info.get("policy_type")
+    if isinstance(ptype, str) and ptype not in POLICY_TYPES:
+        # A plugin package can add a type: lerobot-rollout imports every installed lerobot_policy_*
+        # package first (lerobot_rollout.py:246; utils/import_utils.py:214-228).
+        out.append(WARNING + f"LeRobot 0.6.0 has no built-in policy type `{ptype}`, so "
+                   "lerobot-rollout loads this model only if a LeRobot plugin that adds it is "
+                   "installed.")  # fmt: skip
     if not inputs:
         out.append(WARNING + "The model's config.json lists no input features, so Studio cannot "
                    "check its cameras or state.")  # fmt: skip
     model_cams = {k: f["shape"] for k, f in inputs.items() if f.get("type") == "VISUAL"}
     rig_cams = {c.feature: c for c in spec.cameras}
+    # WHY backticks: the Models page shows a `name` as code, so a camera key reads as a key.
+    names = [f"`{k.removeprefix(IMAGES)}`" for k in rig_cams]
+    has = (f"your rig has {', '.join(names[:-1])} and {names[-1]}" if len(names) > 1
+           else f"your rig has only {names[0]}" if names
+           else "your rig has no cameras")  # fmt: skip
     for key, shape in model_cams.items():
-        name = key.removeprefix(IMAGES)
+        name = f"`{key.removeprefix(IMAGES)}`"
         cam = rig_cams.get(key)
         if cam is None:
             # lerobot-rollout maps camera names with --rename_map (rollout/configs.py:242).
-            out.append(f"The model takes a camera called {name} ({key}); this rig has none by "
-                       f"that name. Rename a camera in robot-config.yaml, or map it with "
-                       f"lerobot-rollout --rename_map.")  # fmt: skip
+            out.append(f"This model expects a camera named {name}; {has}. Map one of them to it "
+                       "when you run the model, or rename a camera in "
+                       "robot-config.yaml.")  # fmt: skip
             continue
         if cam.source is None:
             out.append(f"The model takes the {name} camera, but robot-config.yaml gives it no "
@@ -366,12 +466,12 @@ def compatibility(info: dict[str, Any], spec: RigSpec) -> list[str]:
                        f"rig's {name} camera is set to {w}x{h}.")  # fmt: skip
     for key in rig_cams:
         if key not in model_cams:
-            out.append(WARNING + f"The rig's {key.removeprefix(IMAGES)} camera ({key}) is not an "
-                       "input of this model.")  # fmt: skip
+            out.append(WARNING + f"The rig's `{key.removeprefix(IMAGES)}` camera (`{key}`) is not "
+                       "an input of this model, so the model ignores it.")  # fmt: skip
     # Simulator state; an SO follower observes only joints and cameras (so_follower.py:80-81).
     for key, f in inputs.items():
         if f.get("type") == "ENV":
-            out.append(f"The model takes {key}, simulator state that an SO-101 rig does not "
+            out.append(f"The model takes `{key}`, simulator state that an SO-101 rig does not "
                        f"produce.")  # fmt: skip
     # State and action are the same motors (so_follower.py:80-85).
     joints = len(spec.action_features())
@@ -384,6 +484,41 @@ def compatibility(info: dict[str, Any], spec: RigSpec) -> list[str]:
         if key in feats and feats[key]["shape"] != [joints]:
             out.append(f"The model's {what} has {_size(feats[key]['shape'])} numbers; {rig}.")
     return out
+
+
+def _plain(key: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", key.removeprefix(IMAGES).lower())
+
+
+def propose_rename_map(model_cams: list[str], rig_cams: list[str]) -> dict[str, str]:
+    """A first guess at lerobot-rollout's --rename_map: {rig camera key: model camera key} for each
+    model camera the rig lacks by name. LeRobot renames the robot's observation keys to the
+    model's (processor/rename_processor.py:43-49; rollout/configs.py:241).
+    Names first: equal once case and punctuation go, or one inside the other (`wrist` and
+    `wrist_cam`). Then order: what is left pairs up in the order each side lists it."""
+    missing = [k for k in model_cams if k not in rig_cams]
+    free = [k for k in rig_cams if k not in model_cams]
+    out: dict[str, str] = {}
+    for want in list(missing):
+        w = _plain(want)
+        match = next((r for r in free if _plain(r) == w), None) or next(
+            (r for r in free if w and _plain(r) and (w in _plain(r) or _plain(r) in w)), None
+        )
+        if match is not None:
+            out[match] = want
+            free.remove(match)
+            missing.remove(want)
+    for want, rig in zip(missing, free, strict=False):
+        out[rig] = want
+    return out
+
+
+def as_seen_by_rig(info: dict[str, Any], rename_map: dict[str, str]) -> dict[str, Any]:
+    """The model's features with each renamed camera under the rig's own key, so compatibility()
+    checks the camera that will really feed it."""
+    back = {model: rig for rig, model in rename_map.items()}
+    inputs = info.get("input_features") or {}
+    return {**info, "input_features": {back.get(k, k): f for k, f in inputs.items()}}
 
 
 # -- download ------------------------------------------------------------------------------------
@@ -532,3 +667,29 @@ def local_models(cache_dir: Path | None = None) -> list[dict[str, Any]]:
                             "modified": modified})  # fmt: skip
     out.sort(key=lambda m: m["modified"], reverse=True)
     return out
+
+
+def inspect_local(path: str | Path) -> dict[str, Any]:
+    """What a downloaded policy expects, from its config.json on disk: the fields compatibility()
+    reads, with no network. Raises HubError."""
+    p = Path(path) / CONFIG
+    try:
+        cfg = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise HubError(f"Cannot read {p}: {e}") from None
+    if not isinstance(cfg, dict):
+        raise HubError(f"{p} is not a JSON object.")
+    return _policy(cfg, str(p))
+
+
+def snapshot_size(path: str | Path) -> int:
+    """Bytes of the files in one cache snapshot. Each is a link into the cache's blobs folder
+    (file_download.py:1235, 1254), so stat follows it to the real file."""
+    total = 0
+    for f in Path(path).rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            continue
+    return total

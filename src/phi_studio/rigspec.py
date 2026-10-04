@@ -427,3 +427,115 @@ def lerobot_commands(spec: RigSpec) -> list[dict[str, str]]:
                         "--dataset.push_to_hub=false." + gap,
                         "lerobot-record", rec))  # fmt: skip
     return out
+
+
+# -- lerobot-rollout -----------------------------------------------------------------------------
+
+# lerobot-rollout's strategies (rollout/configs.py:53-189) in the order the Models page offers
+# them. Every one but base writes a dataset and refuses to start without --dataset.repo_id
+# (configs.py:263-273); base refuses one (configs.py:275-278).
+ROLLOUT_STRATEGIES = ("base", "sentry", "highlight", "episodic", "dagger")
+ROLLOUT_RECORDS = frozenset({"sentry", "highlight", "episodic", "dagger"})
+# A rollout dataset's name must start with this (rollout/context.py:354-359). lerobot-record
+# refuses names that start with eval_ (lerobot_record.py:431-437), so neither tool takes eval_.
+ROLLOUT_PREFIX = "rollout_"
+_IMAGES = "observation.images."
+
+
+def _num(v: float) -> str:
+    return str(int(v)) if float(v).is_integer() else str(v)
+
+
+def rollout_command(
+    spec: RigSpec,
+    policy_path: str,
+    task: str,
+    duration_s: float = 60,
+    strategy: str = "base",
+    dataset_repo_id: str | None = None,
+    rename_map: dict[str, str] | None = None,
+    episodes: int = 10,
+    upload: bool = False,
+) -> str:
+    """lerobot-rollout for this rig and one policy. Raises ValueError, in plain words, for anything
+    lerobot-rollout would refuse at start-up.
+
+    policy_path: a local snapshot folder or a Hub repo id; LeRobot reads config.json and
+    model.safetensors from a folder without the network (configs/policies.py:185-187,
+    policies/pretrained.py:195-198).
+    duration_s: --duration, after which base, sentry, highlight and dagger stop
+    (strategies/base.py:58). episodic ignores it and records `episodes` episodes of duration_s each
+    (strategies/episodic.py:98-101), so it becomes --dataset.episode_time_s.
+    rename_map: {rig camera key: model camera key}, the shape LeRobot's own hint prints
+    (rollout/context.py:324-325). Empty means none.
+    upload: False adds --dataset.push_to_hub=false. WHY not LeRobot's default (true,
+    configs/dataset.py:43): the strategies push with private=None (strategies/sentry.py:191-194),
+    which makes a new Hub repo public unless the account defaults to private (hf_api.py:4536), and
+    a rollout should not publish camera footage of the room by default."""
+    if strategy not in ROLLOUT_STRATEGIES:
+        raise ValueError(f"Unknown strategy {strategy!r}; lerobot-rollout takes "
+                         f"{', '.join(ROLLOUT_STRATEGIES)}.")  # fmt: skip
+    robots = [a for a in spec.arms if a.section == "robot"]
+    teleops = [a for a in spec.arms if a.section == "teleop"]
+    if not robots:
+        raise ValueError("robot-config.yaml has no follower arm, so there is nothing to run.")
+    if not str(policy_path or "").strip():
+        raise ValueError("Pick a downloaded model first.")
+    task = " ".join(str(task or "").split())
+    records = strategy in ROLLOUT_RECORDS
+    if records and not task:
+        raise ValueError("Write the task: a recording saves it with every episode.")
+    if not (isinstance(duration_s, (int, float)) and not isinstance(duration_s, bool)
+            and 0 < duration_s <= 86400):  # fmt: skip
+        # WHY no 0: LeRobot reads --duration=0 as run forever (rollout/configs.py:224).
+        raise ValueError("Duration must be 1 second to 24 hours.")
+    args = [f"--strategy.type={strategy}", f"--policy.path={policy_path}"]
+    args += _device_args("robot", robots, spec.robot) + _cameras_args(spec)
+    if strategy == "dagger":
+        # DAgger hands the arm to the leader for corrections (rollout/configs.py:259-260).
+        if not teleops:
+            raise ValueError("Taking over needs a leader arm, and robot-config.yaml has none.")
+        args += _device_args("teleop", teleops, spec.teleop)
+    if task:
+        args.append(f"--task={task}")
+    if strategy != "episodic":
+        args.append(f"--duration={_num(duration_s)}")
+    repo = str(dataset_repo_id or "").strip()
+    if not records:
+        if repo:
+            raise ValueError("Just running a model records nothing, so it takes no dataset name. "
+                             "Pick a recording strategy to save a dataset.")  # fmt: skip
+    else:
+        owner, _, name = repo.partition("/")
+        if not owner or not name or "/" in name:
+            raise ValueError("Name the dataset as `owner/rollout_name`.")
+        if not name.startswith(ROLLOUT_PREFIX):
+            raise ValueError(f"lerobot-rollout only records into a dataset whose name starts "
+                             f"with `{ROLLOUT_PREFIX}`, for example `{owner}/{ROLLOUT_PREFIX}"
+                             "pick_cube`.")  # fmt: skip
+        if not isinstance(episodes, int) or isinstance(episodes, bool) or episodes < 1:
+            raise ValueError("Record at least 1 episode.")
+        args += [f"--dataset.repo_id={repo}", f"--dataset.single_task={task}"]
+        if strategy in ("episodic", "dagger"):
+            # DAgger takes its episode count from the dataset when not set (configs.py:311-317).
+            args.append(f"--dataset.num_episodes={episodes}")
+        if strategy == "episodic":
+            args.append(f"--dataset.episode_time_s={_num(duration_s)}")
+        if not upload:
+            args.append("--dataset.push_to_hub=false")
+    renames = {str(k): str(v) for k, v in (rename_map or {}).items() if k != v}
+    if renames:
+        rig = {c.feature for c in spec.cameras if _usable(c)}
+        for src, dst in renames.items():
+            if not src.startswith(_IMAGES) or not dst.startswith(_IMAGES):
+                raise ValueError(f"Camera keys start with `{_IMAGES}`: `{src}`, `{dst}`.")
+            if src not in rig:
+                raise ValueError(f"The rig has no camera `{src}` with a device to rename.")
+        if len(set(renames.values())) < len(renames):
+            raise ValueError("Two rig cameras are mapped to the same model camera.")
+        kept = rig - set(renames)
+        if clash := sorted(set(renames.values()) & kept):
+            raise ValueError(f"`{clash[0]}` is already one of the rig's cameras; renaming "
+                             "another camera to it would hide one of the two.")  # fmt: skip
+        args.append(f"--rename_map={json.dumps(renames, separators=(',', ':'))}")
+    return " ".join(["lerobot-rollout", *(shlex.quote(a) for a in args)])

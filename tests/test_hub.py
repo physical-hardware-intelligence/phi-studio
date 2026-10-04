@@ -544,3 +544,185 @@ def test_download_hub_error_is_readable(repo, tmp_path, monkeypatch, hh):
     monkeypatch.setattr(hh, "hf_hub_download", raise_)
     with pytest.raises(hub.HubError, match="Cannot reach"):
         hub.download(RID, None, tmp_path, lambda d, t: None, threading.Event())
+
+
+# -- search --------------------------------------------------------------------------------------
+
+
+def _listed(rid: str, tags: list[str], **kw: Any) -> dict[str, Any]:
+    """One model as the Hub's /api/models answers with the expand fields search_models asks for."""
+    return {"id": rid, "author": rid.split("/")[0], "downloads": 1200, "likes": 7,
+            "lastModified": "2026-09-17T09:37:40.000Z", "tags": tags, "gated": False,
+            "private": False, **kw}  # fmt: skip
+
+
+@pytest.fixture
+def listing(hh, monkeypatch):
+    """A fake HfApi.list_models: records its arguments and serves `rows` as ModelInfo, the way
+    the real one builds them (hf_api.py:2593-2596)."""
+    state: dict[str, Any] = {"calls": [], "rows": []}
+
+    def list_models(self_api: Any, **kw: Any) -> Any:
+        state["calls"].append(kw)
+        return (hh.hf_api.ModelInfo(**r) for r in state["rows"])
+
+    monkeypatch.setattr(hh.HfApi, "list_models", list_models)
+    return state
+
+
+@needs_hub
+def test_search_asks_for_lerobot_policies_with_the_fields_it_shows(listing):
+    listing["rows"] = [_listed("someone/act_so101", ["lerobot", "robotics", "act", "so101"])]
+    got = hub.search_models("  act   so101 ")
+    call = listing["calls"][0]
+    assert call["filter"] == "lerobot" and call["search"] == "act so101"
+    assert call["sort"] == "downloads" and call["limit"] == 30
+    assert {"lastModified", "downloads", "likes", "tags"} <= set(call["expand"])
+    assert got == [{
+        "repo_id": "someone/act_so101", "author": "someone", "downloads": 1200, "likes": 7,
+        "last_modified": "2026-09-17T09:37:40+00:00",
+        "tags": ["lerobot", "robotics", "act", "so101"], "policy_type": "act", "gated": False,
+        "private": False,
+    }]  # fmt: skip
+    json.dumps(got)
+
+
+@needs_hub
+def test_an_empty_search_lists_the_most_downloaded(listing):
+    hub.search_models("")
+    assert listing["calls"][0]["search"] is None and listing["calls"][0]["sort"] == "downloads"
+    hub.search_models("x", limit=500, sort="likes")
+    assert listing["calls"][1]["limit"] == 100 and listing["calls"][1]["sort"] == "likes"
+
+
+@needs_hub
+@pytest.mark.parametrize(
+    "tags, card, want",
+    [
+        (["lerobot", "robotics", "smolvla"], None, "smolvla"),
+        (["lerobot", "robotics"], None, None),  # lerobot/smolvla_base lists no type tag
+        (["lerobot", "robotics"], {"model_name": "pi05"}, "pi05"),
+        (["lerobot", "act"], {"model_name": "smolvla"}, None),  # two answers: no guess
+        (["lerobot", "flux-3", "world-model"], None, None),  # not a LeRobot 0.6.0 type
+    ],
+)
+def test_policy_type_only_when_the_listing_states_it(listing, tags, card, want):
+    listing["rows"] = [_listed("a/b", tags, **({"cardData": card} if card else {}))]
+    assert hub.search_models("b")[0]["policy_type"] == want
+
+
+@needs_hub
+def test_search_offline_is_a_plain_message(hh):
+    # The real list_models: HF_HUB_OFFLINE (forced by the fixture) stops it before the network.
+    with pytest.raises(hub.HubError, match="Cannot search the Hugging Face Hub") as e:
+        hub.search_models("act")
+    assert "HF_HUB_OFFLINE" in str(e.value) and e.value.__cause__ is None
+
+
+@needs_hub
+@pytest.mark.parametrize(
+    "status, words",
+    [(429, "limiting requests"), (503, "HTTP 503"), (401, "--force")],
+)
+def test_search_http_errors_are_plain_and_keep_the_token_out(hh, monkeypatch, status, words):
+    def raise_(self, **kw):
+        raise _http_error(hh, "HfHubHTTPError", status, f"boom Bearer {FAKE}")
+
+    monkeypatch.setattr(hh.HfApi, "list_models", raise_)
+    with pytest.raises(hub.HubError, match=words) as e:
+        hub.search_models("act")
+    assert FAKE not in str(e.value)
+
+
+@needs_hub
+def test_search_refuses_a_bad_sort_or_a_long_query(listing):
+    with pytest.raises(hub.HubError, match="Sort by"):
+        hub.search_models("x", sort="newest")
+    with pytest.raises(hub.HubError, match="200 characters"):
+        hub.search_models("x" * 201)
+    assert listing["calls"] == []
+
+
+def test_policy_types_match_lerobots_registry():
+    if importlib.util.find_spec("lerobot") is None:
+        pytest.skip("LeRobot is not installed")
+    import lerobot.policies  # noqa: F401  registers every policy config
+    from lerobot.configs.policies import PreTrainedConfig
+
+    assert hub.POLICY_TYPES == set(PreTrainedConfig.get_known_choices())
+
+
+# -- camera mapping and the fit after it ---------------------------------------------------------
+
+THREE = """\
+robot:
+  type: so101_follower
+  id: f
+  port: /dev/tty.F
+cameras:
+  wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}
+  front: {type: opencv, index_or_path: 1, width: 640, height: 480, fps: 30}
+  top: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}
+"""
+
+
+def _k(*names: str) -> list[str]:
+    return [f"observation.images.{n}" for n in names]
+
+
+def test_rename_proposal_matches_names_first_then_order():
+    rig = _k("front", "top", "wrist")
+    assert hub.propose_rename_map(_k("front", "top"), rig) == {}
+    wrist, wrist_cam = _k("wrist", "wrist_cam")
+    assert hub.propose_rename_map(_k("front", "wrist_cam"), rig) == {wrist: wrist_cam}
+    # smolvla_base's camera1..3: no names in common, so the rig's own order
+    assert hub.propose_rename_map(_k("camera1", "camera2", "camera3"), rig) == dict(
+        zip(rig, _k("camera1", "camera2", "camera3"), strict=True)
+    )
+    # one name matches (Top vs top_view); the rest pair in order
+    got = hub.propose_rename_map(_k("cam_a", "Top_View"), rig)
+    assert got == {_k("top")[0]: _k("Top_View")[0], _k("front")[0]: _k("cam_a")[0]}
+    # more model cameras than rig cameras: the extra one stays unmapped
+    assert len(hub.propose_rename_map(_k("a", "b", "c", "d"), rig)) == 3
+
+
+def test_missing_camera_message_names_the_rigs_cameras():
+    out = hub.compatibility(_model({"camera1": (3, 480, 640)}), rigspec.parse(THREE))
+    assert _problems(out) == ["This model expects a camera named `camera1`; your rig has "
+                              "`wrist`, `front` and `top`. Map one of them to it when you run "
+                              "the model, or rename a camera in robot-config.yaml."]  # fmt: skip
+
+
+def test_the_fit_after_mapping_checks_the_camera_that_feeds_it():
+    model = _model({"camera1": (3, 480, 640), "camera2": (3, 224, 224)})
+    spec = rigspec.parse(THREE)
+    mapping = {_k("front")[0]: _k("camera1")[0], _k("top")[0]: _k("camera2")[0]}
+    out = hub.compatibility(hub.as_seen_by_rig(model, mapping), spec)
+    assert _problems(out) == ["The model was trained on 224x224 frames from `top`; the rig's "
+                              "`top` camera is set to 640x480."]  # fmt: skip
+    assert [w for w in out if "wrist" in w and w.startswith(hub.WARNING)]
+
+
+def test_unknown_policy_type_is_a_warning():
+    info = {**_model({"front": (3, 480, 640)}), "policy_type": "diffusion_patch"}
+    out = hub.compatibility(info, rigspec.parse(SINGLE))
+    assert not _problems(out) and "`diffusion_patch`" in out[0]
+    assert hub.compatibility({**info, "policy_type": "act"}, rigspec.parse(SINGLE)) == []
+
+
+# -- a downloaded model on disk ------------------------------------------------------------------
+
+
+def test_inspect_local_reads_config_json_and_size_follows_links(tmp_path):
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    (blobs / "w").write_bytes(b"x" * 1000)
+    snap = _snapshot(tmp_path, RID, SHA, {"config.json": json.dumps(ACT_CONFIG).encode()})
+    (snap / "model.safetensors").symlink_to(blobs / "w")  # the cache links files to blobs
+    info = hub.inspect_local(snap)
+    assert info["policy_type"] == "act" and info["cameras"] == {"observation.images.front":
+                                                                 [3, 480, 640]}  # fmt: skip
+    assert info["state_shape"] == [6] and info["action_shape"] == [6]
+    assert hub.snapshot_size(snap) == 1000 + len(json.dumps(ACT_CONFIG))
+    with pytest.raises(hub.HubError, match="Cannot read"):
+        hub.inspect_local(tmp_path / "nowhere")
