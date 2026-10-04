@@ -3,7 +3,7 @@ html, body, #root { height: 100%; margin: 0; }
 body {
   background: var(--bg-app);
   color: var(--text-primary);
-  font: 400 var(--text-base)/1.3125rem var(--font-sans);
+  font: 400 var(--text-base)/1.5rem var(--font-sans);
   -webkit-font-smoothing: antialiased;
   /* WHY global: almost every number here is live (Hz, °C, joint angles, counts). Proportional figures make
      a changing value shift sideways on every frame; tabular ones keep each digit in its own column. */
@@ -15,14 +15,14 @@ h1, h2, h3, p { margin: 0; }
 a { color: var(--accent-text); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
-/* type scale (tokens.css): 12 caption, 13 small, 14 body, 16 section, 20 page, 28 stat */
-.t-cap { font-size: var(--text-xs); line-height: 1rem; }
-.t-sm { font-size: var(--text-sm); line-height: 1.125rem; }
-.t-md { font-size: var(--text-base); line-height: 1.3125rem; }
-.t-lg { font-size: var(--text-lg); line-height: 1.4375rem; font-weight: 600; }
-.t-page { font-size: var(--text-2xl); line-height: 1.75rem; font-weight: 600; letter-spacing: -0.012em; }
-.t-stat { font-size: var(--text-3xl); line-height: 2rem; font-weight: 600; letter-spacing: -0.02em; }
-.mono { font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.125rem; }
+/* type scale (tokens.css): 13 caption, 14 small, 16 body, 18 section, 24 page, 32 stat */
+.t-cap { font-size: var(--text-xs); line-height: 1.125rem; }
+.t-sm { font-size: var(--text-sm); line-height: 1.3125rem; }
+.t-md { font-size: var(--text-base); line-height: 1.5rem; }
+.t-lg { font-size: var(--text-lg); line-height: 1.625rem; font-weight: 600; }
+.t-page { font-size: var(--text-2xl); line-height: 2rem; font-weight: 600; letter-spacing: -0.012em; }
+.t-stat { font-size: var(--text-3xl); line-height: 2.3125rem; font-weight: 600; letter-spacing: -0.02em; }
+.mono { font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.3125rem; }
 .num { font-variant-numeric: tabular-nums; }
 /* A config identifier (arm id, port, joint, camera key, file name), spelled exactly as robot-config.yaml and
    LeRobot spell it. Mono marks it as a string to match, not prose. 0.92em because SF Mono's x-height is taller
@@ -59,14 +59,14 @@ a:hover { text-decoration: underline; }
 .btn-sm svg { width: 15px; height: 15px; }
 .btn-icon { width: var(--control-h-sm); padding: 0; }
 .kbd {
-  font: 500 var(--text-2xs)/1rem var(--font-mono); padding: 0 4px; border-radius: var(--radius-sm);
+  font: 500 var(--text-2xs)/1.125rem var(--font-mono); padding: 0 4px; border-radius: var(--radius-sm);
   border: 1px solid var(--border-strong); color: var(--text-tertiary); background: var(--bg-sunken);
 }
 
 /* form controls */
 .field { display: grid; gap: 6px; }
-.field-label { font-size: var(--text-sm); line-height: 1.125rem; font-weight: 500; color: var(--text-secondary); }
-.field-hint { font-size: var(--text-xs); line-height: 1.0625rem; color: var(--text-tertiary); }
+.field-label { font-size: var(--text-sm); line-height: 1.3125rem; font-weight: 500; color: var(--text-secondary); }
+.field-hint { font-size: var(--text-xs); line-height: 1.1875rem; color: var(--text-tertiary); }
 .input, .select, .textarea {
   height: var(--control-h); padding: 0 10px; width: 100%;
   border-radius: var(--radius-lg); border: 1px solid var(--border-control);
@@ -78,7 +78,7 @@ a:hover { text-decoration: underline; }
   appearance: none; padding-right: 30px; text-overflow: ellipsis;
   background: var(--bg-panel) var(--chevron) no-repeat right 10px center / 12px 12px;
 }
-.textarea { height: auto; min-height: 64px; padding: 6px 10px; resize: vertical; line-height: 1.3125rem; }
+.textarea { height: auto; min-height: 64px; padding: 6px 10px; resize: vertical; line-height: 1.5rem; }
 .input:hover:not(:disabled), .select:hover:not(:disabled), .textarea:hover:not(:disabled) { border-color: var(--text-tertiary); }
 .input:focus, .select:focus, .textarea:focus { outline: none; border-color: var(--focus-ring); box-shadow: 0 0 0 3px var(--accent-subtle); }
 .input:disabled, .select:disabled, .textarea:disabled { background: var(--bg-sunken); color: var(--text-disabled); cursor: not-allowed; }
@@ -91,8 +91,8 @@ a:hover { text-decoration: underline; }
   min-height: 3.25rem; padding: 14px var(--space-4) 10px;
 }
 .panel-head + .panel-body { padding-top: 0; }
-.panel-title { font-size: var(--text-lg); line-height: 1.5rem; font-weight: 600; letter-spacing: -0.006em; }
-.panel-sub { font-size: var(--text-sm); line-height: 1.125rem; color: var(--text-tertiary); }
+.panel-title { font-size: var(--text-lg); line-height: 1.6875rem; font-weight: 600; letter-spacing: -0.006em; }
+.panel-sub { font-size: var(--text-sm); line-height: 1.3125rem; color: var(--text-tertiary); }
 .panel-body { padding: var(--space-4); }
 .divider { height: 1px; background: var(--border-subtle); border: 0; margin: 0; }
 
@@ -112,7 +112,7 @@ a:hover { text-decoration: underline; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--tone-solid); flex: none; }
 
 /* tables */
-.table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); line-height: 1.25rem; }
+.table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); line-height: 1.4375rem; }
 .table th, .table td { height: var(--row-h); padding: 0 var(--space-3); text-align: left; white-space: nowrap; }
 .table thead th { height: 2.125rem; font-weight: 500; color: var(--text-tertiary); font-size: var(--text-xs); border-bottom: 1px solid var(--border-subtle); }
 .table tbody tr + tr > * { border-top: 1px solid var(--border-subtle); }
