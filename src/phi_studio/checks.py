@@ -248,8 +248,9 @@ def check_units(inp: Inputs) -> dict[str, Any]:
     unit = lambda a: "degrees" if a.use_degrees else "-100 to 100"  # noqa: E731
     if bad:
         lead, f = bad[0]
-        why = (" LeRobot 0.6.0's bi_so_leader always reads degrees (bi_so_leader.py:42-52)."
-               if lead.side else "")  # fmt: skip
+        # bi_so_leader.py:42-52: the bimanual leader ignores use_degrees
+        why = (" LeRobot 0.6.0's bimanual leader always reads degrees." if lead.side
+               else "")  # fmt: skip
         return result("units", "This Mac", title, "fail",
                       f"{label(f.key)} reads {unit(f)}, {label(lead.key)} reads {unit(lead)}. "
                       f"Teleop passes the numbers across unchanged, so the follower would go to "
@@ -279,14 +280,16 @@ def check_step_limit(inp: Inputs) -> dict[str, Any]:
                       f"all six of {', '.join(JOINTS)}, each above 0.", ref)  # fmt: skip
     off = [a for a in followers if a.max_relative_target is None]
     if off:
+        # so_follower.py:221-232 clips a goal only when max_relative_target is set
         return result("step_limit", "This Mac", title, "warn",
-                      f"No max_relative_target on {', '.join(label(a.key) for a in off)}: LeRobot "
-                      "sends every goal as it is (so_follower.py:221-232).",
+                      f"{', '.join(label(a.key) for a in off)} has no step limit, so LeRobot sends "
+                      "every goal position as it is, however far from where the arm is.",
                       f"Set {where(off[0])}.max_relative_target in robot-config.yaml, for example "
-                      "10. The commands on the LeRobot setup page pass it on. Studio's own teleop "
-                      "clips each step either way.", ref)  # fmt: skip
+                      "10: the most a joint may move in one step, in the arm's units. The "
+                      "commands on the Set up page pass it on. Studio's own teleop clips each "
+                      "step either way.", ref)  # fmt: skip
     caps = ", ".join(f"{label(a.key)} {a.max_relative_target}" for a in followers)
-    return result("step_limit", "This Mac", title, "pass", f"max_relative_target: {caps}")
+    return result("step_limit", "This Mac", title, "pass", f"Step limit: {caps}")
 
 
 def check_camera_config(inp: Inputs) -> dict[str, Any]:
@@ -308,8 +311,8 @@ def check_camera_config(inp: Inputs) -> dict[str, Any]:
                       "open them. macOS can renumber cameras between sessions.",
                       f"{how or 'Set type to opencv or intelrealsense'} in robot-config.yaml.",
                       ref)  # fmt: skip
-    keys = ", ".join(c.feature for c in spec.cameras)
-    return result("camera_config", "This Mac", title, "pass", f"Dataset keys: {keys}")
+    names = ", ".join(label(f"{c.side}_{c.key}" if c.side else c.key) for c in spec.cameras)
+    return result("camera_config", "This Mac", title, "pass", f"Every camera has a device: {names}")
 
 
 def _live(ports: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -469,7 +472,7 @@ def _cal_targets(inp: Inputs, arms: list[ConfigArm]) -> dict[tuple[str, str | No
 # WHY two places: Studio's Calibrate page writes only the mock rig's files (worker.py
 # mock-calibration, and cli.py exits without --mock), so an arm in robot-config.yaml is calibrated
 # by lerobot-calibrate.
-CAL_REAL = "run that arm's Calibrate command on the LeRobot setup page"
+CAL_REAL = "run that arm's Calibrate command on the Set up page"
 
 
 def check_calibrations(inp: Inputs) -> dict[str, Any]:
@@ -492,7 +495,7 @@ def check_calibrations(inp: Inputs) -> dict[str, Any]:
             title,
             "warn",
             "No calibration folder exists yet.",
-            "Run the Calibrate commands on the LeRobot setup page.",
+            "Run the Calibrate commands on the Set up page.",
         )
     every = [p for d in dirs for p in sorted(d.rglob("*.json"))]
     missing: list[str] = []

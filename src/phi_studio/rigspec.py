@@ -191,8 +191,9 @@ def step_limit_issue(v: Any) -> str | None:
         return None
     if isinstance(v, dict):
         if set(v) != set(JOINTS):
+            # robots/utils.py:99-100 raises on any other set of keys
             return (f"lists {', '.join(map(str, v)) or 'no joints'}; LeRobot needs exactly the six "
-                    f"motors or it raises on every action (robots/utils.py:99-100)")  # fmt: skip
+                    "motors or it stops with an error on every move")  # fmt: skip
         vals = list(v.values())
     elif isinstance(v, bool) or not isinstance(v, (int, float)):
         return "is not a number or a per-joint mapping"
@@ -271,12 +272,11 @@ def parse(text: str) -> RigSpec:
                     # WHY leaders are always degrees and take no options: 0.6.0's bi_so_leader
                     # builds each arm from id, calibration_dir and port (bi_so_leader.py:42-52).
                     if "use_degrees" in sub:
-                        problems.append(f"{where}.use_degrees is ignored: bi_so_leader always "
-                                        "reads degrees (bi_so_leader.py:42-52).")  # fmt: skip
-                    if "cameras" in sub:
+                        problems.append(f"{where}.use_degrees is ignored: LeRobot's bimanual "
+                                        "leader always reads degrees.")  # fmt: skip
+                    if "cameras" in sub:  # config_so_leader.py:24-27 has no cameras field
                         problems.append(f"{where}.cameras: a leader has no cameras in "
-                                        "LeRobot (config_so_leader.py:24-27); put them under "
-                                        "robot.")  # fmt: skip
+                                        "LeRobot; put them under robot.")  # fmt: skip
                     opts: tuple[tuple[str, Any], ...] = ()
                     deg = True
                 else:
@@ -305,9 +305,9 @@ def parse(text: str) -> RigSpec:
                 use_degrees=_scalar(f.get("use_degrees")) is not False,
                 max_relative_target=dict(opts).get("max_relative_target"), options=opts,
             ))  # fmt: skip
-            if role == "leader" and "cameras" in f:
-                problems.append("teleop.cameras: a leader has no cameras in LeRobot "
-                                "(config_so_leader.py:24-27); put them under robot.")  # fmt: skip
+            if role == "leader" and "cameras" in f:  # config_so_leader.py:24-27
+                problems.append("teleop.cameras: a leader has no cameras in LeRobot; put them "
+                                "under robot.")  # fmt: skip
         if role == "follower":
             add_cameras(f"{section}.cameras", f.get("cameras"), None)
         if rid is None:
@@ -320,8 +320,9 @@ def parse(text: str) -> RigSpec:
     top = {c.key for c in cams if c.side is None}
     clash = sorted(top & {c.key for c in cams if c.side})
     if clash:
+        # bi_so_follower.py:46-52 refuses a name used in both places
         problems.append(f"Camera names {', '.join(clash)} are used both at the top and on an arm; "
-                        "bi_so_follower refuses that (bi_so_follower.py:46-52).")  # fmt: skip
+                        "LeRobot's bimanual follower refuses that.")  # fmt: skip
     sides = {a.side for a in arms}
     if None in sides and len(sides) > 1:
         problems.append(

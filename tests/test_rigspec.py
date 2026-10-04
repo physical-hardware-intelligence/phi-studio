@@ -243,7 +243,7 @@ def test_tilde_calibration_dir_is_flagged_and_not_expanded():
 
 def test_camera_name_on_both_levels_is_a_problem():
     s = rigspec.parse(BIMANUAL.replace("    top:", "    wrist:"))
-    assert any("wrist" in p and "bi_so_follower refuses" in p for p in s.problems)
+    assert any("wrist" in p and "bimanual follower refuses" in p for p in s.problems)
 
 
 # -- against LeRobot itself ----------------------------------------------------------------------
