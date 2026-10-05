@@ -8,6 +8,8 @@ __pycache__/
 build/
 dist/
 .DS_Store
+# macOS writes an AppleDouble ._ file beside every file on an exFAT drive
+._*
 web/node_modules/
 web/*.tsbuildinfo
 src/phi_studio/static/

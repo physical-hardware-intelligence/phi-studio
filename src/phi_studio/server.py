@@ -50,7 +50,7 @@ log = logging.getLogger(__name__)
 Handler = Callable[["Client", dict[str, Any]], Awaitable[None]]
 # Modules that add commands to Studio, each with register(studio). A missing one is skipped, so a
 # feature can land on its own.
-FEATURES = ("setup_api", "hub_api", "train_api", "scene_api")
+FEATURES = ("setup_api", "hub_api", "train_api", "scene_api", "data_api")
 
 COMMANDS = {"heartbeat", "connect", "identify", "confirm", "arm", "start", "stop", "resume",
             "release", "clear", "disconnect", "inject",
@@ -155,6 +155,7 @@ class Studio:
         self.frame_clock: dict[str, tuple[float, float | None]] = {}
         self.checks: dict[str, Any] | None = None  # the newest check run, for the assistant
         self.code_root = code_root or CODE_ROOT
+        self.rig_dir = rig_dir  # the phi checkout: data_api also looks for datasets in its data/
         roots = default_roots(self.code_root, self.data_dir, rig_dir)
         self.files = Files(roots)
         self.terminal: Terminal | None = None  # started when a window first opens the panel
