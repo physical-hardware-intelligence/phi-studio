@@ -52,6 +52,20 @@ export interface AutoView {
   notes: Record<string, string>;
   waiting?: boolean; // holding for another arm's shoulder-pan turn
 }
+// A take's health check (recorder.py Take.health): analysis flags plus what only recording knows.
+export interface TakeHealth {
+  episode: number; frames: number; seconds: number; dropped: number; late: number; hz?: number;
+  health: "ok" | "info" | "warn" | "error";
+  flags: { kind: string; severity: string; text: string }[];
+}
+export interface RecView {
+  repo_id: string; root: string; task: string;
+  phase: "warmup" | "record" | "reset" | "paused" | "done";
+  episode: number; of: number; t: number; limit: number | null;
+  frames: number; target: number; why: string | null; late: number;
+  dropped: number; saved: number; error: string | null; finished: boolean; ready: boolean;
+  takes: TakeHealth[];
+}
 export interface CalView {
   arm: string;
   role: "leader" | "follower";
@@ -85,6 +99,7 @@ export interface Telemetry {
   loop: { hz: number; p50_ms: number; p99_ms: number };
   calibration: CalView | null;
   autocal?: CalView[] | null; // every arm an auto-calibration sweeps
+  recording?: RecView | null; // the recording, also after it ends (recorder.py Recording.view)
   policy: PolicyView | null;
 }
 
@@ -601,8 +616,8 @@ export function useStudio<T>(select: (s: Snapshot) => T): T {
 }
 
 // -- routing and theme -------------------------------------------------------------------------
-export type Route = "overview" | "checks" | "setup" | "calibrate" | "teleop" | "scene" | "align" | "data" | "issues" | "train" | "models" | "policy" | "evaluate" | "files" | "guide" | "settings" | "onboard";
-export const ROUTES: Route[] = ["overview", "checks", "setup", "calibrate", "teleop", "scene", "align", "data", "issues", "train", "models", "policy", "evaluate", "files", "guide", "settings", "onboard"];
+export type Route = "overview" | "checks" | "setup" | "calibrate" | "teleop" | "scene" | "align" | "record" | "data" | "issues" | "train" | "models" | "policy" | "evaluate" | "files" | "guide" | "settings" | "onboard";
+export const ROUTES: Route[] = ["overview", "checks", "setup", "calibrate", "teleop", "scene", "align", "record", "data", "issues", "train", "models", "policy", "evaluate", "files", "guide", "settings", "onboard"];
 
 // A route is the hash's first segment; the guide also takes a section, as in #/guide/teleop.
 function hashParts(): string[] { return location.hash.replace(/^#\/?/, "").split("/"); }

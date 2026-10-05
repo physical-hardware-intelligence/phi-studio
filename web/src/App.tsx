@@ -16,6 +16,7 @@ import { Onboard } from "./pages/Onboard";
 import { Settings } from "./pages/Settings";
 import { Models } from "./pages/Models";
 import { Policy } from "./pages/Policy";
+import { Record } from "./pages/Record";
 import { Scene } from "./pages/Scene";
 import { Setup } from "./pages/Setup";
 import { Teleop } from "./pages/Teleop";
@@ -32,6 +33,7 @@ const PAGES: Record<Route, { title: string; sub: string; el: ComponentType }> = 
   teleop: { title: "Teleop", sub: "Drive the followers with the leaders", el: Teleop },
   scene: { title: "3D view", sub: "The arms, live", el: Scene },
   align: { title: "Align", sub: "Each camera back where the training data was recorded", el: Align },
+  record: { title: "Record", sub: "Teleop episodes into a LeRobot dataset", el: Record },
   data: { title: "Datasets", sub: "Every recording on this Mac", el: Data },
   issues: { title: "Issues", sub: "Notes and excluded episodes", el: Issues },
   train: { title: "Train", sub: "On this Mac or the cluster", el: Train },

@@ -58,7 +58,7 @@ COMMANDS = {"heartbeat", "connect", "identify", "confirm", "arm", "start", "stop
             "release", "clear", "disconnect", "inject",
             "cal_start", "cal_middle", "cal_finish", "cal_save", "cal_cancel",
             "autocal_start", "autocal_go", "autocal_resume", "autocal_save",
-            "autocal_cancel"}  # fmt: skip
+            "autocal_cancel", "rec_start", "rec_next", "rec_redo", "rec_stop"}  # fmt: skip
 EVAL_COMMANDS = {"eval_begin", "eval_mark", "eval_undo", "eval_end"}  # answered by the server
 ANYONE = {"stop", "take_control"}  # allowed from a window without control
 # Answered by the server, from any window: they read, and none reaches the worker.
@@ -66,6 +66,7 @@ READ_ONLY = {"assist_status", "assist_context", "assist_ask", "assist_stop", "as
              "files_index", "file_read", "files_search", "ports", "checks_run"}  # fmt: skip
 CODE_ROOT = Path(__file__).resolve().parents[2]  # src/phi_studio/server.py -> the repo
 LOG_SIZE = 200
+WORKER_EXIT_S = 16.0  # a closing worker may finalize a recording first (worker.FINISH_S = 15)
 # newest of each, sent to a new window
 REPLAYED = ("rig", "state", "identity", "worker_exit", "align_result")
 
@@ -189,7 +190,10 @@ class Studio:
 
         ctx = mp.get_context("spawn")
         self.conn, child = ctx.Pipe()
-        self.proc = ctx.Process(target=run_worker, args=(child, self.spec), daemon=True)
+        # WHY not a daemon: a daemonic process may not start processes, and the worker starts one
+        # to write a recording (recorder.WriterProcess). It still never outlives Studio: its
+        # reader sees the pipe close (stop_worker, or the OS when Studio dies) and it exits.
+        self.proc = ctx.Process(target=run_worker, args=(child, self.spec), daemon=False)
         self.proc.start()
         child.close()  # WHY: otherwise recv() never sees EOF when the worker dies
         threading.Thread(target=self._pump, args=(self.conn, self.proc), daemon=True).start()
@@ -277,7 +281,7 @@ class Studio:
         if conn is not None:
             conn.close()  # the worker reads EOF and exits (run_worker)
         if proc is not None:
-            proc.join(3)
+            proc.join(WORKER_EXIT_S)
             if proc.is_alive():
                 proc.terminate()
                 proc.join(1)
@@ -307,7 +311,9 @@ class Studio:
         if self.conn is not None:
             self.conn.close()
         if self.proc is not None:
-            self.proc.join(3)
+            # WHY this long: the worker finalizes a recording on its way out (worker.FINISH_S);
+            # killed mid-finalize, the dataset cannot be read. It usually takes under a second.
+            self.proc.join(WORKER_EXIT_S)
             if self.proc.is_alive():
                 self.proc.terminate()
 

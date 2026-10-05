@@ -420,6 +420,9 @@ class OnboardAPI:
         st = (self.studio.last.get("state") or {}).get("state", "DISCONNECTED")
         if st in HOLDING_STATES:
             raise Refusal("An arm may be holding torque.", "Release torque, then disconnect.")
+        rec = (self.studio.telemetry or {}).get("recording") or {}
+        if rec and not rec.get("finished", True):
+            raise Refusal("A recording is still being written.", "Try again in a few seconds.")
         if hardware:
             path = config_target(self.studio)
             if not path.is_file():

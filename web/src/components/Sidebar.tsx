@@ -1,4 +1,4 @@
-import { Bot, Box, ClipboardCheck, Cpu, Database, Gamepad2, House, Moon, PackageSearch, ScanSearch, Settings, Sun } from "lucide-react";
+import { Bot, Box, CircleDot, ClipboardCheck, Cpu, Database, Gamepad2, House, Moon, PackageSearch, ScanSearch, Settings, Sun } from "lucide-react";
 import type { ComponentType } from "react";
 import { useNotes } from "../lib/data";
 import { go, setTheme, useRoute, useStudio, useTheme, type Route } from "../lib/studio";
@@ -15,6 +15,7 @@ const RIG: Item[] = [
   { route: "align", label: "Align", icon: ScanSearch },
 ];
 const DATA: Item[] = [
+  { route: "record", label: "Record", icon: CircleDot },
   { route: "data", label: "Datasets", icon: Database },
 ];
 const POLICIES: Item[] = [
@@ -27,7 +28,7 @@ const FOOT: Item = { route: "settings", label: "Settings", icon: Settings };
 
 // WHY every route: the Claude panel names the current page, including the ones reached from Settings.
 export const PAGE_LABELS: Record<Route, string> = {
-  overview: "Home", teleop: "Teleop", scene: "3D view", align: "Align", data: "Datasets", issues: "Issues", train: "Train",
+  overview: "Home", teleop: "Teleop", scene: "3D view", align: "Align", record: "Record", data: "Datasets", issues: "Issues", train: "Train",
   models: "Models", policy: "Run", evaluate: "Evaluate", settings: "Settings", onboard: "Rig setup",
   setup: "Advanced setup", calibrate: "Calibrate", checks: "Checks", files: "Files", guide: "Guide",
 };
@@ -97,6 +98,10 @@ function useHints(): Partial<Record<Route, Hint>> {
   const fails = useStudio((s) => s.checks.results?.filter((r) => r.status === "fail").length ?? 0);
   const open = useNotes(null, null)?.filter((n) => n.kind === "issue" && n.status === "open").length ?? 0;
   const off = useStudio((s) => s.align !== null && !s.align.aligned);
+  const recording = useStudio((s) => {
+    const r = s.telemetry?.recording;
+    return r && r.phase !== "done" ? `${Math.min(r.episode + 1, r.of)}/${r.of}` : null;
+  });
   const out: Partial<Record<Route, Hint>> = {};
   if (off) out.align = { text: "Off", tone: "warn" };
   if (open) out.data = { text: `${open} open`, tone: "warn" };
@@ -105,6 +110,7 @@ function useHints(): Partial<Record<Route, Hint>> {
   else if (needCal) out.overview = { text: "Check", tone: "warn", dot: true };
   if (state?.state === "CALIBRATING") out.overview = { text: "Calibrating", tone: "info", dot: true };
   if (state?.state === "MOVING" && state.activity === "teleop") out.teleop = { text: "Live", tone: "ok", dot: true };
+  if (recording) out.record = { text: recording, tone: "danger", dot: true };
   if (state?.state === "MOVING" && state.activity === "policy") out.policy = { text: "Running", tone: "ok", dot: true };
   return out;
 }

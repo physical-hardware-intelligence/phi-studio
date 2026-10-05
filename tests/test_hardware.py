@@ -32,6 +32,7 @@ class FakeBus:
         self.writes: list[tuple[str, str, int]] = []
         self.goals: list[dict[str, float]] = []
         self.normalized: list[bool] = []
+        self.retries: list[int] = []
         self.regs = {
             j: {
                 "Present_Load": -250,
@@ -60,7 +61,9 @@ class FakeBus:
             return (raw - c.range_min) / (c.range_max - c.range_min) * 100
         return (raw - (c.range_min + c.range_max) / 2) * 360 / 4095
 
-    def sync_read(self, name: str, motors: Any = None, *, normalize: bool = True) -> dict[str, Any]:
+    def sync_read(self, name: str, motors: Any = None, *, normalize: bool = True,
+                  num_retry: int = 0) -> dict[str, Any]:  # fmt: skip
+        self.retries.append(num_retry)
         if not self.connected:
             raise ConnectionError("not connected")
         if name == "Present_Position":
@@ -439,3 +442,11 @@ def test_a_failed_connect_raises_studios_words_and_keeps_lerobots_as_the_cause()
     with pytest.raises(ConnectionError, match="nothing answers on /dev/x") as got:
         a.connect()
     assert isinstance(got.value.__cause__, ConnectionError)
+
+
+def test_position_reads_retry_a_lost_packet_before_the_bus_counts_as_down() -> None:
+    a = arm()
+    bus = FakeBus.instances[-1]
+    a.read_positions()
+    a.read_raw_positions()
+    assert bus.retries[-2:] == [H.READ_RETRIES, H.READ_RETRIES]

@@ -39,6 +39,10 @@ from phi_studio.identity import Calibration, JointCal, load_calibration
 from phi_studio.rig import JOINTS, JointHealth
 
 RECONNECT_S = 2.0  # how often a lost bus is tried again
+# WHY retries: one lost status packet on a long USB run must not fault a recording; LeRobot's
+# sync_read retries in place (motors_bus.py sync_read num_retry). A bus that misses three in a row
+# is down, and the worker faults it as before.
+READ_RETRIES = 2
 MOTOR_IDS = {j: i + 1 for i, j in enumerate(JOINTS)}  # motor_table's ids, without importing LeRobot
 FULL_TICKS = 4095  # the STS3215's last encoder tick: reset_calibration's Max_Position_Limit
 GRIPPER_LIMITS = {"Max_Torque_Limit": 500, "Protection_Current": 250, "Overload_Torque": 25}
@@ -210,14 +214,17 @@ class FeetechArm:
             # would drive a follower somewhere unrelated.
             raise RuntimeError(f"{self.name} has no calibration file ({self.calibration_id}.json)")
         return {
-            j: float(v) for j, v in self._call(lambda b: b.sync_read("Present_Position")).items()
+            j: float(v)
+            for j, v in self._call(
+                lambda b: b.sync_read("Present_Position", num_retry=READ_RETRIES)
+            ).items()
         }
 
     def read_raw_positions(self) -> dict[str, int]:
         return {
             j: int(v)
             for j, v in self._call(
-                lambda b: b.sync_read("Present_Position", normalize=False)
+                lambda b: b.sync_read("Present_Position", normalize=False, num_retry=READ_RETRIES)
             ).items()
         }
 

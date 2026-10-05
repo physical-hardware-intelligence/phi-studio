@@ -210,3 +210,34 @@
 .aj-pos { position: absolute; top: -2px; width: 2px; height: 10px; background: var(--text-primary); transform: translateX(-1px); }
 .aj-val { text-align: right; color: var(--text-secondary); white-space: nowrap; }
 @container (max-width: 520px) { .auto-middle { grid-template-columns: 1fr; } .mid-pose { max-width: 10rem; } }
+
+/* Record page. */
+.rec-panel .panel-head { display: flex; align-items: center; justify-content: space-between; }
+.rec-nums { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-2); }
+.rec-go .rec-dot { color: var(--danger-solid); fill: currentColor; }
+.rec-live { display: grid; gap: var(--space-3); }
+.rec-head { display: flex; align-items: center; justify-content: space-between; }
+.rec-phase { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-sm); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.rec-phase.tone-danger { color: var(--danger-text); }
+.rec-phase.tone-warn { color: var(--warn-text); }
+.rec-phase.tone-info { color: var(--accent-text); }
+.rec-blink { width: 9px; height: 9px; border-radius: 50%; background: var(--danger-solid); animation: rec-blink 1s steps(2, start) infinite; }
+@keyframes rec-blink { to { visibility: hidden; } }
+@media (prefers-reduced-motion: reduce) { .rec-blink { animation: none; } }
+.rec-clock { font-size: 2.75rem; font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
+.rec-clock .faint { font-size: 1.25rem; font-weight: 500; }
+.rec-buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.rec-buttons kbd { margin-left: 6px; padding: 0 5px; border-radius: 4px; border: 1px solid currentColor; opacity: 0.6; font-size: 11px; font-family: inherit; }
+.rec-health { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.rec-summary { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
+.rec-summary svg { width: 16px; height: 16px; flex: none; }
+.rec-summary.tone-ok svg { color: var(--ok-text); }
+.rec-summary.tone-warn svg { color: var(--warn-text); }
+.rec-takes { padding: 0 var(--space-4) var(--space-4); display: grid; gap: var(--space-2); }
+.rec-take-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; max-height: 16rem; overflow: auto; }
+.rec-take { display: grid; grid-template-columns: 16px 2rem 3rem 1fr; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
+.rec-clock-what { margin-left: 8px; font-size: var(--text-sm); font-weight: 500; letter-spacing: 0; }
+.rec-take svg { width: 15px; height: 15px; }
+.rec-take.tone-ok svg { color: var(--ok-text); }
+.rec-take.tone-warn svg { color: var(--warn-text); }
+.rec-take.tone-danger svg { color: var(--danger-text); }
