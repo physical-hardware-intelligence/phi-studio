@@ -1,9 +1,10 @@
 """The SO-101 model behind the 3D view: parsing, the LeRobot-to-MJCF map, and forward kinematics
 checked against two independent references.
 
-fixtures/so101_fk_reference.json was written by MuJoCo 3.x loading the same vendored MJCF, and by
-phi's hand-written ECE 4560 chain (phi simulation/so101_forward_kinematics.py), outside this repo:
-MuJoCo must not be installed in Studio's environment. Its `mujoco_version` field says which."""
+fixtures/so101_fk_reference.json was written by MuJoCo 3.14.0 loading the same vendored MJCF, and by
+phi's hand-written ECE 4560 chain (phi simulation/so101_forward_kinematics.py), with
+fixtures/make_so101_fk_reference.py run in a separate venv: MuJoCo must not be installed in Studio's
+environment. That script's docstring has the exact command."""
 
 from __future__ import annotations
 

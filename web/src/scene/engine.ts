@@ -16,10 +16,12 @@ import { VerticalBlurShader } from "three/addons/shaders/VerticalBlurShader.js";
 import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 import { type Frame, studio, type Telemetry } from "../lib/studio";
 import {
-  type ArmSlot, basePositions, type CamPose, cameraPose, followerSlots, limitState, type Limit, PRINT, type SceneModel,
-  type Settings, toRadians, type Vec3,
+  type ArmSlot, type ArmUnits, basePositions, type CamPose, cameraPose, DEGREES, followerSlots, frustumKeys, limitState,
+  type Limit, PRINT, readArm, type SceneModel, type Settings, type Vec3, wristMount,
 } from "../lib/scene";
 import { label } from "../lib/labels";
+import { hinge, mjQuat } from "./kinematics";
+import { Clock, Track } from "./motion";
 
 export type Preset = "home" | "front" | "side" | "top" | "wrist";
 export interface Theme { ground: string; grid: string; ghost: string; trail: string; warn: string; danger: string; frustum: string; selected: string }
@@ -30,6 +32,8 @@ export interface EngineOptions {
   onCameraEdit: (key: string, pose: CamPose) => void;
   onSelectCamera: (key: string | null) => void;
   onWristView: (on: boolean) => void;
+  onLoadError: (message: string | null) => void; // a mesh did not load; null: loading again
+  onContextLost: (lost: boolean) => void; // the browser took the GPU context away, or gave it back
 }
 
 const CREASE = THREE.MathUtils.degToRad(35); // smooth across shallow edges, keep CAD edges sharp
@@ -50,7 +54,7 @@ function loadMesh(url: string, toMm: number, onBytes: (n: number) => void): Prom
   let p = geometryCache.get(url);
   if (!p) {
     p = fetch(url).then(async (r) => {
-      if (!r.ok) throw new Error(`${url}: ${r.status}`);
+      if (!r.ok) throw new Error(`${url.split("/").pop()?.split("?")[0]}, the server answered ${r.status}`);
       const buf = await r.arrayBuffer();
       onBytes(buf.byteLength);
       // WHY in millimetres: toCreasedNormals joins corners on a grid of 1/100 of a unit (BufferGeometryUtils.js,
@@ -70,75 +74,10 @@ function loadMesh(url: string, toMm: number, onBytes: (n: number) => void): Prom
 }
 
 const v3 = (a: Vec3) => new THREE.Vector3(a[0], a[1], a[2]);
-const quat = (q: [number, number, number, number]) => new THREE.Quaternion(q[1], q[2], q[3], q[0]); // MuJoCo w,x,y,z
+const quat = (q: [number, number, number, number]) => new THREE.Quaternion(...mjQuat(q)); // MuJoCo w,x,y,z
 const srgb = (c: Vec3) => new THREE.Color().setRGB(c[0], c[1], c[2], THREE.SRGBColorSpace);
 
-/** Telemetry for one arm, buffered so the view can draw it between updates at display rate. */
-class Track {
-  private readonly t = new Float64Array(16);
-  private readonly q: Float64Array[] = Array.from({ length: 16 }, () => new Float64Array(6));
-  private n = 0;
-  private head = 0;
-  lastArrival = 0;
-
-  push(t: number, q: ArrayLike<number>): void {
-    const i = (this.head + this.n) % 16;
-    if (this.n === 16) this.head = (this.head + 1) % 16; else this.n++;
-    this.t[i] = t;
-    this.q[i].set(q);
-    this.lastArrival = performance.now();
-  }
-
-  /** Joint angles at `t` (local ms), linear between the two samples around it; the newest sample when `t` is past
-   * it (no extrapolation: a late update must not overshoot). False when there is no sample at all. */
-  sample(t: number, out: Float64Array): boolean {
-    if (!this.n) return false;
-    const at = (k: number) => (this.head + k) % 16;
-    let k = this.n - 1;
-    if (t >= this.t[at(k)]) { out.set(this.q[at(k)]); return true; }
-    while (k > 0 && this.t[at(k - 1)] > t) k--;
-    if (k === 0) { out.set(this.q[at(0)]); return true; }
-    const a = at(k - 1), b = at(k);
-    const u = (t - this.t[a]) / Math.max(1e-6, this.t[b] - this.t[a]);
-    for (let j = 0; j < 6; j++) out[j] = this.q[a][j] + (this.q[b][j] - this.q[a][j]) * u;
-    return true;
-  }
-
-  clear(): void { this.n = 0; this.head = 0; }
-}
-
-/** Maps the worker's clock onto this page's and picks how far behind live to draw. The offset is the smallest
- * arrival - send gap seen lately (the least-delayed message); the delay covers one update interval plus the
- * 90th-percentile lateness, so the next sample has almost always arrived when the view needs it. */
-class Clock {
-  private readonly gaps: number[] = [];
-  private readonly intervals: number[] = [];
-  private lastT: number | null = null;
-  offset = 0;
-  delay = 60;
-
-  add(tWorker: number): number {
-    const now = performance.now();
-    const gap = now - tWorker * 1000;
-    this.gaps.push(gap);
-    if (this.gaps.length > 90) this.gaps.shift();
-    if (this.lastT !== null && tWorker > this.lastT) {
-      this.intervals.push((tWorker - this.lastT) * 1000);
-      if (this.intervals.length > 30) this.intervals.shift();
-    }
-    this.lastT = tWorker;
-    this.offset = Math.min(...this.gaps);
-    const late = this.gaps.map((g) => g - this.offset).sort((a, b) => a - b);
-    const iv = [...this.intervals].sort((a, b) => a - b);
-    const interval = iv.length ? iv[iv.length >> 1] : 33;
-    this.delay = THREE.MathUtils.clamp(interval + late[Math.floor(late.length * 0.9)] + 4, 16, 250);
-    return tWorker * 1000 + this.offset;
-  }
-
-  reset(): void { this.gaps.length = 0; this.intervals.length = 0; this.lastT = null; }
-}
-
-interface JointNode { node: THREE.Object3D; axis: THREE.Vector3; pivot: THREE.Vector3 }
+interface JointNode { node: THREE.Object3D; axis: Vec3; pivot: Vec3 }
 
 /** One arm's node tree. Followers get meshes and per-joint servo materials; the ghost shares one translucent look. */
 class ArmView {
@@ -169,7 +108,7 @@ class ArmView {
     }
     for (const name of model.joint_order) {
       const j = model.joints[name];
-      this.joints.push({ node: this.bodies.get(j.body)!, axis: v3(j.axis).normalize(), pivot: v3(j.pos) });
+      this.joints.push({ node: this.bodies.get(j.body)!, axis: j.axis, pivot: j.pos });
     }
     if (geoms) {
       for (const g of model.geoms) {
@@ -198,18 +137,20 @@ class ArmView {
     this.bodies.get(wc.body)?.add(this.wristCam);
   }
 
-  /** Joint angles in MJCF radians, joint_order. A hinge turns about its axis through its pivot. */
+  /** Joint angles in MJCF radians, joint_order. A hinge turns about its axis through its pivot (kinematics.ts,
+   * which web/tests/scene.test.ts checks against MuJoCo). */
   setPose(q: ArrayLike<number>): void {
     for (let i = 0; i < this.joints.length; i++) {
       this.q[i] = q[i];
       const j = this.joints[i];
-      j.node.quaternion.setFromAxisAngle(j.axis, q[i]);
-      j.node.position.copy(j.pivot).sub(j.pivot.clone().applyQuaternion(j.node.quaternion));
+      const h = hinge(j.axis, j.pivot, q[i]);
+      j.node.quaternion.set(...h.q);
+      j.node.position.set(...h.p);
     }
   }
 }
 
-interface Slot { slot: ArmSlot; arm: ArmView; ghost: ArmView | null; track: Track; ghostTrack: Track; seen: boolean; online: boolean; trail: Trail; pill: HTMLElement }
+interface Slot { slot: ArmSlot; arm: ArmView; ghost: ArmView | null; track: Track; ghostTrack: Track; seen: boolean; online: boolean; trail: Trail; pill: HTMLElement; problem: string | null }
 
 /** The gripper tip's recent path: a camera-facing ribbon whose alpha fades with age. Fixed buffers, no per-frame allocation. */
 class Trail {
@@ -243,20 +184,25 @@ class Trail {
     if (this.n) {
       const last = ((this.head + this.n - 1) % TRAIL_MAX) * 4;
       const dx = p.x - this.pts[last], dy = p.y - this.pts[last + 1], dz = p.z - this.pts[last + 2];
-      if (dx * dx + dy * dy + dz * dz < 1e-6 && t - this.pts[last + 3] < 250) return; // under 1 mm: not worth a point
+      if (dx * dx + dy * dy + dz * dz < 1e-6) return; // under 1 mm: not worth a point, and a still arm adds none
     }
     const i = ((this.head + this.n) % TRAIL_MAX) * 4;
     if (this.n === TRAIL_MAX) this.head = (this.head + 1) % TRAIL_MAX; else this.n++;
     this.pts[i] = p.x; this.pts[i + 1] = p.y; this.pts[i + 2] = p.z; this.pts[i + 3] = t;
   }
 
+  private drawn = false;
+
   clear(): void { this.n = 0; this.head = 0; this.mesh.geometry.setDrawRange(0, 0); }
+
+  /** Whether the next frame differs: points are still fading out, or the last drawn ribbon must be cleared. */
+  live(): boolean { return this.n > 0 || this.drawn; }
 
   /** Rebuild the ribbon for this frame. Returns whether anything is drawn. */
   update(now: number, eye: THREE.Vector3): boolean {
     while (this.n && now - this.pts[this.head * 4 + 3] > TRAIL_S * 1000) { this.head = (this.head + 1) % TRAIL_MAX; this.n--; }
     const g = this.mesh.geometry;
-    if (this.n < 2) { g.setDrawRange(0, 0); return false; }
+    if (this.n < 2) { g.setDrawRange(0, 0); this.drawn = false; return false; }
     const P = (k: number) => ((this.head + k) % TRAIL_MAX) * 4;
     const tx = new THREE.Vector3(), view = new THREE.Vector3(), side = new THREE.Vector3(), c = new THREE.Vector3();
     for (let k = 0; k < this.n; k++) {
@@ -275,6 +221,7 @@ class Trail {
     (g.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
     (g.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
     g.setDrawRange(0, (this.n - 1) * 6);
+    this.drawn = true;
     return true;
   }
 }
@@ -374,8 +321,8 @@ class CamView {
  * technique of three.js's contact-shadow example. Redrawn only when an arm moved. */
 class ContactShadow {
   readonly group = new THREE.Group();
-  private readonly rt: THREE.WebGLRenderTarget;
-  private readonly rtBlur: THREE.WebGLRenderTarget;
+  private rt: THREE.WebGLRenderTarget;
+  private rtBlur: THREE.WebGLRenderTarget;
   private readonly cam: THREE.OrthographicCamera;
   private readonly depth: THREE.MeshDepthMaterial;
   private readonly hBlur: THREE.ShaderMaterial;
@@ -448,6 +395,23 @@ class ContactShadow {
     renderer.setRenderTarget(this.rt);
     renderer.render(this.blurPlane, this.cam);
     this.blurPlane.visible = false;
+  }
+
+  /** Frees the render targets. Called while the context is lost: once three has made its new context, freeing the
+   * old objects makes the browser warn that they belong to another context. */
+  release(): void {
+    this.rt.dispose();
+    this.rtBlur.dispose();
+  }
+
+  /** Fresh render targets: after a lost GPU context the old ones hold nothing. */
+  renew(): void {
+    const opts = { type: THREE.HalfFloatType };
+    this.rt = new THREE.WebGLRenderTarget(512, 512, opts);
+    this.rt.texture.generateMipmaps = false;
+    this.rtBlur = new THREE.WebGLRenderTarget(512, 512, opts);
+    this.rtBlur.texture.generateMipmaps = false;
+    (this.plane.material as THREE.MeshBasicMaterial).map = this.rt.texture;
   }
 
   /** The blur plane renders with the camera's layer mask, so it must be on that layer too. */
@@ -544,8 +508,8 @@ export class Engine {
   private readonly controls: OrbitControls;
   private readonly gizmo: TransformControls;
   private readonly handle = new THREE.Object3D();
-  private readonly pmrem: THREE.PMREMGenerator;
-  private readonly envTarget: THREE.WebGLRenderTarget;
+  private pmrem: THREE.PMREMGenerator;
+  private envTarget: THREE.WebGLRenderTarget;
   private readonly key = new THREE.DirectionalLight(0xffffff, 2.4);
   private readonly fill = new THREE.DirectionalLight(0xffffff, 0.45);
   private readonly ground: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>;
@@ -586,6 +550,11 @@ export class Engine {
   private userMoved = false;
   private camKeysSeen = "";
   private disposed = false;
+  private lost = false; // the GPU context is gone: draw nothing until the browser restores it
+  private units: Record<string, ArmUnits> = {};
+  private mounts = new Map<string, Slot>(); // wrist camera key -> the follower it rides on
+  private editFrom: Vec3 | null = null; // the selected camera's position when a gizmo press began
+  private readonly armMoved = new Set<Slot>(); // followers whose pose changed this frame
   private readonly q = new Float64Array(6);
   private readonly tmp = new THREE.Vector3();
   readonly stats = { frames: 0, renders: 0, frameMs: [] as number[], renderMs: [] as number[], loadMs: 0, meshBytes: 0 };
@@ -607,11 +576,7 @@ export class Engine {
     host.appendChild(this.renderer.domElement);
 
     // Image-based light from three's procedural room, made on the GPU: no HDR download.
-    this.pmrem = new THREE.PMREMGenerator(this.renderer);
-    const room = new RoomEnvironment();
-    this.envTarget = this.pmrem.fromScene(room, 0.04);
-    room.dispose();
-    this.scene.environment = this.envTarget.texture;
+    [this.pmrem, this.envTarget] = this.environment();
     this.scene.environmentIntensity = 0.65;
     // RoomEnvironment is y-up and this scene is z-up. The renderer samples the environment along
     // transpose(R(environmentRotation)) * direction (WebGLMaterials.js:245), so +90 degrees about x puts the room's
@@ -655,6 +620,7 @@ export class Engine {
     this.gizmo.setSize(0.75);
     this.gizmo.addEventListener("dragging-changed", (e) => { this.controls.enabled = !(e as unknown as { value: boolean }).value; });
     this.gizmo.addEventListener("objectChange", () => this.dragCamera());
+    this.gizmo.addEventListener("mouseDown", () => { this.editFrom = this.handle.position.toArray() as Vec3; });
     this.gizmo.addEventListener("mouseUp", () => this.commitCamera());
     this.gizmo.addEventListener("change", () => { this.dirty = true; });
     this.scene.add(this.handle, this.gizmo.getHelper());
@@ -663,13 +629,30 @@ export class Engine {
     this.resize.observe(host);
     this.fitCanvas();
     this.bindPointer();
+    this.bindContext();
     this.unsub.push(studio.subscribe(() => this.onStudio()));
     this.raf = requestAnimationFrame(this.loop);
     void this.load();
   }
 
   // -- loading ------------------------------------------------------------------------------------------
+  /** Loads the meshes; a failure goes to onLoadError instead of leaving "Loading" up for good. */
   private async load(): Promise<void> {
+    try {
+      await this.loadMeshes();
+    } catch (e) {
+      if (!this.disposed) this.opts.onLoadError(`A part of the arm model did not load (${e instanceof Error ? e.message : String(e)}).`);
+    }
+  }
+
+  /** Try the meshes again after a failure: the cache dropped the failed ones. */
+  retryLoad(): void {
+    if (this.ready || this.disposed) return;
+    this.opts.onLoadError(null);
+    void this.load();
+  }
+
+  private async loadMeshes(): Promise<void> {
     const t0 = performance.now();
     const names = [...new Set(this.model.geoms.map((g) => g.mesh))];
     const total = names.reduce((s, n) => s + this.model.meshes[n].bytes, 0);
@@ -702,18 +685,29 @@ export class Engine {
     if (t === this.lastTelemetry) return;
     if (!t) { this.clock.reset(); this.lastTelemetry = null; return; }
     this.lastTelemetry = t;
-    const at = this.clock.add(t.t);
+    const now = performance.now();
+    const at = this.clock.add(t.t, now);
     const policy = s.state?.activity === "policy" && t.policy ? t.policy.action : null;
+    // WHY no `dirty` here: a reading only changes the picture through the pose the loop draws from it, and the
+    // loop compares that pose with the last one drawn. Unchanged readings, which stream at the worker's rate
+    // while the arms are still or the rig is disconnected, then cost no frame.
     for (const sl of this.slots) {
+      if (this.clock.jumped) { sl.track.clear(); sl.ghostTrack.clear(); }
       const a = t.arms[sl.slot.name];
       sl.online = a?.online ?? false;
-      if (this.read(a?.pos, this.q)) {
-        sl.track.push(at, this.q);
-        if (!sl.seen) sl.arm.setPose(this.q); // draw the first reading at once, so the framing below sees it
+      const units = this.units[sl.slot.name] ?? DEGREES;
+      const got = readArm(this.model, a?.pos, units, this.q);
+      const problem = got === "unusable" ? units.problem ?? "reads -100 to 100 without a usable calibration, so its pose is not drawn" : null;
+      if (problem !== sl.problem) { sl.problem = problem; this.applySettings(); this.dirty = true; }
+      if (got === "ok") {
+        sl.track.push(at, this.q, now);
+        if (!sl.seen) { sl.arm.setPose(this.q); this.dirty = this.shadowsDirty = true; } // drawn at once, so the framing below sees it
         sl.seen = true;
       }
       const g = policy?.[sl.slot.name] ?? (sl.slot.ghost ? t.arms[sl.slot.ghost]?.pos : undefined);
-      if (this.read(g, this.q)) sl.ghostTrack.push(at, this.q); else sl.ghostTrack.clear();
+      // A policy's target is in the follower's units; a leader's reading in the leader's.
+      const gUnits = policy?.[sl.slot.name] ? units : (sl.slot.ghost ? this.units[sl.slot.ghost] : undefined) ?? DEGREES;
+      if (readArm(this.model, g, gUnits, this.q) === "ok") sl.ghostTrack.push(at, this.q, now); else sl.ghostTrack.clear();
     }
     // The first reading moves the arms from the zero pose to where they are: frame them there once, unless the
     // person has already moved the view.
@@ -721,19 +715,14 @@ export class Engine {
       this.framedLive = true;
       if (!this.userMoved) this.frame("home", false);
     }
-    this.dirty = true;
   }
 
-  /** LeRobot readings (degrees, gripper 0..100) to MJCF radians in joint_order. False unless every joint is there. */
-  private read(pos: Record<string, number> | undefined, out: Float64Array): boolean {
-    if (!pos) return false;
-    const order = this.model.joint_order;
-    for (let i = 0; i < order.length; i++) {
-      const v = pos[order[i]];
-      if (typeof v !== "number" || !Number.isFinite(v)) return false;
-      out[i] = toRadians(this.model, order[i], v);
-    }
-    return true;
+  /** Each arm's joint units (lib/scene.ts SceneState.units). */
+  setUnits(units: Record<string, ArmUnits>): void {
+    this.units = units;
+    for (const s of this.slots) { s.track.clear(); s.ghostTrack.clear(); s.seen = false; }
+    this.lastTelemetry = null;
+    this.onStudio();
   }
 
   private rebuild(slots: ArmSlot[], key: string): void {
@@ -766,7 +755,7 @@ export class Engine {
       pill.className = "scene-pill";
       this.opts.labels.appendChild(pill);
       arm.setPose(new Float64Array(6));
-      return { slot, arm, ghost, track: new Track(), ghostTrack: new Track(), seen: false, online: true, trail, pill };
+      return { slot, arm, ghost, track: new Track(), ghostTrack: new Track(), seen: false, online: true, trail, pill, problem: null };
     });
     this.applySettings();
     this.syncCameras();
@@ -795,15 +784,13 @@ export class Engine {
     this.materials.pla.color.copy(srgb(PRINT[s.print].srgb));
     const spacing = s.spacing ?? this.model.pair_spacing_m;
     const bases = basePositions(this.slots.map((x) => x.slot), spacing);
-    const wrist = this.wristArm();
     this.slots.forEach((sl, i) => {
       sl.arm.root.position.copy(v3(bases[i]));
       sl.ghost?.root.position.copy(v3(bases[i]));
-      if (sl.ghost) sl.ghost.root.visible = s.ghost;
-      sl.trail.mesh.visible = s.trail;
-      if (!s.trail) sl.trail.clear();
-      // The camera bodies are drawn only on the arm that carries the wrist camera.
-      for (const p of sl.arm.wristParts) p.visible = sl === wrist;
+      sl.arm.root.visible = !sl.problem; // a pose that cannot be read is not drawn; its label says why
+      if (sl.ghost) sl.ghost.root.visible = s.ghost && !sl.problem;
+      sl.trail.mesh.visible = s.trail && !sl.problem;
+      if (!s.trail || sl.problem) sl.trail.clear();
       if (sl.ghost) for (const p of sl.ghost.wristParts) p.visible = false;
     });
     const span = Math.max(0, (this.slots.length - 1) * spacing);
@@ -827,17 +814,27 @@ export class Engine {
     return this.slots.find((s) => s.slot.name === this.settings.wristArm) ?? this.slots[0];
   }
 
-  private camKeys(): string[] {
-    const have = Object.keys(studio.snap.cameras);
-    return [...new Set(["front", "wrist", "top", ...have])].filter((k) => !have.length || have.includes(k));
+  /** Which follower each wrist camera rides on (sceneCore.ts wristMount): "wrist" on the chosen one, and
+   * LeRobot's bimanual left_wrist / right_wrist on the follower of that side. */
+  private wristMounts(): Map<string, Slot> {
+    const slots = this.slots.map((s) => s.slot);
+    const out = new Map<string, Slot>();
+    for (const k of frustumKeys(Object.keys(studio.snap.cameras))) {
+      const m = wristMount(k, this.model.wrist_camera.key, slots, this.settings.wristArm);
+      if (m.arm !== null) out.set(k, this.slots[m.arm]);
+    }
+    return out;
   }
 
   private syncCameras(): void {
-    const want = this.settings.frustums ? this.camKeys() : [];
+    this.mounts = this.wristMounts();
+    // The camera bodies are drawn on each follower that carries a wrist camera.
+    for (const sl of this.slots) for (const p of sl.arm.wristParts) p.visible = [...this.mounts.values()].includes(sl);
+    const want = this.settings.frustums ? frustumKeys(Object.keys(studio.snap.cameras)) : [];
     for (const [k, c] of this.cams) if (!want.includes(k)) { c.group.removeFromParent(); c.dispose(); this.cams.delete(k); }
     for (const k of want) {
       let c = this.cams.get(k);
-      const wrist = k === this.model.wrist_camera.key;
+      const wrist = wristMount(k, this.model.wrist_camera.key, [], null).wrist;
       if (!c) {
         c = new CamView(k, wrist, this.opts.labels, () => { this.dirty = true; }, () => this.settings.video && !document.hidden);
         (c.lines.material as THREE.LineBasicMaterial).color.copy(this.theme.frustum);
@@ -846,7 +843,7 @@ export class Engine {
       if (wrist) {
         c.fovy = this.model.wrist_camera.fovy_deg;
         c.depth = 0.035; // small: at 85 degrees a deeper image plane hides the gripper
-        const arm = this.wristArm();
+        const arm = this.mounts.get(k);
         if (arm && c.group.parent !== arm.arm.wristCam) arm.arm.wristCam.add(c.group);
         if (!arm) c.group.removeFromParent();
       } else {
@@ -875,7 +872,7 @@ export class Engine {
 
   /** Select a user-placed camera for moving with the gizmo; null puts the gizmo away. */
   setEditing(key: string | null): void {
-    if (key === this.model.wrist_camera.key) key = null; // the wrist camera rides on the arm
+    if (key && this.cams.get(key)?.wrist) key = null; // a wrist camera rides on its arm
     this.editing = key;
     for (const c of this.cams.values()) (c.lines.material as THREE.LineBasicMaterial).color.copy(c.key === key ? this.theme.selected : this.theme.frustum);
     if (key && this.cams.has(key)) {
@@ -895,11 +892,15 @@ export class Engine {
   }
 
   private commitCamera(): void {
-    const k = this.editing;
+    const k = this.editing, from = this.editFrom;
+    this.editFrom = null;
     if (!k) return;
     const p = cameraPose(this.model, this.settings, k);
     const r = (x: number) => Math.round(x * 1000) / 1000; // millimetres are plenty for a pose set by hand
-    this.opts.onCameraEdit(k, { ...p, pos: this.handle.position.toArray().map(r) as Vec3 });
+    const pos = this.handle.position.toArray().map(r) as Vec3;
+    // WHY compare: a click on an axis with no drag still fires mouseUp, and must not mark the pose "placed by you".
+    if (from && pos.every((x, i) => Math.abs(x - r(from[i])) < 5e-4)) return;
+    this.opts.onCameraEdit(k, { ...p, pos });
   }
 
   // -- view ---------------------------------------------------------------------------------------------
@@ -962,11 +963,22 @@ export class Engine {
     this.lastInput = performance.now();
   }
 
+  /** The wrist camera the Wrist view looks through: the one on the chosen follower, else the first mounted. */
+  private wristRide(): { key: string; slot: Slot } | null {
+    const pick = this.wristArm();
+    let first: { key: string; slot: Slot } | null = null;
+    for (const [key, slot] of this.mounts) {
+      if (slot === pick) return { key, slot };
+      first ??= { key, slot };
+    }
+    return first ?? (pick ? { key: this.model.wrist_camera.key, slot: pick } : null);
+  }
+
   private enterWrist(): void {
-    if (!this.wristArm() || this.wristView) return;
+    if (!this.wristRide() || this.wristView) return;
     this.wristView = true;
     this.controls.enabled = false;
-    const wc = this.cams.get(this.model.wrist_camera.key);
+    const wc = this.cams.get(this.wristRide()!.key);
     if (wc) wc.group.visible = false; // its own frustum would sit in front of the lens
     this.tween = null;
     this.opts.onWristView(true);
@@ -977,8 +989,7 @@ export class Engine {
     if (!this.wristView) return;
     this.wristView = false;
     this.controls.enabled = true;
-    const wc = this.cams.get(this.model.wrist_camera.key);
-    if (wc) wc.group.visible = true;
+    for (const c of this.cams.values()) if (c.wrist) c.group.visible = true;
     this.camera.fov = FOV;
     this.camera.up.set(0, 0, 1);
     this.camera.updateProjectionMatrix();
@@ -1007,10 +1018,49 @@ export class Engine {
       const hit = ray.intersectObjects(planes, false)[0];
       if (hit) this.opts.onSelectCamera(hit.object.userData.camera as string);
     };
+    const onWheel = () => { this.lastInput = performance.now(); };
     el.addEventListener("pointerdown", onDown);
     el.addEventListener("pointerup", onUp);
-    el.addEventListener("wheel", () => { this.lastInput = performance.now(); }, { passive: true });
-    this.unsub.push(() => { el.removeEventListener("pointerdown", onDown); el.removeEventListener("pointerup", onUp); });
+    el.addEventListener("wheel", onWheel, { passive: true });
+    this.unsub.push(() => { el.removeEventListener("pointerdown", onDown); el.removeEventListener("pointerup", onUp); el.removeEventListener("wheel", onWheel); });
+  }
+
+  // -- a lost GPU context ------------------------------------------------------------------------------
+  /** The light probe from three's procedural room, rendered on the GPU. */
+  private environment(): [THREE.PMREMGenerator, THREE.WebGLRenderTarget] {
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    const room = new RoomEnvironment();
+    const target = pmrem.fromScene(room, 0.04);
+    room.dispose();
+    this.scene.environment = target.texture;
+    return [pmrem, target];
+  }
+
+  /** The browser may take the GPU context away (driver reset, too many contexts, GPU switch). three restores its own
+   * state when the context comes back (WebGLRenderer.js onContextRestore) and uploads geometry and textures again,
+   * but what was rendered on the GPU is gone: the light probe, the contact shadow and the shadow map are made again. */
+  private bindContext(): void {
+    const el = this.renderer.domElement;
+    const onLost = (e: Event) => {
+      e.preventDefault(); // WHY: without it the browser never offers the context back
+      this.lost = true;
+      // WHY: free GPU objects now, against the dead context; after restore they would be freed against the new one.
+      this.envTarget.dispose();
+      this.pmrem.dispose();
+      this.contact.release();
+      this.opts.onContextLost(true);
+    };
+    const onRestored = () => {
+      [this.pmrem, this.envTarget] = this.environment();
+      this.contact.renew();
+      this.lost = false;
+      this.dirty = this.shadowsDirty = true;
+      this.renderer.shadowMap.needsUpdate = true;
+      this.opts.onContextLost(false);
+    };
+    el.addEventListener("webglcontextlost", onLost);
+    el.addEventListener("webglcontextrestored", onRestored);
+    this.unsub.push(() => { el.removeEventListener("webglcontextlost", onLost); el.removeEventListener("webglcontextrestored", onRestored); });
   }
 
   private fitCanvas(): void {
@@ -1029,7 +1079,7 @@ export class Engine {
     this.stats.frames++;
     this.stats.frameMs.push(now);
     if (this.stats.frameMs.length > 240) this.stats.frameMs.shift();
-    if (!this.ready) return;
+    if (!this.ready || this.lost) return;
 
     if (this.tween) {
       const u = Math.min(1, (now - this.tween.t0) / this.tween.ms);
@@ -1046,13 +1096,15 @@ export class Engine {
     // Draw each arm `delay` ms behind its newest reading, interpolating between readings.
     const t = now - this.clock.delay;
     let moved = false;
+    const armMoved = this.armMoved;
+    armMoved.clear();
     for (const s of this.slots) {
       if (s.track.sample(t, this.q)) {
-        if (this.q.some((v, i) => v !== s.arm.q[i])) { s.arm.setPose(this.q); moved = true; }
+        if (this.q.some((v, i) => v !== s.arm.q[i])) { s.arm.setPose(this.q); moved = true; armMoved.add(s); }
       }
       if (s.ghost) {
-        const has = this.settings.ghost && s.ghostTrack.sample(t, this.q);
-        s.ghost.root.visible = has;
+        const has = this.settings.ghost && !s.problem && s.ghostTrack.sample(t, this.q);
+        if (s.ghost.root.visible !== has) { s.ghost.root.visible = has; moved = true; }
         if (has && this.q.some((v, i) => v !== s.ghost!.q[i])) { s.ghost.setPose(this.q); moved = true; }
       }
       this.tint(s);
@@ -1060,7 +1112,7 @@ export class Engine {
     if (moved) { this.dirty = true; this.shadowsDirty = true; }
 
     if (this.wristView) {
-      const w = this.wristArm();
+      const w = this.wristRide()?.slot;
       if (w) {
         w.arm.wristCam.updateWorldMatrix(true, false);
         w.arm.wristCam.matrixWorld.decompose(this.camera.position, this.camera.quaternion, this.tmp);
@@ -1070,14 +1122,17 @@ export class Engine {
       this.dirty = true;
     }
 
-    if (!this.dirty && !this.slots.some((s) => s.trail.mesh.visible && s.track.lastArrival > now - TRAIL_S * 1000)) {
+    // Draw only when the picture changes: a pose moved, a trail is still fading, or something else marked it
+    // dirty (the view, a setting, a video frame). A still rig, connected or not, then costs no frames.
+    if (!this.dirty && !(this.settings.trail && this.slots.some((s) => s.trail.live()))) {
       if (now - this.labelsAt > 250) this.labels(); // a pill's text changes with time alone ("no reading")
       return;
     }
     this.scene.updateMatrixWorld();
     for (const s of this.slots) {
       if (!this.settings.trail) continue;
-      if (s.seen) s.trail.push(s.arm.tool.getWorldPosition(this.tmp), now);
+      // WHY only when it moved: a still arm adds no point, so its trail fades out and the view stops drawing.
+      if (s.seen && armMoved.has(s)) s.trail.push(s.arm.tool.getWorldPosition(this.tmp), now);
       s.trail.update(now, this.camera.position);
     }
     if (this.shadowsDirty) {
@@ -1106,7 +1161,7 @@ export class Engine {
       s.arm.limits[i] = st;
       const m = s.arm.servo.get(order[i]);
       if (!m) continue;
-      if (st === "ok") { m.emissive.setRGB(0, 0, 0); m.color.copy(this.materials.servo.color); }
+      if (st === "ok" || st === "outside") { m.emissive.setRGB(0, 0, 0); m.color.copy(this.materials.servo.color); }
       else {
         const c = st === "past" ? this.theme.danger : this.theme.warn;
         m.color.copy(this.materials.servo.color).lerp(c, 0.55);
@@ -1131,7 +1186,7 @@ export class Engine {
     };
     for (const s of this.slots) {
       const stale = s.seen && now - s.track.lastArrival > STALE_MS;
-      const what = !s.seen ? "no reading yet, drawn at zero" : !s.online ? "not answering" : stale ? "no reading" : "";
+      const what = s.problem ?? (!s.seen ? "no reading yet, drawn at zero" : !s.online ? "not answering" : stale ? "no reading" : "");
       const p = s.arm.root.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(-0.12, 0, 0)); // behind the base
       place(s.pill, p, what ? `${label(s.slot.name)}: ${what}` : label(s.slot.name), what ? "warn" : "neutral");
     }
@@ -1139,9 +1194,18 @@ export class Engine {
       if (!c.group.parent) { c.pill.hidden = true; continue; }
       const top = new THREE.Vector3(0, c.depth * Math.tan(THREE.MathUtils.degToRad(c.fovy) / 2) * 1.5, -c.depth);
       c.group.localToWorld(top);
-      const noVideo = this.settings.video && (!c.hasFrame || now - c.lastFrame > 1500);
-      place(c.pill, top, `${label(c.key)}${c.wrist ? " (CAD mount)" : " (placed by you)"}${noVideo ? ", no picture" : ""}`, c.key === this.editing ? "accent" : "neutral");
+      place(c.pill, top, `${label(c.key)}${c.wrist ? " (CAD mount)" : " (placed by you)"}${this.camStatus(c, now)}`, c.key === this.editing ? "accent" : "neutral");
     }
+  }
+
+  /** What a camera's label adds about its feed: the same words as the camera tiles (components/CameraTile.tsx),
+   * so the 3D view alone tells a dead camera from a slow one. Empty while frames arrive. */
+  private camStatus(c: CamView, now: number): string {
+    const s = studio.snap, st = s.cameras[c.key];
+    if (st && !st.online) return `: ${st.message ?? "No signal"}`;
+    if (s.link !== "open") return ": not connected";
+    if (!c.lastFrame) return ": waiting for frames";
+    return now - c.lastFrame > 1500 ? ": stale" : "";
   }
 
   // -- debugging and checks ----------------------------------------------------------------------------
@@ -1157,6 +1221,15 @@ export class Engine {
   fps(): number {
     const f = this.stats.frameMs;
     return f.length > 1 ? ((f.length - 1) * 1000) / (f[f.length - 1] - f[0]) : 0;
+  }
+
+  /** three's shared DFG lookup texture, read from a lit material's uniforms; undefined before the first draw. */
+  private sharedLut(): THREE.Texture | undefined {
+    for (const m of [this.materials.pla, this.materials.servo]) {
+      const u = (this.renderer.properties.get(m) as { uniforms?: { dfgLUT?: { value: THREE.Texture | null } } }).uniforms;
+      if (u?.dfgLUT?.value) return u.dfgLUT.value;
+    }
+    return undefined;
   }
 
   dispose(): { geometries: number; textures: number } {
@@ -1179,6 +1252,11 @@ export class Engine {
     this.ground.material.dispose();
     this.grid.geometry.dispose();
     this.grid.material.dispose();
+    // WHY: three r186 shares one DFG lookup texture across every renderer (shaders/DFGLUTData.js getDFGLUT), and each
+    // renderer that used it adds a dispose listener to it. renderer.dispose() never removes that listener, so the
+    // texture kept every closed renderer, its canvas and its GL context alive. Disposing it runs those listeners; a
+    // renderer that still needs it uploads it again on its next draw.
+    this.sharedLut()?.dispose();
     Object.values(this.materials).forEach((m) => m.dispose());
     for (const g of this.geoms.values()) g.dispose(); // frees the GPU buffers; the CPU copy stays cached for the next viewer
     // What this renderer still holds after every dispose above: both should be 0 (checked in the browser).

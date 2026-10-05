@@ -1,6 +1,7 @@
 // The 3D view on Teleoperate and Run policy: a panel with a Cameras / 3D / Both switch, remembered per page.
 // Eager, and small: the viewer and three.js load only when the switch shows 3D.
 import { lazy, Suspense } from "react";
+import { Boundary } from "../components/Boundary";
 import { Cameras } from "../components/Cameras";
 import { scene, useScene, type ViewMode } from "../lib/scene";
 import "../styles/scene.css";
@@ -41,7 +42,11 @@ export function ViewSwitch({ page }: { page: string }) {
         </div>
         {mode !== "cameras" && (
           <div className="scene-panel-body">
-            <Suspense fallback={<SceneFallback />}><Viewer compact /></Suspense>
+            {/* WHY a boundary here: without it a crash in the 3D view, or its chunk gone after a rebuild, takes the
+                whole page down, and with it the torque, start and disconnect controls. Cameras stay too. */}
+            <Boundary what="The 3D view">
+              <Suspense fallback={<SceneFallback />}><Viewer compact /></Suspense>
+            </Boundary>
           </div>
         )}
       </section>

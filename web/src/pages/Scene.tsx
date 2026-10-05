@@ -1,10 +1,11 @@
 // The 3D view page: the followers at full size, a joint readout, and the view's settings.
 import { RotateCcw } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
+import { Boundary } from "../components/Boundary";
 import { label } from "../lib/labels";
 import {
-  type CamPose, cameraPose, followerSlots, limitState, PRINT, type PrintColour, scene, SPACING, toRadians, useScene,
-  type Vec3,
+  type CamPose, cameraPose, DEGREES, followerSlots, FOVY, frustumKeys, limitState, PRINT, type PrintColour, readArm, scene,
+  SPACING, useScene, type Vec3, wristMount,
 } from "../lib/scene";
 import { useStudio } from "../lib/studio";
 import { SceneFallback } from "../scene/ViewSwitch";
@@ -20,7 +21,9 @@ export function Scene() {
         <div className="col">
           <section className="panel scene-panel">
             <div className="scene-panel-body is-full">
-              <Suspense fallback={<SceneFallback />}><Viewer /></Suspense>
+              <Boundary what="The 3D view">
+                <Suspense fallback={<SceneFallback />}><Viewer /></Suspense>
+              </Boundary>
             </div>
           </section>
           <JointReadout />
@@ -39,6 +42,7 @@ export function Scene() {
 /** Each follower's joints as read, as drawn, and where that sits in the model's range. */
 function JointReadout() {
   const model = useScene((s) => s.model);
+  const units = useScene((s) => s.units);
   const telemetry = useStudio((s) => s.telemetry);
   const rigArms = useStudio((s) => s.rig?.arms);
   const slots = followerSlots(telemetry, rigArms);
@@ -47,28 +51,39 @@ function JointReadout() {
     <section className="panel">
       <div className="panel-head">
         <h2 className="panel-title">Joints</h2>
-        <span className="panel-sub">Warm: within 5% of the model's range end. Red: past it.</span>
+        <span className="panel-sub">
+          Warm: within 5% of the model's range end. Red: past it. Not for the gripper (its map is a placeholder) or wrist
+          roll (its zero is set at calibration): wrist roll past the model's range is only noted.
+        </span>
       </div>
       {!slots.length && <p className="empty">No follower on this rig.</p>}
       {slots.map((s) => {
         const pos = telemetry?.arms[s.name]?.pos;
+        const u = units[s.name] ?? DEGREES;
+        const q = new Float64Array(6);
+        const got = readArm(model, pos, u, q);
         return (
           <table key={s.name} className="table scene-joints">
             <thead>
               <tr><th>{label(s.name)}</th><th className="r">Reading</th><th className="r">In the model</th><th>Model range</th></tr>
             </thead>
             <tbody>
-              {model.joint_order.map((j) => {
+              {got === "unusable" && (
+                <tr><td colSpan={4} className="field-hint">{u.problem ?? "Reads -100 to 100 without a usable calibration, so its pose is not drawn."}</td></tr>
+              )}
+              {model.joint_order.map((j, i) => {
                 const v = pos?.[j];
                 const has = typeof v === "number" && Number.isFinite(v);
-                const rad = has ? toRadians(model, j, v) : 0;
-                const lim = has ? limitState(model, j, rad) : null;
+                const drawn = has && got === "ok";
+                const rad = drawn ? q[i] : 0;
+                const lim = drawn ? limitState(model, j, rad) : null;
                 const r = model.joints[j].range;
+                const unit = j === "gripper" ? " of 100" : u.unit === "m100" ? " of ±100" : "°";
                 return (
                   <tr key={j} className={lim ? `is-${lim.state}` : ""}>
-                    <td>{label(j)}</td>
-                    <td className="r num">{has ? (j === "gripper" ? `${v.toFixed(0)} of 100` : `${v.toFixed(1)}°`) : "no reading"}</td>
-                    <td className="r num">{has ? `${deg(rad).toFixed(1)}°` : ""}</td>
+                    <td>{label(j)}{lim?.state === "outside" && <span className="field-hint"> outside the model's range</span>}</td>
+                    <td className="r num">{has ? `${v.toFixed(j === "gripper" ? 0 : 1)}${unit}` : "no reading"}</td>
+                    <td className="r num">{drawn ? `${deg(rad).toFixed(1)}°` : ""}</td>
                     <td>
                       <div className="scene-range" title={r ? `${deg(r[0]).toFixed(0)}° to ${deg(r[1]).toFixed(0)}°` : "no limit"}>
                         {lim && <i style={{ left: `${Math.min(100, Math.max(0, lim.frac * 100))}%` }} />}
@@ -177,7 +192,11 @@ function CamerasPanel() {
   const live = useStudio((s) => s.cameras);
   if (!model) return null;
   const wristKey = model.wrist_camera.key;
-  const keys = [...new Set([...Object.keys(model.camera_defaults), ...Object.keys(live)])].filter((k) => k !== wristKey).sort();
+  // The same list the view draws frusta for (sceneCore.ts frustumKeys), so every camera listed here has one.
+  const all = frustumKeys(Object.keys(live));
+  const isWrist = (k: string) => wristMount(k, wristKey, [], null).wrist;
+  const keys = all.filter((k) => !isWrist(k));
+  const wrists = all.filter(isWrist);
   const set = (k: string, p: CamPose, field: "pos" | "target", i: number, cmValue: number) => {
     const v = [...p[field]] as Vec3;
     v[i] = cmValue / 100;
@@ -200,7 +219,8 @@ function CamerasPanel() {
               <div className="scene-cam-head">
                 <span className="strong">{label(k)}</span>
                 <span className={`badge ${mine ? "tone-info" : "tone-neutral"}`}>{mine ? "Placed by you" : "Starting guess"}</span>
-                <button type="button" className="btn btn-sm" onClick={() => scene.edit(open ? null : k)}>{open ? "Done" : "Move"}</button>
+                <button type="button" className="btn btn-sm" disabled={!settings.frustums && !open} onClick={() => scene.edit(open ? null : k)}
+                  title={settings.frustums ? undefined : "Turn on Cameras under Show to see and move it"}>{open ? "Done" : "Move"}</button>
               </div>
               {open && (
                 <>
@@ -217,7 +237,7 @@ function CamerasPanel() {
                   <div className="scene-xyz">
                     <span className="field-label">Field of view</span>
                     <Num label={`${label(k)} vertical field of view in degrees`} value={p.fovy_deg}
-                      onCommit={(v) => scene.setCamera(k, { ...p, fovy_deg: Math.min(150, Math.max(5, v)) })} />
+                      onCommit={(v) => scene.setCamera(k, { ...p, fovy_deg: Math.min(FOVY.max, Math.max(FOVY.min, v)) })} />
                     <span className="field-hint">degrees, vertical</span>
                   </div>
                   {mine && (
@@ -228,13 +248,16 @@ function CamerasPanel() {
             </div>
           );
         })}
-        <div className="scene-cam">
-          <div className="scene-cam-head">
-            <span className="strong">{label(wristKey)}</span>
-            <span className="badge tone-neutral">On the gripper</span>
+        {!settings.frustums && <p className="field-hint">Cameras are hidden in the view. Turn them on under Show to move one.</p>}
+        {wrists.map((k) => (
+          <div key={k} className="scene-cam">
+            <div className="scene-cam-head">
+              <span className="strong">{label(k)}</span>
+              <span className="badge tone-neutral">On the gripper</span>
+            </div>
+            <p className="field-hint">{model.wrist_camera.mount} Field of view {model.wrist_camera.fovy_deg}°: {model.wrist_camera.fov.toLowerCase()}</p>
           </div>
-          <p className="field-hint">{model.wrist_camera.mount} Field of view {model.wrist_camera.fovy_deg}°: {model.wrist_camera.fov.toLowerCase()}</p>
-        </div>
+        ))}
       </div>
     </section>
   );
@@ -262,7 +285,6 @@ function ModelPanel() {
           <li>Body joints: the reading in degrees is the model angle{arm && arm.offset === 0 ? ", no offset" : ""}.</li>
           {g && <li>Gripper: 0 to 100 is spread evenly over the model's range, {deg(g.offset).toFixed(0)}° to {deg(g.offset + 100 * g.scale).toFixed(0)}°. A placeholder in phi too.</li>}
         </ul>
-        <p className="field-hint ident">{arm?.source}<br />{g?.source}</p>
       </div>
     </section>
   );
