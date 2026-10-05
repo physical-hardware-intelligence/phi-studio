@@ -1,4 +1,6 @@
-import { BookOpen, Bot, Box, ClipboardCheck, Cpu, FolderOpen, Gamepad2, LayoutGrid, ListChecks, ListOrdered, Moon, PackageSearch, Ruler, Sun } from "lucide-react";
+import { BookOpen, Bot, Box, ClipboardCheck, Cpu, Database, Flag, FolderOpen, Gamepad2, LayoutGrid, ListChecks, ListOrdered, Moon, PackageSearch, Ruler, Sun } from "lucide-react";
+import { useNotes } from "../lib/data";
+import { PhiMark } from "./PhiMark";
 import type { ComponentType } from "react";
 import { go, setTheme, useRoute, useStudio, useTheme, type Route } from "../lib/studio";
 
@@ -15,6 +17,10 @@ const RIG: Item[] = [
   { route: "teleop", label: "Teleoperate", icon: Gamepad2 },
   { route: "scene", label: "3D view", icon: Box },
 ];
+const DATA: Item[] = [
+  { route: "data", label: "Datasets", icon: Database },
+  { route: "issues", label: "Issues", icon: Flag },
+];
 const POLICIES: Item[] = [
   { route: "train", label: "Train", icon: Cpu },
   { route: "models", label: "Models", icon: PackageSearch },
@@ -28,7 +34,7 @@ const REFERENCE: Item[] = [
 
 // WHY one list: the Claude panel names the current page; a second copy of the labels missed two pages.
 export const PAGE_LABELS = Object.fromEntries(
-  [...TOP, ...RIG, ...POLICIES, ...REFERENCE].map((i) => [i.route, i.label]),
+  [...TOP, ...RIG, ...DATA, ...POLICIES, ...REFERENCE].map((i) => [i.route, i.label]),
 ) as Record<Route, string>;
 
 // Places on the left, the work on the right (Foxglove's layout). Each item may carry one live hint drawn
@@ -58,7 +64,7 @@ export function Sidebar() {
   return (
     <nav className="sidebar" aria-label="Studio">
       <div className="brand">
-        <span className="brand-mark" aria-hidden>Φ</span>
+        <PhiMark className="brand-mark" size={30} />
         <div className="brand-text">
           <span className="brand-name">Phi Studio</span>
           <span className="brand-rig">{mock ? "Mock rig" : "SO-101 rig"}{bimanual ? ", bimanual" : pairs ? ", single arm" : ""}</span>
@@ -68,6 +74,10 @@ export function Sidebar() {
       <div className="nav-group">
         <div className="nav-group-label">Rig</div>
         {RIG.map(item)}
+      </div>
+      <div className="nav-group">
+        <div className="nav-group-label">Data</div>
+        {DATA.map(item)}
       </div>
       <div className="nav-group">
         <div className="nav-group-label">Policies</div>
@@ -99,7 +109,9 @@ function useHints(): Partial<Record<Route, Hint>> {
   const needCal = useStudio((s) => s.identity.some((a) => !a.ok));
   const fails = useStudio((s) => s.checks.results?.filter((r) => r.status === "fail").length ?? 0);
   const warns = useStudio((s) => s.checks.results?.filter((r) => r.status === "warn").length ?? 0);
+  const open = useNotes(null, null)?.filter((n) => n.kind === "issue" && n.status === "open").length ?? 0;
   const out: Partial<Record<Route, Hint>> = {};
+  if (open) out.issues = { text: String(open), tone: "warn" };
   if (fails) out.checks = { text: `${fails} failed`, tone: "danger", dot: true };
   else if (warns) out.checks = { text: `${warns} ${warns === 1 ? "warning" : "warnings"}`, tone: "warn", dot: true };
   if (state?.state === "FAULT") out.overview = { text: "Fault", tone: "danger", dot: true };

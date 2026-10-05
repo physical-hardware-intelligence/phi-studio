@@ -582,8 +582,8 @@ export function useStudio<T>(select: (s: Snapshot) => T): T {
 }
 
 // -- routing and theme -------------------------------------------------------------------------
-export type Route = "overview" | "checks" | "setup" | "calibrate" | "teleop" | "scene" | "train" | "models" | "policy" | "evaluate" | "files" | "guide";
-export const ROUTES: Route[] = ["overview", "checks", "setup", "calibrate", "teleop", "scene", "train", "models", "policy", "evaluate", "files", "guide"];
+export type Route = "overview" | "checks" | "setup" | "calibrate" | "teleop" | "scene" | "data" | "issues" | "train" | "models" | "policy" | "evaluate" | "files" | "guide";
+export const ROUTES: Route[] = ["overview", "checks", "setup", "calibrate", "teleop", "scene", "data", "issues", "train", "models", "policy", "evaluate", "files", "guide"];
 
 // A route is the hash's first segment; the guide also takes a section, as in #/guide/teleop.
 function hashParts(): string[] { return location.hash.replace(/^#\/?/, "").split("/"); }
@@ -591,6 +591,15 @@ function hashParts(): string[] { return location.hash.replace(/^#\/?/, "").split
 function readRoute(): Route {
   const r = hashParts()[0] as Route;
   return ROUTES.includes(r) ? r : "overview";
+}
+
+/** Every segment after the route: #/data/<dataset>/<episode> gives ["<dataset>", "<episode>"]. */
+export function useSubpath(): string[] {
+  const raw = useSyncExternalStore(
+    (l) => { window.addEventListener("hashchange", l); return () => window.removeEventListener("hashchange", l); },
+    () => hashParts().slice(1).join("/"),
+  );
+  return raw ? raw.split("/").map(decodeURIComponent) : [];
 }
 
 export function useSection(): string | null {

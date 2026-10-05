@@ -18,6 +18,9 @@ import { Setup } from "./pages/Setup";
 import { Teleop } from "./pages/Teleop";
 import { Train } from "./pages/Train";
 
+// WHY lazy: the data pages carry three.js and the 3D model code; pages that never show them do not pay.
+const Data = lazy(() => import("./pages/Data").then((m) => ({ default: m.Data })));
+const Issues = lazy(() => import("./pages/Issues").then((m) => ({ default: m.Issues })));
 // WHY lazy: the panel carries the markdown renderer, a third of the bundle, and most sessions never open it.
 const AssistantPanel = lazy(() => import("./components/Assistant").then((m) => ({ default: m.AssistantPanel })));
 
@@ -30,6 +33,8 @@ const PAGES: Record<Route, { title: string; sub: string; el: ComponentType }> = 
   evaluate: { title: "Evaluate", sub: "Judge episodes and measure the success rate", el: Evaluate },
   setup: { title: "Set up", sub: "Every step from a new rig to a recorded dataset, in order", el: Setup },
   scene: { title: "3D view", sub: "The arms as they move, in 3D", el: Scene },
+  data: { title: "Datasets", sub: "Every recording on this Mac: episodes, signals, 3D replay, flags", el: Data },
+  issues: { title: "Issues", sub: "Notes, issues and excluded episodes across every dataset", el: Issues },
   train: { title: "Train", sub: "Train a policy on this Mac or on the Northeastern cluster", el: Train },
   models: { title: "Models", sub: "Find a policy on Hugging Face, check it fits this rig, and download it", el: Models },
   files: { title: "Files", sub: "Serial ports, rig notes, calibration files and code on this Mac", el: Files },
@@ -62,7 +67,9 @@ export function App() {
         <div className="main">
           <TopBar route={route} title={page.title} sub={page.sub} onStop={() => studio.stop()} />
           <main className="content" key={route}>
-            <Boundary what={`The ${page.title} page`}><Page /></Boundary>
+            <Boundary what={`The ${page.title} page`}>
+              <Suspense fallback={<div className="page"><div className="empty">Loading</div></div>}><Page /></Suspense>
+            </Boundary>
           </main>
           <Boundary what="The terminal"><TerminalDock /></Boundary>
         </div>

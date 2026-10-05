@@ -5,6 +5,7 @@ import { getTheme } from "./lib/studio";
 import "./styles/tokens.css";
 import "./styles/base.css";
 import "./styles/app.css";
+import "./styles/data.css";
 
 // Before the first paint, so a dark-theme user never sees a light flash.
 document.documentElement.dataset.theme = getTheme();
