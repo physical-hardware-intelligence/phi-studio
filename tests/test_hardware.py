@@ -1,0 +1,327 @@
+"""The real-arm backend against a fake Feetech bus that keeps LeRobot's register semantics: units,
+torque rules, health decoding, reconnects, and the rig built from robot-config.yaml."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+
+from phi_studio import hardware as H
+from phi_studio.identity import JointCal
+from phi_studio.rig import JOINTS
+
+pytest.importorskip("lerobot")
+
+CAL = {j: JointCal(i + 1, 0, -100 + 10 * i, 1000, 3000) for i, j in enumerate(JOINTS)}
+
+
+class FakeBus:
+    """What FeetechArm uses of FeetechMotorsBus, with LeRobot's semantics: DEGREES = (raw - mid) *
+    360/4095."""
+
+    instances: list[FakeBus] = []
+    fail_connect = 0
+
+    def __init__(self, port: str, calibration: Any) -> None:
+        self.port, self.calibration = port, calibration
+        self.connected = False
+        self.raw = {j: 2000 for j in JOINTS}
+        self.torque = {j: 0 for j in JOINTS}
+        self.writes: list[tuple[str, str, int]] = []
+        self.goals: list[dict[str, float]] = []
+        self.regs = {
+            j: {
+                "Present_Load": -250,
+                "Present_Temperature": 41,
+                "Present_Voltage": 121,
+                "Status": 0,
+            }
+            for j in JOINTS
+        }
+        FakeBus.instances.append(self)
+
+    def connect(self, handshake: bool = True) -> None:
+        if FakeBus.fail_connect:
+            FakeBus.fail_connect -= 1
+            raise ConnectionError("no status packet")
+        self.connected = True
+
+    def disconnect(self, disable_torque: bool = True) -> None:
+        self.connected = False
+
+    def _deg(self, j: str, raw: int) -> float:
+        c = self.calibration[j]
+        if j == "gripper":
+            return (raw - c.range_min) / (c.range_max - c.range_min) * 100
+        return (raw - (c.range_min + c.range_max) / 2) * 360 / 4095
+
+    def sync_read(self, name: str, motors: Any = None, *, normalize: bool = True) -> dict[str, Any]:
+        if not self.connected:
+            raise ConnectionError("not connected")
+        if name == "Present_Position":
+            return {j: self._deg(j, r) if normalize else r for j, r in self.raw.items()}
+        if name == "Torque_Enable":
+            return dict(self.torque)
+        return {j: self.regs[j][name] for j in JOINTS}
+
+    def sync_write(self, name: str, values: dict[str, float], *, normalize: bool = True) -> None:
+        assert name == "Goal_Position"
+        self.goals.append(dict(values))
+
+    def write(self, name: str, motor: str, value: int, *, normalize: bool = True) -> None:
+        self.writes.append((name, motor, value))
+
+    def enable_torque(self, motors: Any = None) -> None:
+        self.torque = {j: 1 for j in JOINTS}
+
+    def disable_torque(self, motors: Any = None) -> None:
+        self.torque = {j: 0 for j in JOINTS}
+
+    def configure_motors(self) -> None:
+        self.writes.append(("configure_motors", "*", 0))
+
+    def read_calibration(self) -> dict[str, Any]:
+        """The servos' registers: the arm's own file when it has one (a correctly calibrated
+        arm)."""
+        from lerobot.motors import MotorCalibration
+
+        if self.calibration:
+            return dict(self.calibration)
+        return {
+            j: MotorCalibration(c.id, 0, c.homing_offset, c.range_min, c.range_max)
+            for j, c in CAL.items()
+        }
+
+    def write_calibration(self, cal: dict[str, Any], cache: bool = True) -> None:
+        if cache:
+            self.calibration = cal
+
+    def set_half_turn_homings(self) -> dict[str, int]:
+        return {j: r - 2047 for j, r in self.raw.items()}
+
+
+@pytest.fixture(autouse=True)
+def fresh():
+    FakeBus.instances.clear()
+    FakeBus.fail_connect = 0
+
+
+def arm(role: str = "follower", cal=CAL) -> H.FeetechArm:
+    a = H.FeetechArm(
+        f"left_{role}",
+        role,
+        "/dev/tty.usbmodemX",
+        f"rig_{role}_left",
+        dict(cal) if cal else None,
+        side="left",
+        bus_factory=lambda p, c: FakeBus(p, H.to_motor_calibration(c) if c else None),
+    )
+    a.connect()
+    return a
+
+
+def test_motor_table_is_lerobots() -> None:
+    from lerobot.motors import MotorNormMode
+    from lerobot.motors.feetech import FeetechMotorsBus
+
+    t = H.motor_table()
+    assert [m.id for m in t.values()] == [1, 2, 3, 4, 5, 6] and list(t) == list(JOINTS)
+    assert (
+        t["gripper"].norm_mode == MotorNormMode.RANGE_0_100
+        and t["elbow_flex"].norm_mode == MotorNormMode.DEGREES
+    )
+    FeetechMotorsBus(
+        port="/dev/null", motors=t, calibration=H.to_motor_calibration(CAL)
+    )  # constructs; never opened
+
+
+def test_follower_configured_with_torque_left_off() -> None:
+    a = arm("follower")
+    bus = FakeBus.instances[-1]
+    assert a.configured and not a.read_torque()
+    names = {(n, m) for n, m, _ in bus.writes}
+    assert ("Operating_Mode", "shoulder_pan") in names and ("P_Coefficient", "gripper") in names
+    assert ("Max_Torque_Limit", "gripper", 500) in bus.writes and (
+        "Protection_Current",
+        "gripper",
+        250,
+    ) in bus.writes
+
+
+def test_arm_found_holding_is_left_holding() -> None:
+    class Holding(FakeBus):
+        def __init__(self, *a: Any) -> None:
+            super().__init__(*a)
+            self.torque = {j: 1 for j in JOINTS}
+
+    a = H.FeetechArm(
+        "follower",
+        "follower",
+        "/dev/x",
+        "f",
+        dict(CAL),
+        bus_factory=lambda p, c: Holding(p, H.to_motor_calibration(c)),
+    )
+    a.connect()
+    assert not a.configured and a.read_torque()  # not released: it would drop
+    assert FakeBus.instances[-1].writes == []
+
+
+def test_leader_only_releases_torque() -> None:
+    arm("leader")
+    assert all(n != "Operating_Mode" for n, _, _ in FakeBus.instances[-1].writes)
+
+
+def test_positions_in_lerobot_units_and_goals_pass_through() -> None:
+    a = arm()
+    bus = FakeBus.instances[-1]
+    bus.raw["elbow_flex"] = 2000 + 4095 // 4  # a quarter turn above mid
+    pos = a.read_positions()
+    assert pos["elbow_flex"] == pytest.approx(90.0, abs=0.1) and pos[
+        "shoulder_pan"
+    ] == pytest.approx(0, abs=0.1)
+    a.write_goals({"elbow_flex": 45.0})
+    assert bus.goals[-1] == {"elbow_flex": 45.0}
+
+
+def test_no_calibration_refuses_positions_but_reads_raw() -> None:
+    a = arm(cal=None)
+    with pytest.raises(RuntimeError, match="no calibration"):
+        a.read_positions()
+    assert a.read_raw_positions()["gripper"] == 2000
+
+
+def test_health_decoded() -> None:
+    a = arm()
+    FakeBus.instances[-1].regs["wrist_roll"]["Status"] = 32  # overload bit
+    h = a.read_health()
+    assert (
+        h["shoulder_pan"].load_pct == -25.0
+        and h["shoulder_pan"].voltage_v == 12.1
+        and h["shoulder_pan"].temperature_c == 41
+    )
+    assert h["wrist_roll"].faults == ["overload"]
+
+
+def test_calibration_round_trip_updates_normalisation() -> None:
+    a = arm()
+    got = a.read_calibration()
+    assert got["shoulder_pan"] == CAL["shoulder_pan"]
+    new = {j: c._replace(range_min=500, range_max=3500) for j, c in CAL.items()}
+    a.write_calibration(new)
+    assert a.calibration == new and FakeBus.instances[-1].calibration["gripper"].range_min == 500
+    assert a.set_half_turn_homings()["gripper"] == 2000 - 2047
+
+
+def test_lost_bus_reconnects_after_a_pause() -> None:
+    t = [100.0]
+    a = H.FeetechArm(
+        "f",
+        "follower",
+        "/dev/x",
+        "f",
+        dict(CAL),
+        clock=lambda: t[0],
+        bus_factory=lambda p, c: FakeBus(p, H.to_motor_calibration(c)),
+    )
+    a.connect()
+    FakeBus.instances[-1].connected = False  # unplugged
+    with pytest.raises(ConnectionError):
+        a.read_positions()
+    FakeBus.fail_connect = 1
+    with pytest.raises(ConnectionError):
+        a.read_positions()  # first retry fails
+    with pytest.raises(ConnectionError, match="not answering"):
+        a.read_positions()  # too soon to try again
+    t[0] += H.RECONNECT_S + 0.1
+    assert a.read_positions()["shoulder_pan"] == pytest.approx(0, abs=0.1)
+
+
+def test_build_rig_from_config(tmp_path) -> None:
+    root = tmp_path / "cal"
+    (root / "robots" / "so_follower").mkdir(parents=True)
+    (root / "teleoperators" / "so_leader").mkdir(parents=True)
+    for d, name in (
+        ("robots/so_follower", "phi_bi_follower_left"),
+        ("robots/so_follower", "phi_bi_follower_right"),
+        ("teleoperators/so_leader", "phi_bi_leader_left"),
+    ):
+        (root / d / f"{name}.json").write_text(json.dumps({j: c._asdict() for j, c in CAL.items()}))
+    cfg = tmp_path / "robot-config.yaml"
+    cfg.write_text(
+        "robot:\n  type: bi_so_follower\n  id: phi_bi_follower\n"
+        "  left_arm_config: {port: /dev/tty.usbmodemA}\n"
+        "  right_arm_config: {port: /dev/tty.usbmodemB}\n"
+        "teleop:\n  type: bi_so_leader\n  id: phi_bi_leader\n"
+        "  left_arm_config: {port: /dev/tty.usbmodemC}\n"
+        "  right_arm_config: {port: /dev/tty.usbmodemD}\n"
+    )
+    FakeBus.fail_connect = 0
+    rig = H.build_rig(
+        cfg,
+        bus_factory=lambda p, c: FakeBus(p, H.to_motor_calibration(c) if c else None),
+        cal_root=root,
+        cameras=False,
+    )
+    by = {a.name: a for a in rig.arms}
+    assert set(by) == {"left_follower", "right_follower", "left_leader", "right_leader"}
+    assert (
+        by["left_follower"].calibration_id == "phi_bi_follower_left"
+        and by["left_follower"].port == "/dev/tty.usbmodemA"
+    )
+    assert by["right_leader"].calibration is None  # its file is missing: identity will say so
+    assert set(rig.calibration_files()) == {
+        "phi_bi_follower_left",
+        "phi_bi_follower_right",
+        "phi_bi_leader_left",
+    }
+
+
+def test_build_rig_needs_ports(tmp_path) -> None:
+    cfg = tmp_path / "robot-config.yaml"
+    cfg.write_text(
+        "robot: {type: so101_follower, id: f, port: ''}\n"
+        "teleop: {type: so101_leader, id: l, port: /dev/x}\n"
+    )
+    with pytest.raises(ValueError, match="no port"):
+        H.build_rig(cfg, bus_factory=lambda p, c: FakeBus(p, c), cal_root=tmp_path, cameras=False)
+
+
+def test_worker_runs_on_the_hardware_backend(tmp_path) -> None:
+    """The worker's own rules on FeetechArms: connect, identify, confirm, arm (goal = present),
+    teleop."""
+    from phi_studio.worker import RigWorker
+
+    root = tmp_path / "cal"
+    # Two arms never share a calibration: the leader's offsets differ, as on real hardware.
+    leader_cal = {j: c._replace(homing_offset=c.homing_offset + 300) for j, c in CAL.items()}
+    for d, name, cal in (
+        ("robots/so_follower", "f", CAL),
+        ("teleoperators/so_leader", "l", leader_cal),
+    ):
+        (root / d).mkdir(parents=True, exist_ok=True)
+        (root / d / f"{name}.json").write_text(json.dumps({j: c._asdict() for j, c in cal.items()}))
+    cfg = tmp_path / "robot-config.yaml"
+    cfg.write_text(
+        "robot: {type: so101_follower, id: f, port: /dev/a}\n"
+        "teleop: {type: so101_leader, id: l, port: /dev/b}\n"
+    )
+    rig = H.build_rig(
+        cfg,
+        bus_factory=lambda p, c: FakeBus(p, H.to_motor_calibration(c) if c else None),
+        cal_root=root,
+        cameras=False,
+    )
+    sent: list[dict[str, Any]] = []
+    w = RigWorker(rig, sent.append, clock=lambda: 0.0)
+    for cmd in ("connect", "confirm", "arm"):
+        w.handle({"cmd": cmd})
+    assert w.session.state.name == "ARMED", [m for m in sent if m.get("type") == "error"]
+    follower = next(a for a in rig.arms if a.role == "follower")
+    bus = follower._bus
+    assert (
+        bus.goals and bus.goals[0] == follower.read_positions()
+    )  # holds where it is before torque
+    assert follower.read_torque()

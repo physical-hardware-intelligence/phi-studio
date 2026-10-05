@@ -582,8 +582,8 @@ export function useStudio<T>(select: (s: Snapshot) => T): T {
 }
 
 // -- routing and theme -------------------------------------------------------------------------
-export type Route = "overview" | "checks" | "setup" | "calibrate" | "teleop" | "scene" | "data" | "issues" | "train" | "models" | "policy" | "evaluate" | "files" | "guide";
-export const ROUTES: Route[] = ["overview", "checks", "setup", "calibrate", "teleop", "scene", "data", "issues", "train", "models", "policy", "evaluate", "files", "guide"];
+export type Route = "overview" | "checks" | "setup" | "calibrate" | "teleop" | "scene" | "data" | "issues" | "train" | "models" | "policy" | "evaluate" | "files" | "guide" | "settings" | "onboard";
+export const ROUTES: Route[] = ["overview", "checks", "setup", "calibrate", "teleop", "scene", "data", "issues", "train", "models", "policy", "evaluate", "files", "guide", "settings", "onboard"];
 
 // A route is the hash's first segment; the guide also takes a section, as in #/guide/teleop.
 function hashParts(): string[] { return location.hash.replace(/^#\/?/, "").split("/"); }

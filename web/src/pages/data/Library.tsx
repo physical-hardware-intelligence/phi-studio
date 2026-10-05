@@ -1,7 +1,7 @@
-import { Camera, RefreshCw, Search } from "lucide-react";
+import { Camera, Flag, RefreshCw, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArmsGlyph, HealthBar } from "../../components/data/bits";
-import { fmtAgo, fmtBytes, fmtDuration, invalidate, load, useResource, type DatasetSummary } from "../../lib/data";
+import { fmtAgo, fmtBytes, fmtDuration, invalidate, load, useNotes, useResource, type DatasetSummary } from "../../lib/data";
 import { Notices } from "../../components/Notices";
 
 type Filter = "all" | "single" | "bimanual" | "attention";
@@ -11,6 +11,7 @@ export function Library() {
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const queued = useRef(new Set<string>());
+  const open = useNotes(null, null)?.filter((n) => n.kind === "issue" && n.status === "open").length ?? 0;
 
   // Analyse what has not been analysed yet, one dataset at a time, so every row gets its health bar.
   useEffect(() => {
@@ -67,6 +68,7 @@ export function Library() {
             ))}
           </div>
           <span className="grow" />
+          <a className="btn btn-ghost btn-sm" href="#/issues"><Flag aria-hidden />Issues{open ? <span className="badge tone-warn">{open}</span> : null}</a>
           <button className="btn btn-ghost btn-sm" onClick={() => { invalidate("/api/data/datasets"); void load("/api/data/datasets?refresh=1").then(reload); }}
             title={value ? `Looks in ${value.roots.join(", ")}` : undefined}>
             <RefreshCw aria-hidden className={loading ? "spin" : ""} /> Rescan

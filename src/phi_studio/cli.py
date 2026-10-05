@@ -34,7 +34,8 @@ def parser() -> argparse.ArgumentParser:
     rig = p.add_mutually_exclusive_group()
     rig.add_argument("--mock", dest="mock", action="store_true", default=True,
                      help="A simulated rig (the default).")  # fmt: skip
-    rig.add_argument("--hardware", dest="mock", action="store_false", help="Real arms.")
+    rig.add_argument("--hardware", dest="mock", action="store_false",
+                     help="Real arms, from the robot-config.yaml onboarding wrote.")  # fmt: skip
     p.add_argument("--pairs", type=int, choices=(1, 2), default=1,
                    help="Leader and follower pairs: 1, or 2 for bimanual.")  # fmt: skip
     p.add_argument("--port", type=int, default=8765, help="Local port. Studio binds 127.0.0.1.")
@@ -51,14 +52,23 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    rig_dir = find_rig_dir(args.rig_dir)
+    data_dir = Path(args.data_dir).expanduser()
+    spec: dict[str, object] = {"kind": "mock", "pairs": args.pairs}
     if not args.mock:
-        print("The hardware backend is not built yet. Run with --mock for now.", file=sys.stderr)
-        return 1
+        # The order the server reads it in (files.root_order): the rig folder, then Studio's data.
+        found = [d / "robot-config.yaml" for d in (rig_dir, data_dir) if d is not None]
+        config = next((c for c in found if c.is_file()), None)
+        if config is None:
+            print("No robot-config.yaml yet. Start phi-studio without --hardware, set up the rig "
+                  "on Home, then start it again with --hardware.", file=sys.stderr)  # fmt: skip
+            return 1
+        spec = {"kind": "lerobot", "config": str(config)}
     from phi_studio.server import PortInUse, serve
 
     try:
-        serve({"kind": "mock", "pairs": args.pairs}, port=args.port, open_browser=args.browser,
-              data_dir=Path(args.data_dir).expanduser(), rig_dir=find_rig_dir(args.rig_dir),
+        serve(spec, port=args.port, open_browser=args.browser,
+              data_dir=data_dir, rig_dir=rig_dir,
               assistant_model=args.assistant_model or None)  # fmt: skip
     except PortInUse as e:
         print(f"{e} Close it, or run with --port {e.port + 1}.", file=sys.stderr)

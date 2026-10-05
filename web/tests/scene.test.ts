@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
-  basePositions, DEGREES, followerSlots, frustumKeys, limitState, parseSettings, readArm, type ArmSlot, type ArmUnits,
+  basePositions, DEFAULTS, DEGREES, followerSlots, frustumKeys, limitState, parseSettings, readArm, type ArmSlot, type ArmUnits,
   type SceneModel,
 } from "../src/lib/sceneCore.ts";
 import { bodyPoses, forwardTool, mjQuat } from "../src/scene/kinematics.ts";
@@ -148,7 +148,7 @@ test("other fields of the wrong type fall back one by one", () => {
   }));
   assert.equal(s.ghost, true);
   assert.equal(s.trail, false);
-  assert.equal(s.video, true);
+  assert.equal(s.video, DEFAULTS.video); // falls back to the default, whatever it is
   assert.equal(s.print, "model");
   assert.equal(s.wristArm, null);
   assert.deepEqual(s.cameras, {});

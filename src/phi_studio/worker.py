@@ -680,7 +680,13 @@ def build_rig(spec: dict[str, Any]) -> Any:
 
         cams = tuple(spec.get("cameras", ("front", "wrist", "top")))
         return mock_rig(pairs=int(spec.get("pairs", 1)), cameras=cams)
-    raise ValueError(f"rig kind {spec.get('kind')!r} is not available yet; use the mock rig")
+    if spec.get("kind") == "lerobot":
+        # Real arms over LeRobot's Feetech bus, from robot-config.yaml (hardware.py). Connecting
+        # reads and configures; it never turns torque on.
+        from phi_studio.hardware import build_rig as hardware_rig
+
+        return hardware_rig(Path(spec["config"]))
+    raise ValueError(f"rig kind {spec.get('kind')!r} is not available")
 
 
 def encode_jpeg(frame: Any, quality: int = 80) -> bytes:
@@ -718,7 +724,13 @@ def run_worker(conn: Any, spec: dict[str, Any]) -> None:
     # calibration directory, where a real arm's file would be overwritten.
     data = spec.get("data_dir")
     mock = spec.get("kind", "mock") == "mock"
-    cal_dir = Path(data) / "mock-calibration" if data and mock else None
+    if mock:
+        cal_dir = Path(data) / "mock-calibration" if data else None
+    else:
+        # A real arm's calibration goes where LeRobot reads it, so lerobot-record uses that file.
+        from phi_studio.files import lerobot_calibration_dir
+
+        cal_dir = lerobot_calibration_dir()
     w = RigWorker(rig, outbox.put, loop_hz=hz, cal_dir=cal_dir)
     inbox: queue.SimpleQueue[dict[str, Any]] = queue.SimpleQueue()
     done = threading.Event()

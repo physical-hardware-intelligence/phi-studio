@@ -1226,7 +1226,7 @@ export class Engine {
       const p = s.arm.root.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(-0.12, 0, 0)); // behind the base
       const posed = this.posed?.arm === s.slot.name ? this.posed : null;
       if (posed) { place(s.pill, p, `${label(s.slot.name)}: ${posed.text}`, posed.q ? "accent" : "warn"); continue; }
-      const what = s.problem ?? (!s.seen ? "no reading yet, drawn at zero" : !s.online ? "not answering" : stale ? "no reading" : "");
+      const what = s.problem ?? (!s.seen ? "no reading" : !s.online ? "not answering" : stale ? "stale" : "");
       place(s.pill, p, what ? `${label(s.slot.name)}: ${what}` : label(s.slot.name), what ? "warn" : "neutral");
     }
     for (const c of this.cams.values()) {

@@ -1,6 +1,6 @@
 // The 3D view's canvas with its toolbar and notes. The default export, so pages load it with React.lazy and
 // three.js arrives only when a 3D view is on screen.
-import { ArrowLeft, Maximize2, Minimize2, OctagonX, Rotate3d, RotateCw, Scan } from "lucide-react";
+import { ArrowLeft, Info, Maximize2, Minimize2, OctagonX, Rotate3d, RotateCw, Scan, SlidersHorizontal } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { label } from "../lib/labels";
 import { scene, useScene } from "../lib/scene";
@@ -36,7 +36,8 @@ function readTheme(el: HTMLElement): Theme {
 const PRESETS: Preset[] = ["front", "side", "top"];
 const mb = (b: number) => (b / 1e6).toFixed(1);
 
-export default function Viewer({ compact = false }: { compact?: boolean }) {
+/** onSettings: a gear at the end of the toolbar opens the page's settings (the 3D view page passes one). */
+export default function Viewer({ compact = false, onSettings }: { compact?: boolean; onSettings?: () => void }) {
   const stage = useRef<HTMLDivElement>(null);
   const host = useRef<HTMLDivElement>(null);
   const labels = useRef<HTMLDivElement>(null);
@@ -135,20 +136,23 @@ export default function Viewer({ compact = false }: { compact?: boolean }) {
           onClick={autoRotate} title="Turn slowly after 6 s without input" aria-label="Turn slowly when idle"><Rotate3d /></button>
         <button type="button" className="btn btn-sm btn-ghost btn-icon" onClick={fullscreen}
           title={full ? "Leave full screen" : "Full screen"} aria-label={full ? "Leave full screen" : "Full screen"}>{full ? <Minimize2 /> : <Maximize2 />}</button>
+        {onSettings && (
+          <button type="button" className="btn btn-sm btn-ghost btn-icon" onClick={onSettings} title="Settings" aria-label="3D view settings"><SlidersHorizontal /></button>
+        )}
       </div>
 
       {wrist && (
         <div className="scene-banner">
           <button type="button" className="btn btn-sm" onClick={() => engine.current?.frame("home")}><ArrowLeft />Back to orbit</button>
-          <span>Wrist camera. Mount pose from the CAD; vertical field of view estimated, not measured.</span>
+          <span title="Mount pose from the CAD; vertical field of view estimated, not measured.">Wrist camera</span>
         </div>
       )}
 
-      <div className="scene-notes">
-        {settings.ghost && <span>Solid: follower. Ghost: {policy ? "policy target" : "leader"}.</span>}
-        <span>Grid: 5 cm squares.</span>
-        <span>Joint angles go through an assumed mapping, not checked on a physical arm.</span>
-      </div>
+      {/* WHY a tooltip, not a footnote: the caveats matter, but three sentences under the arms crowd them. */}
+      <span className="scene-info" tabIndex={0}
+        title={`${settings.ghost ? `Solid: follower. Ghost: ${policy ? "policy target" : "leader"}. ` : ""}Grid: 5 cm squares. Joint angles go through an assumed mapping, not yet checked on a physical arm.`}>
+        <Info aria-hidden />
+      </span>
 
       {full && (
         // WHY: full screen covers the top bar and its Stop. This one calls the same studio.stop().

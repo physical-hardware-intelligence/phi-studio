@@ -43,7 +43,8 @@ export interface Settings {
 }
 
 export const DEFAULTS: Settings = {
-  spacing: null, cameras: {}, ghost: true, trail: true, frustums: true, video: true, autoRotate: false,
+  // Off until asked for: trails, camera frusta and their live pictures crowd the arms (less is more).
+  spacing: null, cameras: {}, ghost: true, trail: false, frustums: false, video: false, autoRotate: false,
   print: "model", wristArm: null, view: {},
 };
 
