@@ -40,7 +40,18 @@ export interface ArmTelemetry {
   health: Record<string, JointHealth>;
 }
 export interface JointCal { id: number; drive_mode: number; homing_offset: number; range_min: number; range_max: number }
-export type CalStep = "middle" | "ranges" | "review";
+export type CalStep = "middle" | "ranges" | "review" | "auto-middle" | "auto" | "auto-review" | "auto-failed";
+// An auto-calibration sweep (autocal.py view): where it is and the stops it found, in raw ticks.
+export interface AutoView {
+  state: "running" | "paused" | "done" | "failed";
+  why: string | null;
+  joints: string[];
+  joint: string | null;
+  phase: "out" | "back" | "home" | null;
+  found: Record<string, { lo: number; hi: number; deg: number }>;
+  notes: Record<string, string>;
+  waiting?: boolean; // holding for another arm's shoulder-pan turn
+}
 export interface CalView {
   arm: string;
   role: "leader" | "follower";
@@ -48,6 +59,7 @@ export interface CalView {
   joints: Record<string, { min: number; pos: number; max: number; fixed: boolean }>; // raw ticks
   old: Record<string, JointCal>;
   new: Record<string, JointCal> | null;
+  auto?: AutoView | null;
 }
 export interface PolicyView {
   id: string;
@@ -72,6 +84,7 @@ export interface Telemetry {
   arms: Record<string, ArmTelemetry>;
   loop: { hz: number; p50_ms: number; p99_ms: number };
   calibration: CalView | null;
+  autocal?: CalView[] | null; // every arm an auto-calibration sweeps
   policy: PolicyView | null;
 }
 

@@ -15,6 +15,9 @@ Rules it enforces, whatever the UI sends:
   * a fault clears only with torque off, since clearing re-checks every arm's identity
   * calibration runs only with every arm's torque off, never on an arm whose cable is swapped, and
     restores the old registers if it ends any way other than Save
+  * auto-calibration turns torque on its own follower only, writes goal = present first, presses
+    into the stops only through a lowered torque limit, pauses on Stop or a lost heartbeat, and
+    writes registers only with that arm's torque off (a new homing under torque would jump it)
   * a policy drives followers only while MOVING, through the same clip as teleop, and stops itself
     at its time limit
 """
@@ -30,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from phi_studio import rigspec
+from phi_studio import autocal, rigspec
 from phi_studio.identity import Calibration, JointCal, match_fingerprint, save_calibration
 from phi_studio.policy import Policy, PolicyInfo, catalog, is_finite_number
 from phi_studio.rig import BUS_ERRORS, JOINTS, ArmBus, JointHealth, label, labels
@@ -48,11 +51,13 @@ STOP_REASONS = {"user", "window closed", "control moved"}  # what a stop message
 FULL_TURN = "wrist_roll"
 FULL_RANGE = (0, 4095)
 POLICY_LIMIT_S = (1.0, 600.0)
+FULL_TORQUE = 1000  # Torque_Limit's top: what a swept joint goes back to
 
 
 @dataclass
 class CalRun:
-    """One arm's calibration in progress: middle -> ranges -> review, then save or cancel."""
+    """One arm's calibration in progress. By hand: middle -> ranges -> review. Auto: auto-middle ->
+    auto (the sweep) -> auto-review, or auto-failed. Then save or cancel."""
 
     arm: ArmBus
     old: Calibration  # registers before calibration, written back on cancel
@@ -63,16 +68,25 @@ class CalRun:
     mins: dict[str, int] = field(default_factory=dict)
     maxes: dict[str, int] = field(default_factory=dict)
     new: Calibration | None = None
+    joints: list[str] = field(default_factory=list)  # auto: the joints asked for
+    auto: autocal.AutoCal | None = None
+    limited: str | None = None  # auto: the joint whose torque limit is lowered now
+    torque: int | None = None  # auto: Torque_Limit for a swept joint; None: autocal.sweep_limit
+    waiting: bool = False  # auto: holding for another arm's shoulder-pan turn
 
     def view(self) -> dict[str, Any]:
         joints = {}
-        for j in self.pos:
-            lo, hi = FULL_RANGE if j == FULL_TURN else (self.mins[j], self.maxes[j])
-            joints[j] = {"min": lo, "pos": self.pos[j], "max": hi, "fixed": j == FULL_TURN}
+        found = self.auto.found if self.auto else {}
+        for j, p in self.pos.items():
+            lo, hi = (FULL_RANGE if j == FULL_TURN else found.get(j)
+                      or (self.mins.get(j, p), self.maxes.get(j, p)))  # fmt: skip
+            joints[j] = {"min": lo, "pos": p, "max": hi, "fixed": j == FULL_TURN}
         return {"arm": self.arm.name, "role": self.arm.role, "step": self.step, "joints": joints,
                 "old": {j: c._asdict() for j, c in self.old.items()},
                 "new": ({j: c._asdict() for j, c in self.new.items()}
-                        if self.new else None)}  # fmt: skip
+                        if self.new else None),
+                "auto": ({**self.auto.view(), "waiting": self.waiting}
+                         if self.auto else None)}  # fmt: skip
 
 
 @dataclass
@@ -170,6 +184,11 @@ class RigWorker:
         found = policies if policies is not None else catalog(self.mock)
         self.policies = {p.id: p for p in found}
         self.cal: CalRun | None = None
+        self.autos: list[CalRun] = []  # an auto-calibration: every arm it sweeps, at once
+        self.pan_turn: str | None = None  # the one arm sweeping its shoulder pan now
+        # Calibrations that ended under torque (a fault, a disconnect): their old registers go back
+        # once that arm's torque is off (_release_all), never under torque.
+        self.restores: list[CalRun] = []
         self.run: PolicyRun | None = None
         self.session = Session(on_change=self._on_state)
         self.last_heartbeat = clock()
@@ -227,7 +246,7 @@ class RigWorker:
         self._identify()
 
     def _cmd_identify(self, msg: dict[str, Any]) -> None:
-        if self.cal is not None:
+        if self.cal is not None or self.autos:
             self.error("Finish or cancel the calibration first.")
             return
         self._identify()
@@ -317,6 +336,9 @@ class RigWorker:
         if a is None:
             self.error(f"There is no arm named {msg.get('arm')!r}.")
             return
+        if self.autos:
+            self.error("An auto-calibration is running.", "Finish or cancel it first.")
+            return
         holding = [n for n, on in self.torque.items() if on]
         if holding:
             self.error(f"Turn torque off before calibrating: {labels(holding)} "
@@ -333,6 +355,179 @@ class RigWorker:
         self.session.calibration_started()  # raises unless IDENTIFIED or READY
         a.set_torque(False)  # LeRobot disables torque first (so_follower.py:127)
         self.cal = CalRun(a, old=a.read_calibration())
+
+    # -- auto-calibration (autocal.py): every arm asked for at once, leaders too -------------------
+    def _cmd_autocal_start(self, msg: dict[str, Any]) -> None:
+        """Step 1: the same checks as calibrating by hand, for each arm; then wait for the middle
+        pose. arms: names (default every arm); torque stays off until autocal_go."""
+        names = msg.get("arms") or [a.name for a in self.arms]
+        arms = [a for a in self.arms if a.name in names] if isinstance(names, list) else []
+        if not arms or len(arms) != len(set(names)):
+            self.error(f"Arms must be some of {', '.join(a.name for a in self.arms)}.")
+            return
+        if self.cal is not None or self.autos:
+            self.error("A calibration is running.", "Finish or cancel it first.")
+            return
+        holding = [n for n, on in self.torque.items() if on]
+        if holding:
+            self.error(f"Turn torque off before calibrating: {labels(holding)} "
+                       f"{'holds' if len(holding) == 1 else 'hold'} torque.",
+                       "Support the arm, then use Torque off.")  # fmt: skip
+            return
+        for a in arms:
+            mine = next((x for x in self.identity if x["name"] == a.name), None)
+            if mine and mine["exact"] and mine["match"] != a.calibration_id:
+                self.error(f"{label(a.name)} holds the calibration in {mine['match']}.json: are "
+                           "the cables swapped?", "Fix the cables first.")  # fmt: skip
+                return
+        self.session.calibration_started()  # raises unless IDENTIFIED or READY
+        runs = []
+        for a in arms:
+            a.set_torque(False)
+            runs.append(CalRun(a, old=a.read_calibration(), step="auto-middle"))
+        self.autos = runs
+
+    def _cmd_autocal_go(self, msg: dict[str, Any]) -> None:
+        """Every arm is in the middle pose: home them, hold them, sweep. joints: which ones
+        (default all; wrist roll is homed, never swept). torque: Torque_Limit for swept joints."""
+        if not self.autos or any(c.step != "auto-middle" for c in self.autos):
+            self.error("Auto-calibration is not waiting for the middle pose.")
+            return
+        if self.clock() - self.last_heartbeat > HEARTBEAT_TIMEOUT_S:
+            self.error("This window is not sending heartbeats, so Studio will not move the arms.",
+                       "Reload the window, then start again.")  # fmt: skip
+            return
+        joints = msg.get("joints") or list(JOINTS)
+        if not isinstance(joints, list) or any(j not in JOINTS for j in joints):
+            self.error(f"Joints must be some of {', '.join(JOINTS)}.")
+            return
+        keep = msg.get("arms")  # the person may leave some arms out at the middle pose
+        if keep is not None:
+            if not isinstance(keep, list) or not keep or any(
+                k not in {c.arm.name for c in self.autos} for k in keep
+            ):
+                self.error("Pick at least one of the arms being calibrated.")
+                return
+            self.autos = [c for c in self.autos if c.arm.name in keep]  # nothing written yet
+        torque = msg.get("torque")
+        if torque is not None and (not isinstance(torque, int) or isinstance(torque, bool)
+                                   or not 100 <= torque <= 800):  # fmt: skip
+            self.error("The sweep torque must be between 100 and 800 (of 1000).")
+            return
+        order = [j for j in JOINTS if j in joints]
+        homed = list(JOINTS) if len(order) == len(JOINTS) else order  # roll's homing: middle pose
+        now = self.clock()
+        for c in self.autos:
+            c.joints, c.torque = order, torque
+            c.written = True  # before the write: one that fails halfway still changed registers
+            c.homings = c.arm.set_half_turn_homings(homed)
+            raw = c.arm.read_raw_positions()
+            c.pos = raw
+            c.arm.write_raw_goals(raw)  # goal = present before torque, as for teleop (_cmd_arm)
+            self._set_torque(c.arm, True)
+            c.auto = autocal.AutoCal([j for j in order if j != FULL_TURN], raw, now,
+                                     expected_deg=autocal.expected_travel())  # fmt: skip
+            c.step = "auto"
+        self.last_heartbeat = now
+
+    def _cmd_autocal_resume(self, msg: dict[str, Any]) -> None:
+        paused = [c for c in self.autos if c.auto is not None and c.auto.state == "paused"]
+        if not paused:
+            self.error("Auto-calibration is not paused.")
+            return
+        now = self.last_heartbeat = self.clock()
+        for c in paused:
+            assert c.auto is not None
+            c.auto.resume(c.arm.read_raw_positions(), now)
+
+    def _cmd_autocal_save(self, msg: dict[str, Any]) -> None:
+        """Write what every arm found, torque off first. An arm that failed gets its old
+        registers back instead."""
+        if not self.autos or any(c.step not in ("auto-review", "auto-failed") for c in self.autos):
+            self.error("Auto-calibration has not finished.")
+            return
+        runs, self.autos, self.pan_turn = self.autos, [], None
+        for c in runs:
+            if self.torque[c.arm.name]:
+                # WHY torque off first: a new homing written under torque moves the goal the servo
+                # holds by the homing's change, and the arm jumps. The page asks to support it.
+                self._set_torque(c.arm, False)
+            if c.step == "auto-failed" or c.new is None:
+                self._restore(c)
+                continue
+            self._save_run(c)
+        self.session.calibration_ended()
+        self._identify()
+
+    def _cmd_autocal_cancel(self, msg: dict[str, Any]) -> None:
+        if not self.autos:
+            self.error("No auto-calibration is running.")
+            return
+        runs, self.autos, self.pan_turn = self.autos, [], None
+        for c in runs:
+            if self.torque[c.arm.name]:
+                self._set_torque(c.arm, False)  # the person supports the arm (the page asks)
+            if c.written:
+                self._restore(c)
+        self.session.calibration_ended()
+        self._identify()
+
+    def _autocal_abort(self) -> None:
+        """A fault or a disconnect: arms holding torque keep holding, and get their old registers
+        back once their torque goes off; the rest get them back now."""
+        runs, self.autos, self.pan_turn = self.autos, [], None
+        for c in runs:
+            if not c.written:
+                continue
+            if self.torque.get(c.arm.name):
+                self.restores.append(c)
+            else:
+                self._restore(c)
+
+    def _autocal_tick(self, now: float) -> None:
+        """One sweep step for every arm. Shoulder pans take turns, so two followers side by side
+        never swing into each other."""
+        stale = now - self.last_heartbeat > HEARTBEAT_TIMEOUT_S
+        for c in self.autos:
+            e = c.auto
+            if c.step != "auto" or e is None:
+                continue
+            if stale and e.state == "running":
+                e.pause("This window stopped answering, so the sweep paused.")
+            panning = e.state == "running" and e.current is not None \
+                and e.current.joint == "shoulder_pan"  # fmt: skip
+            if panning and self.pan_turn is None:
+                self.pan_turn = c.arm.name
+            c.pos = c.arm.read_raw_positions()
+            # WHY the goals first: a joint leaving the sweep gets its full torque back only once
+            # its goal is where it stands, so it never presses into a stop at full strength.
+            wait = panning and self.pan_turn != c.arm.name
+            c.waiting = wait
+            c.arm.write_raw_goals(e.step(c.pos, now, advance=not wait))
+            j = e.current.joint if e.state == "running" and e.current and not wait else None
+            if j != c.limited:
+                limits = {c.limited: FULL_TORQUE} if c.limited else {}
+                if j:
+                    limits[j] = autocal.sweep_limit(j, c.torque)
+                c.arm.set_torque_limits(limits)
+                c.limited = j
+            still_panning = e.state in ("running", "paused") and e.current is not None \
+                and e.current.joint == "shoulder_pan"  # fmt: skip
+            if self.pan_turn == c.arm.name and not still_panning:
+                self.pan_turn = None
+            if e.state == "done":
+                c.new = dict(c.old)
+                for jj in c.homings:
+                    if jj in e.found:
+                        homing, lo, hi = e.range(jj, c.homings[jj])
+                    elif jj == FULL_TURN:
+                        homing, (lo, hi) = c.homings[jj], FULL_RANGE
+                    else:
+                        continue
+                    c.new[jj] = JointCal(c.old[jj].id, 0, homing, lo, hi)  # drive_mode 0
+                c.step = "auto-review"
+            elif e.state == "failed":
+                c.step = "auto-failed"
 
     def _cal_at(self, step: str) -> CalRun | None:
         if self.cal is None:
@@ -373,6 +568,14 @@ class RigWorker:
         c = self._cal_at("review")
         if c is None or c.new is None:
             return
+        self._save_run(c)
+        self.cal = None
+        self.session.calibration_ended()
+        self._identify()
+
+    def _save_run(self, c: CalRun) -> None:
+        """Write a finished calibration to the servos and its file, and say so."""
+        assert c.new is not None
         c.arm.write_calibration(c.new)
         self.calibrations[c.arm.calibration_id] = c.new
         path = None
@@ -384,10 +587,7 @@ class RigWorker:
                 self.error(f"Wrote {c.arm.name}'s registers but could not save {path}: {e}",
                            "Studio uses the new calibration until it restarts.")  # fmt: skip
                 path = None
-        self.cal = None
-        self.session.calibration_ended()
         self.send({"type": "calibrated", "arm": c.arm.name, "path": str(path) if path else None})
-        self._identify()
 
     def _cmd_cal_cancel(self, msg: dict[str, Any]) -> None:
         if self.cal is None:
@@ -402,7 +602,12 @@ class RigWorker:
         c, self.cal = self.cal, None
         if c is None or not c.written:
             return
+        self._restore(c)
+
+    def _restore(self, c: CalRun) -> None:
         try:
+            if c.limited:
+                c.arm.set_torque_limits({c.limited: FULL_TORQUE})
             c.arm.write_calibration(c.old)
         except BUS_ERRORS as e:
             self.error(f"Could not restore {c.arm.name}'s calibration registers: {e}",
@@ -411,6 +616,9 @@ class RigWorker:
 
     def _cmd_stop(self, msg: dict[str, Any]) -> None:
         reason = msg.get("reason", "user")
+        for c in self.autos:
+            if c.auto is not None:
+                c.auto.pause("Stopped")  # holds where it is; Resume goes on, Cancel ends it
         if self.session.state in (State.MOVING, State.ARMED):
             self.session.stopped(reason if reason in STOP_REASONS else "user")
             self._freeze()
@@ -452,6 +660,7 @@ class RigWorker:
 
     def _cmd_disconnect(self, msg: dict[str, Any]) -> None:
         self._cal_abort()
+        self._autocal_abort()
         self._release_all()
         # WHY keep the run: Disconnect is how the scene gets reset, and an ended eval episode must
         # stay judgeable after it. Dropping the run lost it from the eval record with no message.
@@ -517,13 +726,19 @@ class RigWorker:
                 self._set_torque(a, False)
             except BUS_ERRORS:
                 silent.append(a.name)
+                continue
+            for c in [c for c in self.restores if c.arm is a]:
+                self.restores.remove(c)
+                self._restore(c)
         return silent
 
     def _freeze(self) -> None:
         """Goal = present position on every reachable follower with torque on. Torque stays on.
         A follower that does not answer is marked dead and faults the session."""
         lost = None
-        for f in self.followers:
+        # Leaders too while an auto-calibration drives them: they hold torque then.
+        driven = [c.arm for c in self.autos if c.arm.role == "leader"]
+        for f in [*self.followers, *driven]:
             # WHY skip limp followers: a goal write may enable torque on some Feetech firmware
             # (bench test 22), and a limp arm has nothing to hold.
             if f.name in self.dead or not self.torque[f.name]:
@@ -540,6 +755,7 @@ class RigWorker:
         self.session.faulted(why)
         self._freeze()
         self._cal_abort()
+        self._autocal_abort()
 
     def _clip(self, goal: dict[str, float], present: dict[str, float]) -> dict[str, float]:
         return {
@@ -574,6 +790,9 @@ class RigWorker:
                 for fol, goal in self._policy_goals(now, pos):
                     current = fol
                     fol.write_goals(goal)
+            if self.autos:
+                current = self.autos[0].arm
+                self._autocal_tick(now)
             if self.cal is not None and self.cal.step == "ranges":
                 c = self.cal
                 current = c.arm
@@ -622,6 +841,7 @@ class RigWorker:
         self.send({
             "type": "telemetry", "t": self.clock(), "arms": arms,
             "calibration": self.cal.view() if self.cal else None,
+            "autocal": [c.view() for c in self.autos] or None,
             "policy": self.run.view() if self.run else None,
             "loop": {"hz": round((len(self._ticks) - 1) / span, 1) if span else 0.0,
                      "p50_ms": round(costs[len(costs) // 2], 2) if costs else 0.0,

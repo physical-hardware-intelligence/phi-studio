@@ -617,3 +617,13 @@ def test_a_feature_command_needs_control_when_it_says_so() -> None:
             await server.close()
 
     run(go())
+
+
+def test_every_worker_command_reaches_the_worker() -> None:
+    """A command the worker has but the server's list lacks is refused as unknown before it gets
+    there (auto-calibration's were, the first time). The list must cover every _cmd_ handler."""
+    from phi_studio.server import COMMANDS
+    from phi_studio.worker import RigWorker
+
+    handlers = {n.removeprefix("_cmd_") for n in dir(RigWorker) if n.startswith("_cmd_")}
+    assert handlers <= COMMANDS, sorted(handlers - COMMANDS)

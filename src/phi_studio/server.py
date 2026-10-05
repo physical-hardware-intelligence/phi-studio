@@ -56,7 +56,9 @@ FEATURES = (
 
 COMMANDS = {"heartbeat", "connect", "identify", "confirm", "arm", "start", "stop", "resume",
             "release", "clear", "disconnect", "inject",
-            "cal_start", "cal_middle", "cal_finish", "cal_save", "cal_cancel"}  # fmt: skip
+            "cal_start", "cal_middle", "cal_finish", "cal_save", "cal_cancel",
+            "autocal_start", "autocal_go", "autocal_resume", "autocal_save",
+            "autocal_cancel"}  # fmt: skip
 EVAL_COMMANDS = {"eval_begin", "eval_mark", "eval_undo", "eval_end"}  # answered by the server
 ANYONE = {"stop", "take_control"}  # allowed from a window without control
 # Answered by the server, from any window: they read, and none reaches the worker.

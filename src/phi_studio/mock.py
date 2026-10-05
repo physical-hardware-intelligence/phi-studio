@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -40,6 +41,14 @@ _HOME = {
     "gripper": 5.0,
 }
 _FAULT_BIT = {"voltage": 1, "overheat": 4, "overload": 32}
+# Each joint's travel between its hard stops, in degrees, from the MJCF (kinematics.limits_deg; the
+# gripper's 0..100 counts as degrees here, as everywhere in the mock). Centred on the home pose, so
+# auto-calibration can start from it, and moved up to STOP_TOLERANCE per arm, as printed parts
+# differ. Wrist roll turns freely: no stops.
+_TRAVEL = {"shoulder_pan": 220.0, "shoulder_lift": 200.0, "elbow_flex": 193.7, "wrist_flex": 190.0,
+           "gripper": 100.0}  # fmt: skip
+STOP_TOLERANCE = 3.0
+FULL_TORQUE = 1000  # Torque_Limit's top: the servo's whole torque
 
 
 class FakeClock:
@@ -94,6 +103,13 @@ class MockArm:
         rng = np.random.default_rng(1000 + self.seed)
         # Encoder ticks at the home pose: where each servo's magnet happens to sit.
         self._enc0 = {j: int(rng.integers(1300, 2800)) for j in JOINTS}
+        tol = np.random.default_rng(2000 + self.seed)
+        self.stops = {
+            j: (_HOME[j] - t / 2 + tol.uniform(-STOP_TOLERANCE, STOP_TOLERANCE),
+                _HOME[j] + t / 2 + tol.uniform(-STOP_TOLERANCE, STOP_TOLERANCE))
+            for j, t in _TRAVEL.items()
+        }  # fmt: skip
+        self.torque_limit = {j: FULL_TORQUE for j in JOINTS}
         self._t = self.clock()  # type: ignore[operator]
         self._t0 = self._t
 
@@ -143,6 +159,9 @@ class MockArm:
                 continue  # protection: the joint stops tracking
             err = self.goal[j] - self.pos[j]
             self.pos[j] += max(-step, min(step, err))
+            if j in self.stops:  # a hard stop holds the joint whatever the goal
+                lo, hi = self.stops[j]
+                self.pos[j] = min(hi, max(lo, self.pos[j]))
 
     def read_calibration(self) -> Calibration:
         self._check()
@@ -162,13 +181,15 @@ class MockArm:
         self._step()
         return {j: v - self._cal[j].homing_offset for j, v in self._actual().items()}
 
-    def set_half_turn_homings(self) -> dict[str, int]:
-        """LeRobot motors_bus.py:788-796: reset (homing 0, limits 0..4095), read, write homing."""
+    def set_half_turn_homings(self, joints: Sequence[str] | None = None) -> dict[str, int]:
+        """LeRobot motors_bus.py:788-796: reset (homing 0, limits 0..4095), read, write homing,
+        for `joints` (default all); the others keep their registers."""
         self._check()
         self._step()
-        homings = {j: v - HALF_TURN for j, v in self._actual().items()}
+        which = list(joints) if joints is not None else list(JOINTS)
+        homings = {j: v - HALF_TURN for j, v in self._actual().items() if j in which}
         self._cal = self._own_cal = {
-            j: JointCal(c.id, c.drive_mode, homings[j], 0, TICKS_PER_REV - 1)
+            j: JointCal(c.id, c.drive_mode, homings[j], 0, TICKS_PER_REV - 1) if j in homings else c
             for j, c in self._cal.items()
         }  # the servo keeps these: a replug does not undo them
         return homings
@@ -183,6 +204,17 @@ class MockArm:
         self._check()
         self._step()
         self.goal.update(goals)
+
+    def write_raw_goals(self, goals: dict[str, int]) -> None:
+        """Goal_Position in ticks, homing applied: the inverse of read_raw_positions."""
+        self._check()
+        self._step()
+        for j, v in goals.items():
+            self.goal[j] = (v + self._cal[j].homing_offset - self._enc0[j]) / TICKS_PER_DEG
+
+    def set_torque_limits(self, limits: dict[str, int]) -> None:
+        self._check()
+        self.torque_limit.update(limits)
 
     def set_torque(self, on: bool) -> None:
         self._check()

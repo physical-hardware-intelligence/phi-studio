@@ -10,7 +10,7 @@ Copied from LeRobot 0.6.0 so a rig behaves the same here and in lerobot-teleoper
     five arm joints, RANGE_0_100 for the gripper; the leader's is the same (so_leader.py)
   * a follower's configure (so_follower.py:159-173): position mode, P=16 I=0 D=32, and the gripper's
     limits (Max_Torque_Limit 500, Protection_Current 250, Overload_Torque 25) so it cannot burn
-    itself squeezing an object
+    itself squeezing an object; a leader's (so_leader.py:127-131): position mode
 Deliberately different:
   * configure runs only when every servo's torque is off, and leaves it off. LeRobot re-enables
     torque after configuring (motors_bus.torque_disabled); Studio enables torque only after the arms
@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -161,17 +161,20 @@ class FeetechArm:
         return any(int(v) == 1 for v in vals.values())
 
     def _configure(self) -> None:
-        """LeRobot's follower configure, with torque left off. A leader only gets its torque off."""
+        """LeRobot's configure, with torque left off: position mode for both roles (so_leader.py
+        configure, so auto-calibration can drive a leader too), and a follower's PID and gripper
+        limits (so_follower.py configure)."""
+        from lerobot.motors.feetech import OperatingMode
+
         bus = self._bus
         bus.disable_torque()
-        if self.role == "follower":
-            from lerobot.motors.feetech import OperatingMode
-
-            bus.configure_motors()
-            for j in JOINTS:
-                bus.write("Operating_Mode", j, OperatingMode.POSITION.value)
+        bus.configure_motors()
+        for j in JOINTS:
+            bus.write("Operating_Mode", j, OperatingMode.POSITION.value)
+            if self.role == "follower":
                 for reg, val in PID.items():
                     bus.write(reg, j, val)
+        if self.role == "follower":
             for reg, val in GRIPPER_LIMITS.items():
                 bus.write(reg, "gripper", val)
         self.configured = True
@@ -198,16 +201,21 @@ class FeetechArm:
             ).items()
         }
 
-    def set_half_turn_homings(self) -> dict[str, int]:
-        """LeRobot's homing for the middle pose. WHY the cache: its reset_calibration empties the
-        bus's own calibration (motors_bus.py reset_calibration), so every normalised read would
-        raise until the end of the calibration and the worker would take the arm for dead. The
-        registers now hold these homings and the full 0..4095 range; normalising with the same
-        values, as the mock does, keeps positions flowing (degrees from the middle pose)."""
+    def set_half_turn_homings(self, joints: Sequence[str] | None = None) -> dict[str, int]:
+        """LeRobot's homing for the middle pose, for `joints` (default all). WHY the cache: its
+        reset_calibration empties the bus's own calibration (motors_bus.py reset_calibration), so
+        every normalised read would raise until the end of the calibration and the worker would
+        take the arm for dead. The homed joints' registers now hold the new homings and the full
+        0..4095 range, the others what they held; normalising with the same values, as the mock
+        does, keeps positions flowing (degrees from the middle pose)."""
+        which = list(joints) if joints is not None else list(JOINTS)
+        if self.calibration is None and len(which) < len(JOINTS):
+            raise RuntimeError(f"{self.name} has no calibration file: home every joint")
 
         def run(b: Any) -> dict[str, int]:
-            homings = {j: int(v) for j, v in b.set_half_turn_homings().items()}
-            cal = {j: JointCal(MOTOR_IDS[j], 0, homings[j], 0, FULL_TICKS) for j in homings}
+            homings = {j: int(v) for j, v in b.set_half_turn_homings(which).items()}
+            cal = dict(self.calibration or {})
+            cal |= {j: JointCal(MOTOR_IDS[j], 0, homings[j], 0, FULL_TICKS) for j in homings}
             b.calibration = to_motor_calibration(cal)
             self.calibration = cal
             return homings
@@ -223,6 +231,18 @@ class FeetechArm:
 
     def write_goals(self, goals: dict[str, float]) -> None:
         self._call(lambda b: b.sync_write("Goal_Position", goals))
+
+    def write_raw_goals(self, goals: dict[str, int]) -> None:
+        self._call(lambda b: b.sync_write("Goal_Position", goals, normalize=False))
+
+    def set_torque_limits(self, limits: dict[str, int]) -> None:
+        """Torque_Limit per joint, 0..1000 (a RAM register: no EEPROM wear, gone at power-off)."""
+
+        def run(b: Any) -> None:
+            for j, v in limits.items():
+                b.write("Torque_Limit", j, int(v), normalize=False)
+
+        self._call(run)
 
     def set_torque(self, on: bool) -> None:
         self._call(lambda b: b.enable_torque() if on else b.disable_torque())

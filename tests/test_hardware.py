@@ -31,6 +31,7 @@ class FakeBus:
         self.torque = {j: 0 for j in JOINTS}
         self.writes: list[tuple[str, str, int]] = []
         self.goals: list[dict[str, float]] = []
+        self.normalized: list[bool] = []
         self.regs = {
             j: {
                 "Present_Load": -250,
@@ -71,6 +72,7 @@ class FakeBus:
     def sync_write(self, name: str, values: dict[str, float], *, normalize: bool = True) -> None:
         assert name == "Goal_Position"
         self.goals.append(dict(values))
+        self.normalized.append(normalize)
 
     def write(self, name: str, motor: str, value: int, *, normalize: bool = True) -> None:
         self.writes.append((name, motor, value))
@@ -100,12 +102,14 @@ class FakeBus:
         if cache:
             self.calibration = cal
 
-    def set_half_turn_homings(self) -> dict[str, int]:
-        """LeRobot's: reset_calibration (homing 0, limits 0..4095, and the cache emptied), then
-        the homing that puts the present position at 2047. The raw reads follow the new homing."""
+    def set_half_turn_homings(self, motors: Any = None) -> dict[str, int]:
+        """LeRobot's: reset_calibration (homing 0, limits 0..4095, and the whole cache emptied),
+        then the homing that puts the present position at 2047, for `motors` (default all). The
+        raw reads follow the new homing."""
+        which = list(motors) if motors is not None else list(self.raw)
         self.calibration = {}
-        homings = {j: r - 2047 for j, r in self.raw.items()}
-        self.raw = {j: 2047 for j in self.raw}
+        homings = {j: r - 2047 for j, r in self.raw.items() if j in which}
+        self.raw = {j: 2047 if j in which else r for j, r in self.raw.items()}
         return homings
 
 
@@ -176,9 +180,13 @@ def test_arm_found_holding_is_left_holding() -> None:
     assert FakeBus.instances[-1].writes == []
 
 
-def test_leader_only_releases_torque() -> None:
+def test_leader_gets_lerobots_leader_configure() -> None:
+    """Position mode, as so_leader.py configure, so auto-calibration can drive it; no follower
+    PID or gripper limits."""
     arm("leader")
-    assert all(n != "Operating_Mode" for n, _, _ in FakeBus.instances[-1].writes)
+    writes = FakeBus.instances[-1].writes
+    assert {m for n, m, _ in writes if n == "Operating_Mode"} == set(JOINTS)
+    assert not any(n in ("P_Coefficient", "Max_Torque_Limit") for n, _, _ in writes)
 
 
 def test_positions_in_lerobot_units_and_goals_pass_through() -> None:
@@ -385,3 +393,26 @@ def test_calibrating_by_hand_on_a_real_bus_keeps_positions_flowing(tmp_path) -> 
     new = follower.calibration
     assert new["elbow_flex"].range_min == 1547 and new["elbow_flex"].range_max == 2647
     assert new["wrist_roll"].range_min == 0 and new["wrist_roll"].range_max == 4095
+
+
+def test_raw_goals_and_torque_limits_for_auto_calibration() -> None:
+    a = arm()
+    bus = FakeBus.instances[-1]
+    a.write_raw_goals({"gripper": 2100})
+    assert bus.goals[-1] == {"gripper": 2100} and bus.normalized[-1] is False  # ticks, as given
+    a.set_torque_limits({"gripper": 200, "elbow_flex": 1000})
+    assert ("Torque_Limit", "gripper", 200) in bus.writes
+    assert ("Torque_Limit", "elbow_flex", 1000) in bus.writes
+
+
+def test_homing_some_joints_keeps_the_others_calibration() -> None:
+    a = arm()
+    homings = a.set_half_turn_homings(["gripper"])
+    assert list(homings) == ["gripper"]
+    assert a.calibration["elbow_flex"] == CAL["elbow_flex"]  # untouched
+    g = a.calibration["gripper"]
+    assert (g.homing_offset, g.range_min, g.range_max) == (2000 - 2047, 0, 4095)
+    a.read_positions()  # normalises: the bus has a calibration for every joint again
+    bare = arm(cal=None)
+    with pytest.raises(RuntimeError, match="home every joint"):
+        bare.set_half_turn_homings(["gripper"])

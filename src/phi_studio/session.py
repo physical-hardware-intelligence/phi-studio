@@ -5,8 +5,9 @@
                                                 |        |  v      v stop / heartbeat loss
                                              release  resume STOPPED
     any state -> FAULT -> (clear) -> CONNECTED, so a fault always forces a fresh identity check.
-    IDENTIFIED / READY -> CALIBRATING -> CONNECTED: torque is off throughout, and the new
-    registers get the same fresh identity check.
+    IDENTIFIED / READY -> CALIBRATING -> CONNECTED: torque is off throughout, except on the one
+    follower an auto-calibration sweeps (worker.py), and the new registers get the same fresh
+    identity check.
 
 WHY a hand-written table rather than flags: every torque or goal write in the worker asks this
 object first, so
