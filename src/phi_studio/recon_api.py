@@ -57,7 +57,6 @@ LIVE_FRESH_S = 2.0
 CLOUDS_PER_CAMERA = 2
 TOKEN_HEADER = "X-Phi-Token"
 NO_LIVE = "No camera is streaming. Start teleop or camera align to capture live."
-STATE_UNITS = "degrees"  # dataset observation.state, read as Studio's telemetry reads it (assumed)
 
 _states: weakref.WeakKeyDictionary[Studio, Recon] = weakref.WeakKeyDictionary()
 
@@ -124,6 +123,8 @@ def dataset_frame(root: str, episode: int, frame: int, key: str) -> Frame:
         names = lds.meta.features.get("observation.state", {}).get("names") or []
         state = item.get("observation.state")
         readings = {}
+        # Read as degrees, the mode Studio's telemetry uses. ASSUMED: a dataset recorded with
+        # use_degrees=False (-100..100) would place the wrist camera and arm boxes wrongly.
         if state is not None and len(names) == len(robot_model.JOINTS):
             readings["dataset"] = {str(n).removesuffix(".pos"): float(v)
                                    for n, v in zip(names, state.tolist(), strict=True)}  # fmt: skip
@@ -178,8 +179,9 @@ def _arms(v: Any) -> list[dict[str, Any]]:
 
 
 def _is_wrist(name: str) -> bool:
-    key = str(robot_model.WRIST_CAMERA["key"])
-    return name == key or name.endswith(f"_{key}")
+    """Only the exact key rides on the arm, as the 3D view draws it (engine.ts syncCameras); a
+    left_wrist or right_wrist is a placed camera there too, until the view learns per-arm wrists."""
+    return name == str(robot_model.WRIST_CAMERA["key"])
 
 
 # -- the work, on the depth thread -----------------------------------------------------------------
@@ -344,7 +346,9 @@ class Recon:
 
         h0, w0 = frame.rgb.shape[:2]
         w, h = recon.working_size(w0, h0, recon.MAX_POINTS)
-        cam = recon.Pinhole.from_fovy(w, h, fovy)
+        # WHY the x stretch: flooring each side can shrink width and height by slightly
+        # different factors (848x480 -> 282x160), so fx must follow the width's own factor.
+        cam = recon.Pinhole.from_fovy(w, h, fovy, x_stretch=(w / w0) / (h / h0))
         from PIL import Image
 
         small = np.asarray(Image.fromarray(frame.rgb).resize((w, h), Image.Resampling.BOX))

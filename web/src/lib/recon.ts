@@ -110,6 +110,13 @@ class ReconStore {
 
   setVisible(camera: string, on: boolean): void { this.update({ visible: { ...this.snap.settings.visible, [camera]: on } }); }
 
+  /** The page could not load a cloud the server announced: drop it and say so in its row. */
+  fetchFailed(camera: string, message: string): void {
+    const clouds = { ...this.snap.clouds };
+    delete clouds[camera];
+    this.set({ clouds, refused: { ...this.snap.refused, [camera]: { kind: "refused", camera, message, at: Date.now() } } });
+  }
+
   /** Drop one camera's cloud from this window. */
   clear(camera: string): void {
     const clouds = { ...this.snap.clouds };

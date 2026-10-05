@@ -101,12 +101,14 @@ class Pinhole:
     cy: float
 
     @classmethod
-    def from_fovy(cls, width: int, height: int, fovy_deg: float) -> Pinhole:
-        """Vertical field of view, as the 3D view stores it (three's PerspectiveCamera.fov)."""
+    def from_fovy(cls, width: int, height: int, fovy_deg: float,
+                  x_stretch: float = 1.0) -> Pinhole:  # fmt: skip
+        """Vertical field of view, as the 3D view stores it (three's PerspectiveCamera.fov).
+        x_stretch: how much more the picture was scaled across than down (1 for square pixels)."""
         if not 1.0 <= fovy_deg <= 179.0:
             raise ValueError(f"field of view {fovy_deg} degrees is not possible for a camera")
         f = (height / 2) / math.tan(math.radians(fovy_deg) / 2)
-        return cls(width, height, f, f, width / 2, height / 2)
+        return cls(width, height, f * x_stretch, f, width / 2, height / 2)
 
 
 def look_at(pos: Sequence[float], target: Sequence[float], up: Sequence[float]) -> np.ndarray:
@@ -188,7 +190,11 @@ class Fit:
     s: float = math.nan  # d = s / z + t
     t: float = math.nan
     inlier_fraction: float = 0.0  # of the table pixels used
-    median_mm: float = math.nan  # median |z_fit - z_table| over the inliers, along the view axis
+    # median |z_fit - z_table| over the inliers, along the view axis. IN-SAMPLE: the same table
+    # pixels the fit used. It cannot see a wrong camera pose: on a plane 1/z is affine in the
+    # pixel position, so a wrongly placed camera often still fits the table perfectly (s and t
+    # absorb the error) while points above the table come out wrong.
+    median_mm: float = math.nan
     plane_pixels: int = 0  # table pixels the fit used
     depth_ratio: float = math.nan  # far / near table depth over the pixels used
     inliers: np.ndarray | None = field(default=None, repr=False)
@@ -359,7 +365,8 @@ def wrist_camera_pose(model: robot_model.RobotModel, q: Mapping[str, float],
 # -- the whole picture -----------------------------------------------------------------------------
 def working_size(width: int, height: int, cap: int = MAX_POINTS) -> tuple[int, int]:
     """The picture shrunk by the smallest whole factor that brings it to at most `cap` pixels.
-    WHY a whole factor: every working pixel then covers the same block of the original."""
+    Each side is floored, so when a side does not divide, the two sides shrink by slightly
+    different factors; the caller passes that difference to Pinhole.from_fovy as x_stretch."""
     n = 1
     while (width // n) * (height // n) > cap:
         n += 1

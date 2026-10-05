@@ -229,3 +229,31 @@ def test_working_size_keeps_aspect_under_the_cap() -> None:
     w, h = recon.working_size(1920, 1080, 80_000)
     assert w * h <= 80_000 and abs(w / h - 1920 / 1080) < 0.02
     assert recon.working_size(200, 100, 80_000) == (200, 100)
+
+
+def test_uneven_shrink_keeps_projection() -> None:
+    """848x480 floors to 282x160: across shrinks by 3.007, down by 3.0. With x_stretch the working
+    camera projects every point where the full camera does, scaled."""
+    w0, h0 = 848, 480
+    w, h = recon.working_size(w0, h0, 50_000)
+    assert (w0 / w) != (h0 / h)
+    full = recon.Pinhole.from_fovy(w0, h0, 50.0)
+    work = recon.Pinhole.from_fovy(w, h, 50.0, x_stretch=(w / w0) / (h / h0))
+    c2w = recon.look_at((0.6, -0.3, 0.4), (0.1, 0.0, 0.0), (0, 0, 1))
+    pts = np.random.default_rng(5).uniform([-0.1, -0.2, 0], [0.3, 0.2, 0.2], (200, 3))
+    uf, vf, _ = recon.project(full, c2w, pts)
+    uw, vw, _ = recon.project(work, c2w, pts)
+    assert np.allclose(uw, uf * w / w0, atol=1e-9) and np.allclose(vw, vf * h / h0, atol=1e-9)
+
+
+def test_table_fit_cannot_see_a_wrong_camera_height() -> None:
+    """A documented limit, pinned so the UI keeps saying it: on a plane 1/z is affine in the pixel
+    position, so a camera placed 15 cm too low still fits the table perfectly, with the wrong s
+    and t, and points above the table come back wrong. The fit numbers cannot catch this."""
+    cam = recon.Pinhole.from_fovy(W, H, 50.0)
+    true = recon.look_at((0.7, 0.0, 0.60), (0.1, 0.0, 0.0), (0, 0, 1))
+    wrong = recon.look_at((0.7, 0.0, 0.45), (0.1, 0.0, 0.0), (0, 0, 1))
+    disp = fake_model(cast(cam, true, box=False, wall=False), 0.7, 0.3, 0.0)
+    fit = recon.fit_scale(disp, recon.table_depth(cam, wrong, bases=[(0.0, 0.0)]))
+    assert fit.ok and fit.inlier_fraction > 0.99 and fit.median_mm < 0.01
+    assert abs(fit.s - 0.7) > 0.1  # the scale is wrong all the same

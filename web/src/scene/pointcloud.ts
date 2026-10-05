@@ -30,7 +30,7 @@ export function parseCloud(buf: ArrayBuffer): { n: number; nOff: number; positio
 export class PointLayers {
   readonly group = new THREE.Group();
   private readonly layers = new Map<string, Layer>();
-  private readonly loading = new Map<string, AbortController>();
+  private readonly loading = new Map<string, { id: string; ctl: AbortController }>(); // camera -> the fetch in flight
   private readonly unsub: () => void;
   private last: ReconState | null = null;
   private disposed = false;
@@ -51,20 +51,30 @@ export class PointLayers {
     const styleChanged = !this.last || this.last.settings !== s.settings;
     this.last = s;
     for (const cam of [...this.layers.keys()]) if (!s.clouds[cam]) this.drop(cam);
+    for (const [cam, l] of [...this.loading]) {
+      if (!s.clouds[cam]) { l.ctl.abort(); this.loading.delete(cam); } // removed while it was loading
+    }
     for (const [cam, info] of Object.entries(s.clouds)) {
-      if (this.layers.get(cam)?.id === info.id) continue;
+      // WHY check the fetch in flight too: every store change (a status reply, a slider) would otherwise restart it.
+      if (this.layers.get(cam)?.id === info.id || this.loading.get(cam)?.id === info.id) continue;
       void this.fetch(cam, info);
     }
     if (styleChanged) this.style();
   }
 
   private async fetch(cam: string, info: CloudInfo): Promise<void> {
-    this.loading.get(cam)?.abort(); // latest wins here too
+    this.loading.get(cam)?.ctl.abort(); // a newer cloud for this camera: latest wins here too
     const ctl = new AbortController();
-    this.loading.set(cam, ctl);
+    this.loading.set(cam, { id: info.id, ctl });
     try {
       const r = await fetch(info.url, { headers: { "X-Phi-Token": studio.token() }, cache: "no-store", signal: ctl.signal });
-      if (!r.ok) return; // replaced by a newer capture already (404): its own message is on the way
+      if (!r.ok) {
+        // A 404 for a cloud the store already replaced is expected: the newer one is on its way. Anything else is said.
+        if (!this.disposed && !ctl.signal.aborted && reconStore.snap.clouds[cam]?.id === info.id) {
+          reconStore.fetchFailed(cam, `The points could not be loaded (the server answered ${r.status}). Capture again.`);
+        }
+        return;
+      }
       const cloud = parseCloud(await r.arrayBuffer());
       if (this.disposed || ctl.signal.aborted) return;
       this.drop(cam);
@@ -81,7 +91,7 @@ export class PointLayers {
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError")) console.warn(`point cloud ${cam}:`, e);
     } finally {
-      if (this.loading.get(cam) === ctl) this.loading.delete(cam);
+      if (this.loading.get(cam)?.ctl === ctl) this.loading.delete(cam);
     }
   }
 
@@ -118,7 +128,7 @@ export class PointLayers {
     if (this.disposed) return;
     this.disposed = true;
     this.unsub();
-    for (const c of this.loading.values()) c.abort();
+    for (const l of this.loading.values()) l.ctl.abort();
     this.loading.clear();
     for (const cam of [...this.layers.keys()]) this.drop(cam);
     this.group.removeFromParent();

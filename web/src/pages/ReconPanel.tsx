@@ -4,7 +4,7 @@ import { Camera, Download, RefreshCw, X } from "lucide-react";
 import { useEffect } from "react";
 import { label } from "../lib/labels";
 import { type CloudInfo, type DatasetInfo, fitText, reconStore, type Refusal, SIZE, useRecon } from "../lib/recon";
-import { followerSlots } from "../lib/scene";
+import { followerSlots, useScene } from "../lib/scene";
 import { useStudio } from "../lib/studio";
 
 const mb = (b: number) => (b / 1e6).toFixed(0);
@@ -21,8 +21,16 @@ export function ReconPanel() {
   const link = useStudio((s) => s.link);
   const telemetry = useStudio((s) => s.telemetry);
   const rigArms = useStudio((s) => s.rig?.arms);
+  const placedCameras = useScene((s) => s.settings.cameras);
+  const spacing = useScene((s) => s.settings.spacing);
+  const wristArm = useScene((s) => s.settings.wristArm);
+  const keeping = useRecon((s) => s.status?.keep ?? null);
 
   useEffect(() => { reconStore.start(); }, []);
+  // WHY: keep updating carries the camera placement it was started with. Send it again when the placement changes.
+  useEffect(() => {
+    if (keeping) reconStore.keep(keeping);
+  }, [placedCameras, spacing, wristArm]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (link === "open") { reconStore.refresh(); reconStore.loadDatasets(); } }, [link]);
   // The live camera list and the download bar change on their own: ask again while either matters.
   useEffect(() => {
@@ -209,6 +217,10 @@ function LayerRow({ cam, cloud, refusal, busy, visible }: { cam: string; cloud?:
       {cloud && (
         <>
           <span className={newer ? "field-hint" : "recon-fit"}>{newer ? "Showing the last cloud that worked. " : ""}{fitText(cloud.fit)}.</span>
+          <span className="field-hint">
+            That error is measured on the same table pixels the fit used, so it cannot show a wrong camera placement. A
+            misplaced camera can still fit the table well while things above the table come out at the wrong place.
+          </span>
           <span className="field-hint">
             {cloud.n.toLocaleString()} points from {cloud.source.kind === "dataset"
               ? `${cloud.source.name}, episode ${cloud.source.episode}, frame ${cloud.source.frame}`

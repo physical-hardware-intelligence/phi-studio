@@ -114,10 +114,12 @@ class Download:
 
     WHY its own thread, not Studio's depth thread or asyncio's default executor: a 99 MB fetch
     must not hold up depth jobs, and the default executor is shared with the terminal.
-    WHY cancel works: hf_hub_download calls the progress bar's update() for every chunk it
-    writes (huggingface_hub file_download.py http_get); update() raises once cancel is pressed,
-    which ends the transfer. The partial file stays in the cache as .incomplete, and a later
-    download resumes from it."""
+    WHY cancel works over plain HTTP: hf_hub_download calls the progress bar's update() for every
+    chunk it writes (huggingface_hub file_download.py http_get); update() raises once cancel is
+    pressed, which ends the transfer, and a later download resumes from the .incomplete file.
+    NOT VERIFIED for a file served through Xet (hf_xet is installed): that path reports progress
+    from its own callback, and whether it passes the exception up is untested. Cancel is also
+    checked between files."""
 
     def __init__(self, on_change: Callable[[dict[str, Any]], None],
                  cache_dir: Path | None = None,
@@ -190,6 +192,11 @@ class Download:
 
             def close(self) -> None:
                 return None
+
+            def __getattr__(self, name: str) -> Any:
+                # WHY: huggingface_hub's Xet path (XetDownloadProgressReporter) also calls
+                # set_postfix_str and other tqdm methods; a missing one failed every download.
+                return lambda *a, **k: None
 
         try:
             if self.downloader is None:

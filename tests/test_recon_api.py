@@ -389,3 +389,27 @@ def test_real_frame_end_to_end_smoke() -> None:
         assert out["kind"] == "cloud" and out["n"] > 0
     finally:
         st.close()
+
+
+def test_download_survives_tqdm_extras(tmp_path: Path) -> None:
+    """huggingface_hub's Xet path calls set_postfix_str and friends, not only update()."""
+    calls: list[dict[str, Any]] = []
+    plain_fetch = fake_hub(tmp_path, calls)
+
+    def xet_like(repo: str, filename: str, **kw: Any) -> str:
+        bar = kw["tqdm_class"](total=10, initial=0, desc=filename)
+        bar.update(1)
+        bar.set_postfix_str("xet")
+        bar.refresh()
+        return plain_fetch(repo, filename, **kw)
+
+    seen: list[dict[str, Any]] = []
+    d = depth_model.Download(seen.append, cache_dir=tmp_path, downloader=xet_like)
+    assert d.start()
+    d.join(5)
+    assert d.state == "done", d.error
+
+
+def test_only_the_exact_wrist_key_rides_on_the_arm() -> None:
+    assert recon_api._is_wrist("wrist")
+    assert not recon_api._is_wrist("left_wrist") and not recon_api._is_wrist("front")
