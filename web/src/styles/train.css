@@ -76,5 +76,3 @@
   .train-seg { align-self: flex-start; }
 }
 
-/* base.css has no disabled look for .btn-danger, so a disabled Cancel stayed solid red. Same look as .btn-primary:disabled. */
-.train-detail .btn-danger:disabled { background: var(--bg-active); color: var(--text-disabled); border-color: transparent; }
