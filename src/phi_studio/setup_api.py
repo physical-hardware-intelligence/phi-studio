@@ -210,6 +210,21 @@ def picture(rgb: np.ndarray, width: int = PREVIEW_W) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
+def full_jpeg(rgb: np.ndarray) -> bytes:
+    """A frame at full size, the way the worker sends one (worker.encode_jpeg), for recon."""
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.fromarray(rgb).save(buf, format="JPEG", quality=80)
+    return buf.getvalue()
+
+
+def rig_name(key: str) -> str:
+    """observation.images.front -> front: how the worker keys a rig camera's frames
+    (cameras.cameras_from_spec), so Studio.latest_frame readers find align's under the same name."""
+    return key.removeprefix("observation.images.")
+
+
 def decode(jpeg: bytes) -> np.ndarray:
     import numpy as np
     from PIL import Image
@@ -480,6 +495,10 @@ class AlignSession:
         self.api.record({"root": self.ref["root"], "episode": self.ref["episode"],
                          "at": time.time(), "aligned": ok,
                          "cameras": {k: self.aligned[k] for k in keys}})  # fmt: skip
+        # rig name -> the frame message this session put in Studio.latest_frame, so closing takes
+        # back only its own (a worker frame that replaced one stays).
+        self.published: dict[str, dict[str, Any]] = {}
+        self.sent: dict[str, tuple[Any, int]] = {}  # rig name -> (camera, seq) last published
 
     def _fields(self, key: str, source: Any) -> dict[str, Any]:
         """Open a live camera the way the rig's config does for that dataset key, at its size."""
@@ -547,12 +566,13 @@ class AlignSession:
                     if cam is None:
                         continue
                     try:
-                        frame, _, seq = cam.read_latest()
+                        frame, t, seq = cam.read_latest()
                     except ConnectionError as e:
                         studio._fanout({"type": "align_tick", "live": src, "key": key,
                                         "error": str(e)})  # fmt: skip
                         self.aligned[key] = False
                         continue
+                    await self._publish(src, cam, frame, t, seq)
                     m = await asyncio.to_thread(align.measure, frame, self.ref["images"][key])
                     self.aligned[key] = bool(m.get("aligned"))  # needs a trusted match
                     pic = await asyncio.to_thread(picture, frame)
@@ -565,6 +585,36 @@ class AlignSession:
         except Exception as e:  # WHY: a crash must still free the cameras and say why
             await self._end(f"Camera align stopped on an error: {type(e).__name__}: {e}")
 
+    async def _publish(self, src: Any, cam: Any, frame: np.ndarray, t: float, seq: int) -> None:
+        """Offer a new frame to Studio.latest_frame, as a worker frame would be, so recon can
+        capture live while align holds the cameras. WHY "arrived" and not frame_clock: the
+        frame clock and Studio.cameras are the worker's, and the camera check reads them; align's
+        three frames a second there would read as a slow worker camera. WHY t: RealCamera stamps
+        each frame on time.monotonic when it arrives, in this process."""
+        key = self.assignment.get(src)
+        if key is None:
+            return
+        name = rig_name(key)
+        if self.sent.get(name) == (cam, seq):
+            return  # no new frame since the last tick
+        jpeg = await asyncio.to_thread(full_jpeg, frame)
+        # WHY again after the encode: a reassign may have closed or renamed this camera meanwhile.
+        if self.cams.get(src) is not cam or self.assignment.get(src) != key:
+            return
+        msg = {"type": "frame", "key": name, "t": t, "seq": seq, "arrived": t,
+               "w": int(frame.shape[1]), "h": int(frame.shape[0]), "from": "camera align",
+               "jpeg": jpeg}  # fmt: skip
+        self.sent[name] = (cam, seq)
+        self.published[name] = msg
+        self.api.studio.latest_frame[name] = msg
+
+    def _withdraw(self) -> None:
+        latest = self.api.studio.latest_frame
+        for name, msg in self.published.items():
+            if latest.get(name) is msg:
+                latest.pop(name, None)
+        self.published, self.sent = {}, {}
+
     async def _end(self, why: str) -> None:
         """Stop this session from inside its own loop. WHY the identity check: a newer session may
         have replaced this one; then only this one's cameras close."""
@@ -575,6 +625,7 @@ class AlignSession:
         await self.close()
 
     async def close(self) -> None:
+        self._withdraw()  # WHY first: no capture may get a frame from a camera being closed
         cams, self.cams = self.cams, {}
         for c in cams.values():
             await asyncio.to_thread(c.close)

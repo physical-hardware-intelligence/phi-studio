@@ -7,6 +7,8 @@ import {
   basePositions, DEFAULTS, DEGREES, followerSlots, frustumKeys, limitState, parseSettings, readArm, type ArmSlot, type ArmUnits,
   type SceneModel,
 } from "../src/lib/sceneCore.ts";
+import * as THREE from "three";
+import { drawnBuffers } from "../src/scene/gpu.ts";
 import { bodyPoses, forwardTool, mjQuat } from "../src/scene/kinematics.ts";
 import { Clock, Track } from "../src/scene/motion.ts";
 import { wristMount } from "../src/lib/sceneCore.ts";
@@ -246,4 +248,42 @@ test("the gripper never tints; wrist_roll past its model range is outside the mo
   assert.equal(limitState(model, "wrist_roll", model.joints.wrist_roll.range![1] - 0.01).state, "ok");
   assert.equal(limitState(model, "shoulder_pan", far).state, "past");
   assert.equal(limitState(model, "shoulder_pan", model.joints.shoulder_pan.range![1] - 0.01).state, "near");
+});
+
+// -- a lost GPU context -----------------------------------------------------------------------------------
+test("drawnBuffers finds every geometry and texture under a root, hidden ones too, each once", () => {
+  const tex = () => new THREE.DataTexture(new Uint8Array(4), 1, 1);
+  const map = tex(), alpha = tex(), uniform = tex(), side = tex();
+  const shared = new THREE.BoxGeometry();
+  const root = new THREE.Group();
+  const lit = new THREE.Mesh(shared, new THREE.MeshStandardMaterial({ map, alphaMap: alpha }));
+  const hidden = new THREE.Mesh(new THREE.PlaneGeometry(), [new THREE.MeshBasicMaterial({ map }), new THREE.MeshBasicMaterial({ map: side })]);
+  hidden.visible = false;
+  const shader = new THREE.ShaderMaterial({ uniforms: { t: { value: uniform }, k: { value: 2 }, none: { value: null } } });
+  const points = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial());
+  root.add(lit, new THREE.Mesh(shared, shader), new THREE.Group().add(hidden, points));
+  const found = drawnBuffers(root);
+  assert.deepEqual(new Set(found), new Set([shared, hidden.geometry, points.geometry, map, alpha, side, uniform]));
+});
+
+test("disposing what drawnBuffers finds runs the dispose listener three put on each upload", () => {
+  // three's geometry and texture modules listen for dispose on each object they upload. After a restore those
+  // listeners belong to the old modules, so every one must have run while the context was lost.
+  const root = new THREE.Group().add(
+    new THREE.Mesh(new THREE.PlaneGeometry(), new THREE.MeshBasicMaterial({ map: new THREE.DataTexture(new Uint8Array(4), 1, 1) })),
+    new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial()),
+  );
+  let open = 0;
+  root.traverse((o) => {
+    const m = o as THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+    for (const b of [m.geometry, m.material?.map]) {
+      if (!b) continue;
+      open++;
+      const done = () => { open--; b.removeEventListener("dispose", done); };
+      b.addEventListener("dispose", done);
+    }
+  });
+  assert.equal(open, 3);
+  for (const b of drawnBuffers(root)) b.dispose();
+  assert.equal(open, 0);
 });

@@ -129,6 +129,11 @@ npm --prefix web run typecheck && npm --prefix web test && npm --prefix web run 
 
 Studio listens on `127.0.0.1` only. Each launch makes a fresh token, and the WebSocket and the data routes check it
 along with the Host and Origin. One window holds control at a time, and `Esc` stops the arms from any page.
+- `web/tests/`: Node tests for the page logic that runs without a browser (`npm test`).
+- `tests/`: unit and end-to-end tests on the mock rig. Tests that need LeRobot, OpenCV or the Hub client skip
+  when those are not installed.
+- `web/scripts/check-context-restore.mjs`: a headless browser check that the 3D view survives a lost GPU context
+  without WebGL warnings. It needs Playwright, which Studio does not install; the file says how to run it.
 
 ## License
 
