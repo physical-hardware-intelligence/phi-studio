@@ -121,7 +121,7 @@ export function ReconPanel() {
           </label>
         )}
         {settings.source === "dataset" && pairs > 1 && (
-          <span className="field-hint">A dataset frame is drawn for one arm with its base at the middle of the view.</span>
+          <span className="field-hint">A dataset frame holds one arm. Its pose and points are drawn on the follower that carries the wrist camera in this view.</span>
         )}
 
         {cams.map((cam) => (
@@ -148,7 +148,7 @@ export function ReconPanel() {
         )}
         <p className="field-hint">
           Depth from Depth Anything V2 Small. It gives depth only up to an unknown scale and offset, so Studio sets both from
-          the table the arm stands on. The points are only as right as the camera's place and field of view in this view.
+          the table the arm stands on. The points are only as right as the camera's place and vertical field of view in this view.
         </p>
       </div>
     </section>
@@ -233,7 +233,7 @@ function LayerRow({ cam, cloud, refusal, busy, visible }: { cam: string; cloud?:
       )}
       {est && (
         <span className="field-hint">
-          Field of view {est.fovy_deg}° vertical, {est.fov}. Placement: {est.placement}. Lens: {est.lens}.
+          Vertical field of view {est.fovy_deg}°, {est.fov}. Placement: {est.placement}. Lens: {est.lens}.
         </span>
       )}
     </div>

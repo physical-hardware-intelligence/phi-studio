@@ -7,9 +7,11 @@ import { studio } from "./studio";
 export interface FitNumbers { s: number | null; t: number | null; inlier_fraction: number; median_mm: number | null; plane_pixels: number; depth_ratio: number | null }
 export interface Estimate { fovy_deg: number; fov: string; placement: string; lens: string }
 export interface Source { kind: "dataset" | "live"; name?: string; episode?: number; frame?: number; key: string }
+/** A dataset cloud's arm pose: which follower shows it, the frame's readings (as telemetry sends them), a label. */
+export interface ArmPose { arm: string; pos: Record<string, number>; label: string }
 export interface CloudInfo {
   kind: "cloud"; camera: string; id: string; url: string; n: number; n_off_arm: number; bytes: number;
-  arm_hidden_by: string | null; fit: FitNumbers; source: Source; estimate: Estimate; ms: Record<string, number>; device: string | null; at: number;
+  arm_hidden_by: string | null; fit: FitNumbers; source: Source; estimate: Estimate; pose: ArmPose | null; ms: Record<string, number>; device: string | null; at: number;
 }
 export interface Refusal { kind: "refused"; camera: string; message: string; fit?: FitNumbers | null; estimate?: Estimate; model_missing?: boolean; at: number }
 export interface Download { state: "idle" | "running" | "done" | "cancelled" | "failed"; done: number; total: number; error: string | null }

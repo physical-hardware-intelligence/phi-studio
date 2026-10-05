@@ -588,6 +588,7 @@ export class Engine {
   private disposed = false;
   private readonly disposers: (() => void)[] = []; // layers kept in their own modules (scene/pointcloud.ts)
   private readonly q = new Float64Array(6);
+  private posed: { arm: string; q: Float64Array; label: string } | null = null; // see setPosed
   private readonly tmp = new THREE.Vector3();
   readonly stats = { frames: 0, renders: 0, frameMs: [] as number[], renderMs: [] as number[], loadMs: 0, meshBytes: 0 };
 
@@ -996,6 +997,18 @@ export class Engine {
   /** Run `fn` when this engine is disposed, before the renderer goes, so a layer frees its GPU buffers with it. */
   onDispose(fn: () => void): void { this.disposers.push(fn); }
 
+  /** Draw one follower in a fixed recorded pose instead of its live readings, with `label` in its name pill (a
+   * dataset point cloud shows that frame's arm). `pos` is in reading units, as telemetry sends it. null: live again. */
+  setPosed(p: { arm: string; pos: Record<string, number>; label: string } | null): void {
+    const before = this.posed?.arm;
+    const q = new Float64Array(6);
+    this.posed = p && this.read(p.pos, q) ? { arm: p.arm, q, label: p.label } : null;
+    const back = this.slots.find((s) => s.slot.name === before && before !== this.posed?.arm);
+    if (back && !back.seen) back.arm.setPose(new Float64Array(6)); // no reading yet: zero again (a seen arm follows its track)
+    this.dirty = true;
+    this.shadowsDirty = true;
+  }
+
   setAutoRotate(on: boolean): void { this.settings = { ...this.settings, autoRotate: on }; this.lastInput = performance.now() - 10_000; }
 
   // -- pointer: click a frustum to select it ----------------------------------------------------------
@@ -1054,7 +1067,8 @@ export class Engine {
     const t = now - this.clock.delay;
     let moved = false;
     for (const s of this.slots) {
-      if (s.track.sample(t, this.q)) {
+      const fixed = this.posed?.arm === s.slot.name ? this.posed.q : null;
+      if (fixed ? (this.q.set(fixed), true) : s.track.sample(t, this.q)) {
         if (this.q.some((v, i) => v !== s.arm.q[i])) { s.arm.setPose(this.q); moved = true; }
       }
       if (s.ghost) {
@@ -1084,7 +1098,7 @@ export class Engine {
     this.scene.updateMatrixWorld();
     for (const s of this.slots) {
       if (!this.settings.trail) continue;
-      if (s.seen) s.trail.push(s.arm.tool.getWorldPosition(this.tmp), now);
+      if (s.seen && this.posed?.arm !== s.slot.name) s.trail.push(s.arm.tool.getWorldPosition(this.tmp), now);
       s.trail.update(now, this.camera.position);
     }
     if (this.shadowsDirty) {
@@ -1108,7 +1122,7 @@ export class Engine {
   private tint(s: Slot): void {
     const order = this.model.joint_order;
     for (let i = 0; i < order.length; i++) {
-      const st = s.seen ? limitState(this.model, order[i], s.arm.q[i]).state : "ok";
+      const st = s.seen || this.posed?.arm === s.slot.name ? limitState(this.model, order[i], s.arm.q[i]).state : "ok";
       if (st === s.arm.limits[i]) continue;
       s.arm.limits[i] = st;
       const m = s.arm.servo.get(order[i]);
@@ -1138,8 +1152,9 @@ export class Engine {
     };
     for (const s of this.slots) {
       const stale = s.seen && now - s.track.lastArrival > STALE_MS;
-      const what = !s.seen ? "no reading yet, drawn at zero" : !s.online ? "not answering" : stale ? "no reading" : "";
       const p = s.arm.root.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(-0.12, 0, 0)); // behind the base
+      if (this.posed?.arm === s.slot.name) { place(s.pill, p, `${label(s.slot.name)}: ${this.posed.label}`, "accent"); continue; }
+      const what = !s.seen ? "no reading yet, drawn at zero" : !s.online ? "not answering" : stale ? "no reading" : "";
       place(s.pill, p, what ? `${label(s.slot.name)}: ${what}` : label(s.slot.name), what ? "warn" : "neutral");
     }
     for (const c of this.cams.values()) {

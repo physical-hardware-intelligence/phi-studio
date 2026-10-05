@@ -76,8 +76,8 @@ MAX_POINTS = 80_000
 # (robot_model's mapping is not checked on an arm).
 ARM_MARGIN_M = 0.015
 RANSAC_ITERATIONS = 256
-CHECK_PLACEMENT = ("Check where the camera sits in the 3D view and its field of view. The wrist "
-                   "camera is placed by the arm's joint readings.")
+CHECK_PLACEMENT = ("Check where the camera sits in the 3D view and its vertical field of view. The "
+                   "wrist camera is placed by the arm's joint readings.")
 RANSAC_SCORE_SAMPLE = 4000  # pixels each hypothesis is scored on; the refit uses all of them
 MAGIC = b"PCL1"
 
@@ -106,7 +106,7 @@ class Pinhole:
         """Vertical field of view, as the 3D view stores it (three's PerspectiveCamera.fov).
         x_stretch: how much more the picture was scaled across than down (1 for square pixels)."""
         if not 1.0 <= fovy_deg <= 179.0:
-            raise ValueError(f"field of view {fovy_deg} degrees is not possible for a camera")
+            raise ValueError(f"vertical field of view {fovy_deg} degrees is not possible")
         f = (height / 2) / math.tan(math.radians(fovy_deg) / 2)
         return cls(width, height, f * x_stretch, f, width / 2, height / 2)
 

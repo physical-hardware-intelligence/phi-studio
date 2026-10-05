@@ -33,6 +33,7 @@ export class PointLayers {
   private readonly loading = new Map<string, { id: string; ctl: AbortController }>(); // camera -> the fetch in flight
   private readonly unsub: () => void;
   private last: ReconState | null = null;
+  private poseKey = "";
   private disposed = false;
 
   constructor(private readonly engine: Engine) {
@@ -60,6 +61,18 @@ export class PointLayers {
       void this.fetch(cam, info);
     }
     if (styleChanged) this.style();
+    this.pose(s);
+  }
+
+  /** While a dataset cloud is shown, draw its arm in that frame's pose (the same angles its arm boxes used); the
+   * newest one wins when several are shown. Back to live or zero when none is. */
+  private pose(s: ReconState): void {
+    const shown = Object.values(s.clouds).filter((c) => c.pose && s.settings.visible[c.camera] !== false);
+    const newest = shown.sort((a, b) => b.at - a.at)[0]?.pose ?? null;
+    const key = newest ? JSON.stringify(newest) : "";
+    if (key === this.poseKey) return;
+    this.poseKey = key;
+    this.engine.setPosed(newest);
   }
 
   private async fetch(cam: string, info: CloudInfo): Promise<void> {

@@ -161,7 +161,7 @@ def _pose(p: Any, name: str) -> dict[str, Any]:
         raise Refused(f"Place the {name} camera in the 3D view first.")
     fovy = p.get("fovy_deg")
     if not (isinstance(fovy, int | float) and 5 <= fovy <= 150):
-        raise Refused(f"The {name} camera's field of view must be 5 to 150 degrees.")
+        raise Refused(f"The {name} camera's vertical field of view must be 5 to 150 degrees.")
     return {"pos": _vec(p.get("pos"), "Position"), "target": _vec(p.get("target"), "Looks at"),
             "up": _vec(p.get("up"), "Up"), "fovy_deg": float(fovy),
             "placed": bool(p.get("placed"))}  # fmt: skip
@@ -314,9 +314,14 @@ class Recon:
         model = robot_model.load()
         timings: dict[str, int] = {}
         arms = _arms(r.get("arms"))
+        drawn_on: str | None = None  # the follower in the 3D view that shows a dataset frame's pose
         if frame.source["kind"] == "dataset":
-            # A dataset holds one arm; it is drawn with its base at the origin.
-            arms = [{"name": "dataset", "base": (0.0, 0.0, 0.0)}]
+            # A dataset holds one arm. WHY on the wrist arm's base: the page draws the frame's
+            # pose on that follower, so the arm boxes and the wrist camera must sit where it does.
+            want = r.get("wrist_arm")
+            host = next((a for a in arms if a["name"] == want), arms[0] if arms else None)
+            drawn_on = host["name"] if host else None
+            arms = [{"name": "dataset", "base": host["base"] if host else (0.0, 0.0, 0.0)}]
         elif not arms:
             arms = [{"name": n, "base": (0.0, 0.0, 0.0)} for n in list(frame.readings)[:1]]
         angles: dict[str, dict[str, float]] = {}
@@ -369,11 +374,17 @@ class Recon:
         timings["fit"] = round((time.perf_counter() - t) * 1000)
         blob = recon.pack(cloud)
         cid = secrets.token_urlsafe(12)
+        pose = None
+        if drawn_on is not None and "dataset" in angles:
+            # The raw readings, as telemetry sends them: the page converts both the same way.
+            pose = {"arm": drawn_on, "pos": frame.readings["dataset"],
+                    "label": f"pose from episode {frame.source['episode']}, "
+                             f"frame {frame.source['frame']}"}  # fmt: skip
         return {"kind": "cloud", "id": cid, "url": f"/api/recon/cloud/{cid}", "bytes": len(blob),
                 "n": len(cloud.positions), "n_off_arm": cloud.n_off_arm,
                 "arm_hidden_by": "boxes around each part of the drawn arm" if boxes else None,
                 "fit": cloud.fit.numbers(), "source": frame.source, "estimate": estimate,
-                "size": [w, h], "frame_size": [w0, h0], "ms": timings,
+                "pose": pose, "size": [w, h], "frame_size": [w0, h0], "ms": timings,
                 "device": getattr(self.model, "device", None), "at": time.time(),
                 "_blob": blob}  # fmt: skip
 

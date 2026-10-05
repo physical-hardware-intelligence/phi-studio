@@ -128,7 +128,7 @@ export default function Viewer({ compact = false }: { compact?: boolean }) {
       {wrist && (
         <div className="scene-banner">
           <button type="button" className="btn btn-sm" onClick={() => engine.current?.frame("home")}><ArrowLeft />Back to orbit</button>
-          <span>Wrist camera. Mount pose from the CAD; field of view estimated, not measured.</span>
+          <span>Wrist camera. Mount pose from the CAD; vertical field of view estimated, not measured.</span>
         </div>
       )}
 

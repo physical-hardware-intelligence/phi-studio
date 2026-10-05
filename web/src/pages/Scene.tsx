@@ -217,10 +217,10 @@ function CamerasPanel() {
                     </div>
                   ))}
                   <div className="scene-xyz">
-                    <span className="field-label">Field of view</span>
+                    <span className="field-label">Vertical field of view</span>
                     <Num label={`${label(k)} vertical field of view in degrees`} value={p.fovy_deg}
                       onCommit={(v) => scene.setCamera(k, { ...p, fovy_deg: Math.min(150, Math.max(5, v)) })} />
-                    <span className="field-hint">degrees, vertical</span>
+                    <span className="field-hint">degrees, top edge to bottom edge of the picture. Not the horizontal or diagonal number a spec sheet often gives.</span>
                   </div>
                   {mine && (
                     <button type="button" className="btn btn-sm" onClick={() => scene.setCamera(k, null)}><RotateCcw />Back to the starting guess</button>
@@ -235,7 +235,7 @@ function CamerasPanel() {
             <span className="strong">{label(wristKey)}</span>
             <span className="badge tone-neutral">On the gripper</span>
           </div>
-          <p className="field-hint">{model.wrist_camera.mount} Field of view {model.wrist_camera.fovy_deg}°: {model.wrist_camera.fov.toLowerCase()}</p>
+          <p className="field-hint">{model.wrist_camera.mount} Vertical field of view {model.wrist_camera.fovy_deg}°: {model.wrist_camera.fov.toLowerCase()}</p>
         </div>
       </div>
     </section>
