@@ -40,6 +40,7 @@ from aiohttp import WSMsgType, web
 
 from phi_studio.assistant import ClaudeCLI, Conversation
 from phi_studio.checks import Inputs, run_checks
+from phi_studio.errors import Refusal
 from phi_studio.evals import EvalError, EvalStore
 from phi_studio.files import FileError, Files, default_roots, list_ports
 from phi_studio.terminal import Terminal
@@ -170,6 +171,7 @@ class Studio:
         self.handlers: dict[str, tuple[Handler, bool]] = {}  # cmd -> (handler, needs control)
         self.routes: list[web.RouteDef] = []
         self.config_lock = asyncio.Lock()  # one robot-config.yaml write at a time
+        self.on_close: list[Callable[[], Awaitable[Any]]] = []  # run when Studio shuts down
         register_features(self)
 
     # -- worker ---------------------------------------------------------------------------------
@@ -235,10 +237,12 @@ class Studio:
         self.log.append({"t": round(time.time(), 1), "kind": kind, "text": text[:500],
                          "fix": (fix or None) and fix[:500]})  # fmt: skip
 
-    def _tell(self, client: Client, message: str, fix: str = "") -> None:
-        """An error for one window, logged so the assistant sees it too."""
+    def _tell(self, client: Client, message: str, fix: str = "", cmd: str | None = None) -> None:
+        """An error for one window, logged so the assistant sees it too. `cmd`: the request it
+        answers, so the page can clear what waits for that reply."""
         self._note("error", message, fix)
-        client.push({"type": "error", "message": message, "fix": fix})
+        client.push({"type": "error", "message": message, "fix": fix,
+                     **({"cmd": cmd} if cmd else {})})  # fmt: skip
 
     def _fanout(self, msg: dict[str, Any]) -> None:
         for c in list(self.clients):
@@ -279,6 +283,11 @@ class Studio:
             self.start_worker()
 
     async def _on_shutdown(self, app: web.Application) -> None:
+        for fn in self.on_close:  # features release cameras and stop their tasks first
+            try:
+                await fn()
+            except Exception:
+                log.exception("a feature failed to close")
         for c in list(self.clients):
             await c.ws.close()
         for ws in list(self.term_socks):
@@ -492,7 +501,7 @@ class Studio:
             fn, needs_control = self.handlers[cmd]
             if needs_control and client is not self.controller:
                 self._tell(client, "Another window has control.",
-                           "Take control to change the rig from here.")  # fmt: skip
+                           "Take control to change the rig from here.", cmd)  # fmt: skip
                 return
             asyncio.get_running_loop().create_task(self._feature(client, cmd, fn, msg))
             return
@@ -527,6 +536,8 @@ class Studio:
     async def _feature(self, client: Client, cmd: str, fn: Handler, msg: dict[str, Any]) -> None:
         try:
             await fn(client, msg)
+        except Refusal as e:  # the person can act on it: shown as written, no traceback
+            self._tell(client, str(e), e.fix, cmd)
         except Exception as e:  # WHY all: a dropped error leaves the window waiting forever
             log.exception("%s failed", cmd)
             fix = "Try again. If it repeats, ask Claude or restart Studio."
