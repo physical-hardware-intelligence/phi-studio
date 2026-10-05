@@ -1,6 +1,5 @@
 """What an episode's numbers say: motion, tracking, grasps, idle time, smoothness, and the problems
-they
-reveal. Pure numpy, so every rule is unit-tested and the same on every Mac.
+they reveal. Pure numpy, so every rule is unit-tested and the same on every Mac.
 
 Every threshold below was set from our own recordings, not guessed (measured 2026-10-04 on
 phi_so101_cubes_cylinder_lang_v1, 30 fps single arm, and lehome top_long_merged, 20 fps bimanual):
@@ -8,8 +7,7 @@ phi_so101_cubes_cylinder_lang_v1, 30 fps single arm, and lehome top_long_merged,
   * state speed p99 is 70-90 deg/s on one arm, up to 170 deg/s on the bimanual folding data
   * action - state reaches 10 deg (single) to 24 deg (bimanual) at p99, and almost all of it is lag:
     the follower trails the leader by ~100 ms, so error ~ speed x lag. Raw error therefore cannot
-    tell a
-    stuck follower from a fast move; the tracking rule compares state with the action one lag
+    tell a stuck follower from a fast move; the tracking rule compares state with the action one lag
     earlier.
 
 Units are LeRobot's: degrees for the five arm joints, 0..100 for the gripper (low = closed).
@@ -84,8 +82,7 @@ def runs(mask: np.ndarray, min_len: int = 1) -> list[tuple[int, int]]:
 
 def estimate_lag(lead: np.ndarray, follow: np.ndarray, max_lag: int) -> tuple[float, float]:
     """How many frames `follow` trails `lead` (both velocity signals), with parabolic sub-frame
-    refinement,
-    and the normalised correlation at that lag. (nan, 0) when either barely moves."""
+    refinement, and the normalised correlation at that lag. (nan, 0) when either barely moves."""
     a = lead - lead.mean()
     b = follow - follow.mean()
     if np.sqrt((a * a).mean()) < 1.0 or np.sqrt((b * b).mean()) < 1.0:  # < 1 deg/s RMS: no signal
@@ -110,8 +107,7 @@ def sparc(
     speed: np.ndarray, fps: float, fc: float = 10.0, amp_th: float = 0.05, pad: int = 4
 ) -> float:
     """Spectral arc length of a speed profile (Balasubramanian et al. 2015). Closer to 0 is
-    smoother;
-    typical reaching movements score -1.5 to -3. nan for a profile with no movement."""
+    smoother; typical reaching movements score -1.5 to -3. nan for a profile with no movement."""
     s = np.asarray(speed, dtype=np.float64)
     if s.max() < 1e-6 or len(s) < 4:
         return float("nan")
@@ -131,8 +127,7 @@ def sparc(
 
 def gripper_events(g: np.ndarray, fps: float) -> tuple[list[dict[str, Any]], list[tuple[int, int]]]:
     """Grasp and release events from one gripper's state (0..100, low = closed), with hysteresis at
-    30%
-    and 70% of this episode's own travel. Returns (events, closed index ranges)."""
+    30% and 70% of this episode's own travel. Returns (events, closed index ranges)."""
     lo5, hi95 = np.percentile(g, [5, 95])
     if hi95 - lo5 < GRIP_SPAN_MIN:
         return [], []
@@ -172,8 +167,7 @@ def analyse_episode(
     series: bool = True,
 ) -> dict[str, Any]:
     """Metrics, events and flags for one episode. With series=True, also the per-frame derived
-    signals
-    the inspector plots (velocity, lag-compensated tracking error, tool position)."""
+    signals the inspector plots (velocity, lag-compensated tracking error, tool position)."""
     state = frames.get("state")
     action = frames.get("action")
     if state is None:
@@ -528,11 +522,9 @@ def analyse_dataset(ds: Any, progress: Any = None) -> dict[str, Any]:
             dtype=np.float64,
         )
 
-    # (metric, label, unit, sides, smallest difference from the median worth a flag). WHY
-    # one-sided for
-    # idle and tracking: less of either is better, never a problem. WHY a floor: a tight
-    # metric has a tiny
-    # MAD, and 0.4 degrees more tracking error is not worth anyone's attention.
+    # (metric, label, unit, sides, smallest difference from the median worth a flag). WHY one-sided
+    # for idle and tracking: less of either is better, never a problem. WHY a floor: a tight metric
+    # has a tiny MAD, and 0.4 degrees more tracking error is not worth anyone's attention.
     for key, label, unit, sides, floor in (
         ("duration_s", "length", "s", 2, 3.0),
         ("path_m", "tool path", "m", 2, 0.3),
@@ -609,9 +601,8 @@ def analyse_dataset(ds: Any, progress: Any = None) -> dict[str, Any]:
             "max": np.round(tool.max(0), 4).tolist(),
         }
 
-    # The pose each arm typically starts from (median of every episode's first frame), to draw
-    # the arm
-    # among its own workspace.
+    # The pose each arm typically starts from (median of every episode's first frame), to draw the
+    # arm among its own workspace.
     rest: dict[str, list[float]] = {}
     first = allf["frame_index"] == 0
     for a in arms:

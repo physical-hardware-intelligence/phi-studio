@@ -1,6 +1,6 @@
 """Write small LeRobot datasets to disk for tests: v3.0 (what LeRobot 0.6.0 writes) and v2.1, with
-the same
-columns and file layout, so the reader is tested against the format and not against itself."""
+the same columns and file layout, so the reader is tested against the format and not against
+itself."""
 
 from __future__ import annotations
 
@@ -23,8 +23,7 @@ def episode_signals(
     n: int, fps: float, seed: int, dims: int, idle_s: float = 1.0
 ) -> tuple[np.ndarray, np.ndarray]:
     """A plausible teleop episode: still at rest for idle_s, then a smooth reach and one grasp. The
-    follower
-    (state) trails the leader (action) by 3 frames, as a real follower lags."""
+    follower (state) trails the leader (action) by 3 frames, as a real follower lags."""
     rng = np.random.default_rng(seed)
     t = np.arange(n) / fps
     base = np.tile(REST, dims // 6)

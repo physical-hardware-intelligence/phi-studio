@@ -98,10 +98,9 @@ def test_idle_start_is_flagged() -> None:
     act, st = episode_signals(300, FPS, seed=0, dims=6, idle_s=3.0)
     a = A.analyse_episode(frames(act, st), FPS, SINGLE)
     kinds = {f["kind"]: f for f in a["flags"]}
-    # Motion starts at 3.0 s with a cosine ease-in, so the fastest joint passes IDLE_SPEED (3
-    # deg/s) at
-    # 3.0 + 6.5 * asin(3 / 14.5) / pi = 3.43 s: that, not 3.0, is when the arm is first seen
-    # to move.
+    # Motion starts at 3.0 s with a cosine ease-in, so the fastest joint passes IDLE_SPEED (3 deg/s)
+    # at 3.0 + 6.5 * asin(3 / 14.5) / pi = 3.43 s: that, not 3.0, is when the arm is first seen to
+    # move.
     assert "idle_start" in kinds and kinds["idle_start"]["value"] == pytest.approx(3.43, abs=0.12)
 
 

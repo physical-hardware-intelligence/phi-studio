@@ -1,15 +1,12 @@
 """Datasets, episodes, analysis, video and notes for the web app.
 
 Bulk data goes over HTTP (an episode's arrays, a video file with Range requests, the 3D model),
-because a
-<video> element and fetch() stream it far better than the control WebSocket. Notes go over the
-WebSocket,
-so every window hears a change at once.
+because a <video> element and fetch() stream it far better than the control WebSocket. Notes go over
+the WebSocket, so every window hears a change at once.
 
 Every HTTP route here checks the same three things as the WebSocket (server.py:311-319): an allowed
 Host (DNS rebinding), an allowed Origin when the browser sends one, and the per-launch token. A
-<video>
-cannot send headers, so the token may come as ?token=. Nothing here can move an arm.
+<video> cannot send headers, so the token may come as ?token=. Nothing here can move an arm.
 """
 
 from __future__ import annotations
@@ -246,9 +243,8 @@ class DataAPI:
         path = ds.video_path(key, int(request.match_info["chunk"]), int(request.match_info["file"]))
         if not path.is_file():
             raise KeyError(f"video file missing: {path.name}")
-        # WHY FileResponse: it answers Range requests, which a <video> needs to seek
-        # inside a file that
-        # holds many episodes.
+        # WHY FileResponse: it answers Range requests, which a <video> needs to seek inside a file
+        # that holds many episodes.
         return web.FileResponse(
             path, headers={"Cache-Control": "private, max-age=3600", "Content-Type": "video/mp4"}
         )
@@ -317,8 +313,7 @@ class DataAPI:
 
 def _finite(o: Any) -> Any:
     """NaN and infinity become null: JSON has no spelling for them, and a metric that cannot be
-    computed
-    (the smoothness of an arm that never moves) is unknown, not a number."""
+    computed (the smoothness of an arm that never moves) is unknown, not a number."""
     if isinstance(o, float):
         return o if math.isfinite(o) else None
     if isinstance(o, dict):
@@ -357,9 +352,8 @@ def register(studio: Studio) -> None:
         web.get("/api/data/{id}/video/{key}/{chunk:\\d+}/{file:\\d+}.mp4", g(api.video)),
         web.get("/api/model/so101/{name}", g(api.model)),
     ]
-    # WHY control=False for writes: a note changes no rig state and no job, and two people
-    # reviewing the
-    # same dataset from two windows should both be able to write. Every write is broadcast to
+    # WHY control=False for writes: a note changes no rig state and no job, and two people reviewing
+    # the same dataset from two windows should both be able to write. Every write is broadcast to
     # all windows.
     studio.handle("notes_list", api.notes_list, control=False)
     studio.handle("note_save", api.note_save, control=False)

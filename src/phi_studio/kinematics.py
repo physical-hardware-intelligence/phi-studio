@@ -1,18 +1,15 @@
 """SO-101 forward kinematics from Studio's model asset (assets/so101/model.json).
 
 The same kinematic tree the 3D view draws, so a plotted tool path and the arm on screen agree.
-Vectorised
-over frames: one call turns an episode's joint array into tool positions.
+Vectorised over frames: one call turns an episode's joint array into tool positions.
 
 Units follow LeRobot (so_follower.py:51-62): five arm joints in degrees, gripper 0..100. "new_calib"
 model: a joint's zero is the middle of its range, as LeRobot >= 0.5 calibrates, so degrees map to
-model
-radians directly (scripts/build_so101_model.py). The gripper's 0..100 spans the model's -10..100
-degrees.
+model radians directly (scripts/build_so101_model.py). The gripper's 0..100 spans the model's
+-10..100 degrees.
 
 Accuracy: checked against MuJoCo's own kinematics on the same MJCF (tests/test_kinematics.py), to
-well
-under a micrometre. How closely a real arm matches depends on its calibration; that is what
+well under a micrometre. How closely a real arm matches depends on its calibration; that is what
 auto-calibration is for.
 """
 

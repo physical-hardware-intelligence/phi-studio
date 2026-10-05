@@ -1,6 +1,5 @@
 """The data API end to end on a real Studio: auth on every route, datasets, analysis cache, episode
-payload,
-video Range requests, the 3D model, and notes over the WebSocket."""
+payload, video Range requests, the 3D model, and notes over the WebSocket."""
 
 from __future__ import annotations
 

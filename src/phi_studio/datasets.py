@@ -2,14 +2,10 @@
 
 Formats (LeRobot 0.6.0 writes v3.0; older Hub datasets are v2.1):
   v3.0  meta/info.json, meta/episodes/chunk-*/file-*.parquet (one row per episode: length, tasks,
-  the data
-        file that holds it, and per camera the video file and its from/to timestamps),
-        data/chunk-*/file-*.parquet
-        (many episodes per file), videos/<key>/chunk-*/file-*.mp4 (many episodes per file). Frame i
-        of an
-        episode is at file time from_timestamp + frame_index / fps (lerobot
-        datasets/dataset_writer.py:208,
-        dataset_reader.py:277-281).
+        the data file that holds it, and per camera the video file and its from/to timestamps),
+        data/chunk-*/file-*.parquet (many episodes per file), videos/<key>/chunk-*/file-*.mp4 (many
+        episodes per file). Frame i of an episode is at file time from_timestamp + frame_index / fps
+        (lerobot datasets/dataset_writer.py:208, dataset_reader.py:277-281).
   v2.1  meta/episodes.jsonl, meta/tasks.jsonl, one data parquet and one video per episode,
   from_timestamp 0.
 
@@ -372,8 +368,7 @@ class Dataset:
 
     def all_frames(self) -> dict[str, np.ndarray]:
         """Every frame of the dataset (episode_index, frame_index, action, state), for dataset-wide
-        stats.
-        v3 reads each data file once."""
+        stats. v3 reads each data file once."""
         import pyarrow.parquet as pq
 
         paths: list[Path] = []

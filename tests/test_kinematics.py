@@ -1,6 +1,5 @@
 """Forward kinematics against MuJoCo's own: reference points computed with mujoco 3.12 on the same
-MJCF
-(so101_new_calib.xml), site gripperframe, 2026-10-04. A 2000-pose sweep matched to <1e-12 m."""
+MJCF (so101_new_calib.xml), site gripperframe, 2026-10-04. A 2000-pose sweep matched to <1e-12 m."""
 
 from __future__ import annotations
 

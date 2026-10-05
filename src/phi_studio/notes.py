@@ -2,21 +2,17 @@
 folder.
 
 A note pins to a dataset, optionally an episode, optionally a time range in it, optionally an arm
-and
-joint. Kinds:
+and joint. Kinds:
   note    an observation
   issue   a problem someone should fix (open until resolved)
   bad     this episode should not be trained on
   good    a reference episode worth keeping
 Automatic flags from analysis.py are not stored; dismissing one is (table `dismissed`), so a flag a
-person
-judged harmless stays hidden on every Mac that shares the file.
+person judged harmless stays hidden on every Mac that shares the file.
 
 WHY SQLite: notes are written by several windows and read with filters (one episode, all open
-issues);
-one file, atomic writes, no server. WHY not in the dataset: datasets are LeRobot's format, often a
-Hub
-download, and notes must survive a re-download.
+issues); one file, atomic writes, no server. WHY not in the dataset: datasets are LeRobot's format,
+often a Hub download, and notes must survive a re-download.
 """
 
 from __future__ import annotations
