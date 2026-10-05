@@ -21,6 +21,7 @@ import {
 } from "../lib/scene";
 import { label } from "../lib/labels";
 import { type ArmPose, type Posed, posePlan } from "../lib/reconCore";
+import { drawnBuffers } from "./gpu";
 import { hinge, mjQuat } from "./kinematics";
 import { Clock, Track } from "./motion";
 
@@ -1071,7 +1072,13 @@ export class Engine {
 
   /** The browser may take the GPU context away (driver reset, too many contexts, GPU switch). three restores its own
    * state when the context comes back (WebGLRenderer.js onContextRestore) and uploads geometry and textures again,
-   * but what was rendered on the GPU is gone: the light probe, the contact shadow and the shadow map are made again. */
+   * but what was rendered on the GPU is gone: the light probe, the contact shadow and the shadow map are made again.
+   * WHY everything is freed on loss: the restore builds new geometry and texture modules (initGLContext), but each
+   * object drawn before the loss keeps a dispose listener into the old module, which holds a handle from the dead
+   * context. Disposing it later (leaving the page, dropping an arm) deleted that handle against the new context, and
+   * the browser warned "object does not belong to this context", 126 times on leaving #/scene. Freed while the
+   * context is lost, the deletes do nothing and the listeners go; the CPU copies stay, and three uploads them again
+   * on the first frame after the restore. */
   private bindContext(): void {
     const el = this.renderer.domElement;
     const onLost = (e: Event) => {
@@ -1081,6 +1088,9 @@ export class Engine {
       this.envTarget.dispose();
       this.pmrem.dispose();
       this.contact.release();
+      for (const b of drawnBuffers(this.scene)) b.dispose();
+      this.key.shadow.map?.dispose(); // three keeps the target and sets it up again on the next shadow pass
+      this.sharedLut()?.dispose(); // not in the scene graph: three adds it to lit materials' uniforms itself
       this.contextListeners.forEach((fn) => fn(true));
       this.opts.onContextLost(true);
     };
