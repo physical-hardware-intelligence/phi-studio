@@ -34,7 +34,7 @@ export function Timeline({ player, duration, idle, closed, arms, events, flags, 
 
   useEffect(() => player.on((p) => {
     if (head.current) head.current.style.left = pct(p.frame() / p.fps);
-  }), [player, duration]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [player, duration]);
 
   useEffect(() => {
     const el = track.current;

@@ -1,4 +1,4 @@
-import { Bot, Box, ClipboardCheck, Cpu, Database, Gamepad2, House, Moon, PackageSearch, Settings, Sun } from "lucide-react";
+import { Bot, Box, ClipboardCheck, Cpu, Database, Gamepad2, House, Moon, PackageSearch, ScanSearch, Settings, Sun } from "lucide-react";
 import type { ComponentType } from "react";
 import { useNotes } from "../lib/data";
 import { go, setTheme, useRoute, useStudio, useTheme, type Route } from "../lib/studio";
@@ -12,6 +12,7 @@ const RIG: Item[] = [
   { route: "overview", label: "Home", icon: House },
   { route: "teleop", label: "Teleop", icon: Gamepad2 },
   { route: "scene", label: "3D view", icon: Box },
+  { route: "align", label: "Align", icon: ScanSearch },
 ];
 const DATA: Item[] = [
   { route: "data", label: "Datasets", icon: Database },
@@ -26,7 +27,7 @@ const FOOT: Item = { route: "settings", label: "Settings", icon: Settings };
 
 // WHY every route: the Claude panel names the current page, including the ones reached from Settings.
 export const PAGE_LABELS: Record<Route, string> = {
-  overview: "Home", teleop: "Teleop", scene: "3D view", data: "Datasets", issues: "Issues", train: "Train",
+  overview: "Home", teleop: "Teleop", scene: "3D view", align: "Align", data: "Datasets", issues: "Issues", train: "Train",
   models: "Models", policy: "Run", evaluate: "Evaluate", settings: "Settings", onboard: "Rig setup",
   setup: "Advanced setup", calibrate: "Calibrate", checks: "Checks", files: "Files", guide: "Guide",
 };
@@ -95,7 +96,9 @@ function useHints(): Partial<Record<Route, Hint>> {
   const needCal = useStudio((s) => s.identity.some((a) => !a.ok));
   const fails = useStudio((s) => s.checks.results?.filter((r) => r.status === "fail").length ?? 0);
   const open = useNotes(null, null)?.filter((n) => n.kind === "issue" && n.status === "open").length ?? 0;
+  const off = useStudio((s) => s.align !== null && !s.align.aligned);
   const out: Partial<Record<Route, Hint>> = {};
+  if (off) out.align = { text: "Off", tone: "warn" };
   if (open) out.data = { text: `${open} open`, tone: "warn" };
   if (fails) out.settings = { text: `${fails} failed`, tone: "danger", dot: true };
   if (state?.state === "FAULT") out.overview = { text: "Fault", tone: "danger", dot: true };

@@ -139,3 +139,38 @@
   border-radius: 50%; color: var(--text-tertiary); background: color-mix(in srgb, var(--bg-panel) 70%, transparent); cursor: help; }
 .scene-info svg { width: 15px; height: 15px; }
 .scene-info:hover, .scene-info:focus-visible { color: var(--text-primary); }
+
+/* 3D view modes: top left, over the stage (the toolbar keeps the top right). Full screen puts Stop before them. */
+.scene-stage { container-type: inline-size; }
+.scene-left { position: absolute; top: var(--space-2); left: var(--space-2); z-index: 2; display: flex; align-items: center; gap: var(--space-2); }
+.scene-left .scene-seg {
+  background: color-mix(in srgb, var(--bg-panel) 78%, transparent); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+}
+.scene-tools a.btn { text-decoration: none; }
+/* Narrow stage: the toolbar drops to a second row under the mode switch instead of running into it. */
+@container (max-width: 600px) {
+  .scene-tools { top: calc(var(--space-2) + 2.375rem); }
+  .scene-banner { top: 5.5rem; }
+}
+@container (max-width: 420px) { .scene-left .scene-seg > button { padding: 0 6px; } }
+
+/* Pre-flight (Run, Evaluate): one row of three checks above the work, each with what to do next. */
+.preflight { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.pf-item {
+  display: inline-flex; align-items: center; gap: var(--space-2); min-height: 2.25rem; padding: 4px 10px;
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--bg-panel); font-size: var(--text-sm);
+}
+.pf-mark { display: inline-flex; }
+.pf-mark svg { width: 15px; height: 15px; }
+.pf-item.tone-ok .pf-mark { color: var(--ok-text); }
+.pf-item.tone-warn { border-color: color-mix(in srgb, var(--warn-solid) 45%, var(--border-subtle)); }
+.pf-item.tone-warn .pf-mark { color: var(--warn-text); }
+.pf-item.tone-neutral .pf-mark { color: var(--text-tertiary); }
+.pf-name { font-weight: 600; }
+.pf-state { color: var(--text-secondary); }
+
+/* Align page: the last verdict on one line. */
+.align-last { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
+.align-last svg { width: 16px; height: 16px; }
+.align-last.tone-ok svg { color: var(--ok-text); }
+.align-last.tone-warn svg { color: var(--warn-text); }

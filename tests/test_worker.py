@@ -417,3 +417,15 @@ def test_replugging_after_a_swap_lets_the_arms_confirm() -> None:
     w.handle({"cmd": "identify"})
     w.handle({"cmd": "confirm"})
     assert w.session.state.name == "READY"
+
+
+def test_a_bimanual_mock_has_a_wrist_camera_per_arm() -> None:
+    """LeRobot names a bimanual rig's wrist cameras left_wrist and right_wrist; the 3D view mounts
+    each on its side's follower, so the simulated rig must have both, not one shared "wrist"."""
+    from phi_studio.worker import build_rig
+
+    one = [c.key for c in build_rig({"kind": "mock", "pairs": 1}).cameras]
+    two = [c.key for c in build_rig({"kind": "mock", "pairs": 2}).cameras]
+    assert one == ["front", "wrist", "top"]
+    assert two == ["front", "top", "left_wrist", "right_wrist"]
+    assert build_rig({"kind": "mock", "pairs": 2, "cameras": []}).cameras == []  # none asked: none

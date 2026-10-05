@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { ActionBar } from "../components/ActionBar";
 import { MockPanel } from "../components/MockPanel";
 import { Notices } from "../components/Notices";
+import { Preflight, usePreflight } from "../components/Preflight";
 import { JOINTS, useStudio, type PolicyInfo } from "../lib/studio";
 import { label } from "../lib/labels";
 import { ViewSwitch } from "../scene/ViewSwitch";
@@ -32,11 +33,14 @@ export function usePolicyChoice(policies: PolicyInfo[]) {
 export function Policy() {
   const policies = useStudio((s) => s.rig?.policies ?? []);
   const choice = usePolicyChoice(policies);
+  const pre = usePreflight(choice.chosen);
+  const blocked = choice.problem ?? pre.block;
   return (
     <div className="page policy">
-      <ActionBar activity="policy" startLabel="Run policy" canStart={choice.problem === null}
-        startBlocked={choice.problem ?? undefined}
+      <ActionBar activity="policy" startLabel="Run policy" canStart={blocked === null}
+        startBlocked={blocked ?? undefined}
         startMsg={{ policy: choice.policy, task: choice.task, limit_s: choice.limit }} />
+      <Preflight items={pre.items} />
       <Notices />
       <div className="work-grid">
         <div className="col">

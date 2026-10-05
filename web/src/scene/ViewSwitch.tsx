@@ -45,7 +45,7 @@ export function ViewSwitch({ page }: { page: string }) {
             {/* WHY a boundary here: without it a crash in the 3D view, or its chunk gone after a rebuild, takes the
                 whole page down, and with it the torque, start and disconnect controls. Cameras stay too. */}
             <Boundary what="The 3D view">
-              <Suspense fallback={<SceneFallback />}><Viewer compact /></Suspense>
+              <Suspense fallback={<SceneFallback />}><Viewer compact mode={page === "policy" ? "policy" : "pose"} /></Suspense>
             </Boundary>
           </div>
         )}

@@ -267,14 +267,22 @@ class MockRig:
         a._cal, b._cal = b._own_cal, a._own_cal
 
 
+# A bimanual rig has a wrist camera per arm: LeRobot 0.6.0 names them left_wrist and right_wrist
+# (bi_so_follower.py _cameras_ft), and the 3D view mounts each on the follower of its side.
+CAMERAS = {1: ("front", "wrist", "top"), 2: ("front", "top", "left_wrist", "right_wrist")}
+
+
 def mock_rig(
     pairs: int = 1,
-    cameras: tuple[str, ...] = ("front", "wrist", "top"),
+    cameras: tuple[str, ...] | None = None,
     clock: object = time.monotonic,
 ) -> MockRig:
     """1 pair (so101_follower + so101_leader) or 2 (bi_so_follower + bi_so_leader). The arms come
     from a LeRobot-shaped config through rigspec, so their ids and calibration paths follow the same
-    rules a real rig's do: mock_follower_left.json under robots/so_follower/, and so on."""
+    rules a real rig's do: mock_follower_left.json under robots/so_follower/, and so on. Cameras:
+    CAMERAS for the number of pairs unless given."""
+    if cameras is None:
+        cameras = CAMERAS[2 if pairs > 1 else 1]
     spec = rigspec.parse(MOCK_CONFIG[2 if pairs > 1 else 1])
     order = {(s, r): 10 * k + i for k, s in enumerate((None, "left", "right"))
              for i, r in enumerate(("leader", "follower"))}  # fmt: skip

@@ -38,6 +38,9 @@ IDLE_STOP = ("Stopped: no window showed camera align for two minutes, so the cam
 PREVIEW_W = 480  # live and reference pictures sent to the page are this wide
 MEMORY = "ports.json"  # each arm's USB serial number, so a moved port can be found again
 BACKUPS = "config-backups"
+# The last camera align, kept so Run and Evaluate can say whether the cameras sit where the
+# training data was recorded (components/Preflight.tsx), across reloads and restarts.
+ALIGN_RESULT = "align-result.json"
 
 
 class SetupError(Refusal):
@@ -54,8 +57,8 @@ def config_file(studio: Studio) -> Path:
         r = studio.files.roots.get(key)
         if r is not None and (r.path / "robot-config.yaml").is_file():
             return r.path / "robot-config.yaml"
-    raise SetupError("There is no robot-config.yaml. Start Studio with --rig-dir set to the "
-                     "folder that has it.")  # fmt: skip
+    raise SetupError("There is no robot-config.yaml yet. Set up the rig on Home first, or start "
+                     "Studio with --rig-dir set to the folder that has one.")  # fmt: skip
 
 
 def load_spec(path: Path) -> rigspec.RigSpec:
@@ -234,6 +237,27 @@ class SetupApi:
         # WHY one lock for every step that opens or frees the cameras: two overlapping starts
         # used to leave a session nothing could stop, holding its camera.
         self.cam_lock = asyncio.Lock()
+        try:  # the last result, replayed to every new window (server.py REPLAYED)
+            last = json.loads((data_dir(studio) / ALIGN_RESULT).read_text())
+            if isinstance(last, dict) and last.get("type") == "align_result":
+                studio.last["align_result"] = last
+        except (OSError, ValueError):
+            pass
+
+    def record(self, result: dict[str, Any]) -> None:
+        """Keep and announce what the last camera align found: every camera in line or not, per
+        camera, against which dataset and when. Written whole, so a crash leaves the old one."""
+        msg = {"type": "align_result", **result}
+        self.studio.last["align_result"] = msg
+        self.studio._fanout(msg)
+        try:
+            d = data_dir(self.studio)
+            d.mkdir(parents=True, exist_ok=True)
+            tmp = d / (ALIGN_RESULT + ".tmp")
+            tmp.write_text(json.dumps(msg))
+            os.replace(tmp, d / ALIGN_RESULT)
+        except OSError:
+            pass  # windows still have it; the next result tries the disk again
 
     @property
     def memory_file(self) -> Path:
@@ -440,6 +464,22 @@ class AlignSession:
         self.task: asyncio.Task[None] | None = None
         self.seen = time.monotonic()  # the last time a window said it shows this session
         self.refs_sent = {k: picture(img) for k, img in ref["images"].items()}
+        self.aligned: dict[str, bool] = {}  # dataset key -> the newest reading said in line
+        self.reported: bool | None = None  # what record() last said for this session
+
+    def _report(self) -> None:
+        """Record the session's verdict when it changes: all cameras in line, or not. A camera
+        with no reading yet holds the verdict back, so a slow camera never reads as aligned."""
+        keys = sorted(set(self.assignment.values()))
+        if not keys or any(k not in self.aligned for k in keys):
+            return
+        ok = all(self.aligned[k] for k in keys)
+        if ok == self.reported:
+            return
+        self.reported = ok
+        self.api.record({"root": self.ref["root"], "episode": self.ref["episode"],
+                         "at": time.time(), "aligned": ok,
+                         "cameras": {k: self.aligned[k] for k in keys}})  # fmt: skip
 
     def _fields(self, key: str, source: Any) -> dict[str, Any]:
         """Open a live camera the way the rig's config does for that dataset key, at its size."""
@@ -468,6 +508,7 @@ class AlignSession:
         new = {live[str(s)]: k for s, k in assignment.items() if str(s) in live}
         await self.close()
         self.assignment = new
+        self.aligned, self.reported = {}, None  # new pairs: judge them afresh
         self.seen = time.monotonic()
         await asyncio.to_thread(self.open)
 
@@ -510,11 +551,14 @@ class AlignSession:
                     except ConnectionError as e:
                         studio._fanout({"type": "align_tick", "live": src, "key": key,
                                         "error": str(e)})  # fmt: skip
+                        self.aligned[key] = False
                         continue
                     m = await asyncio.to_thread(align.measure, frame, self.ref["images"][key])
+                    self.aligned[key] = bool(m.get("aligned"))  # needs a trusted match
                     pic = await asyncio.to_thread(picture, frame)
                     studio._fanout({"type": "align_tick", "live": src, "key": key, **m,
                                     "picture": pic})  # fmt: skip
+                self._report()
                 await asyncio.sleep(ALIGN_PERIOD_S)
         except asyncio.CancelledError:
             pass

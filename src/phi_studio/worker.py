@@ -678,8 +678,9 @@ def build_rig(spec: dict[str, Any]) -> Any:
     if spec.get("kind", "mock") == "mock":
         from phi_studio.mock import mock_rig
 
-        cams = tuple(spec.get("cameras", ("front", "wrist", "top")))
-        return mock_rig(pairs=int(spec.get("pairs", 1)), cameras=cams)
+        cams = spec.get("cameras")  # None: the mock's own set for that many pairs
+        pairs = int(spec.get("pairs", 1))
+        return mock_rig(pairs=pairs, cameras=None if cams is None else tuple(cams))
     if spec.get("kind") == "lerobot":
         # Real arms over LeRobot's Feetech bus, from robot-config.yaml (hardware.py). Connecting
         # reads and configures; it never turns torque on.

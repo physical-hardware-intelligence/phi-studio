@@ -46,7 +46,7 @@ export function CameraStrip({ dataset, videos, player, fps }: Props) {
     const off = player.on(sync);
     sync();
     return () => { off(); player.clock = null; els.current.forEach((v) => v?.pause()); };
-  }, [player, fps, dataset, JSON.stringify(videos)]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [player, fps, dataset, JSON.stringify(videos)]); // WHY the JSON: a new array each render, same files
 
   if (!keys.length) return null;
   return (

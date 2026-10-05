@@ -64,7 +64,8 @@ READ_ONLY = {"assist_status", "assist_context", "assist_ask", "assist_stop", "as
              "files_index", "file_read", "files_search", "ports", "checks_run"}  # fmt: skip
 CODE_ROOT = Path(__file__).resolve().parents[2]  # src/phi_studio/server.py -> the repo
 LOG_SIZE = 200
-REPLAYED = ("rig", "state", "identity", "worker_exit")  # newest of each, sent to a new window
+# newest of each, sent to a new window
+REPLAYED = ("rig", "state", "identity", "worker_exit", "align_result")
 
 
 def frame_packet(msg: dict[str, Any]) -> bytes:

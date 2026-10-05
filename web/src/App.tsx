@@ -5,6 +5,7 @@ import { Sidebar } from "./components/Sidebar";
 import { TerminalDock } from "./components/TerminalDock";
 import { TopBar } from "./components/TopBar";
 import { getTheme, setTheme, studio, useRoute, useStudio, type Route } from "./lib/studio";
+import { Align } from "./pages/Align";
 import { Calibrate } from "./pages/Calibrate";
 import { Checks } from "./pages/Checks";
 import { Evaluate } from "./pages/Evaluate";
@@ -30,6 +31,7 @@ const PAGES: Record<Route, { title: string; sub: string; el: ComponentType }> = 
   overview: { title: "Home", sub: "Your rig and your latest data", el: Home },
   teleop: { title: "Teleop", sub: "Drive the followers with the leaders", el: Teleop },
   scene: { title: "3D view", sub: "The arms, live", el: Scene },
+  align: { title: "Align", sub: "Each camera back where the training data was recorded", el: Align },
   data: { title: "Datasets", sub: "Every recording on this Mac", el: Data },
   issues: { title: "Issues", sub: "Notes and excluded episodes", el: Issues },
   train: { title: "Train", sub: "On this Mac or the cluster", el: Train },

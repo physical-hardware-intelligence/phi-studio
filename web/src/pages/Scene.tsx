@@ -1,8 +1,10 @@
-// The 3D view page: the followers at full size, a joint readout, and the view's settings.
+// The 3D view page: the followers at full size and, under them, what the view's mode is about: the joints for Pose
+// and Policy, the live cameras for Cameras. The rest sits in one settings sheet.
 import * as Dialog from "@radix-ui/react-dialog";
 import { RotateCcw, X } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Boundary } from "../components/Boundary";
+import { Cameras } from "../components/Cameras";
 import { JointStrip } from "../components/JointStrip";
 import { label } from "../lib/labels";
 import {
@@ -16,10 +18,10 @@ import { ReconPanel } from "./ReconPanel";
 const Viewer = lazy(() => import("../scene/Viewer"));
 const deg = (rad: number) => (rad * 180) / Math.PI;
 
-// Less is more: the arms, the view buttons, one line of joints. Everything else sits in one settings sheet.
 export function Scene() {
   useEffect(() => { scene.loadModel(); }, []);
   const [open, setOpen] = useState(false);
+  const mode = useScene((s) => s.settings.mode);
   return (
     <div className="page scene-page is-simple">
       <section className="panel scene-panel">
@@ -29,7 +31,7 @@ export function Scene() {
           </Boundary>
         </div>
       </section>
-      <JointStrip />
+      {mode === "cameras" ? <Cameras /> : <JointStrip />}
       <Dialog.Root open={open} onOpenChange={setOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="sheet-overlay" />

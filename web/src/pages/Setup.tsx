@@ -589,14 +589,15 @@ function CamerasStep({ lr }: { lr: LeRobotView }) {
 }
 
 // -- 7 align -----------------------------------------------------------------------------------------
-function AlignStep({ lr }: { lr: LeRobotView }) {
+/** Also the Align page's body (pages/Align.tsx), without the intro and starting on `initialRoot`. */
+export function AlignStep({ lr, intro = true, initialRoot = "" }: { lr: LeRobotView; intro?: boolean; initialRoot?: string }) {
   const link = useStudio((s) => s.link);
   const control = useStudio((s) => s.control);
   const datasets = useSetup((s) => s.datasets);
   const session = useSetup((s) => s.align);
   const status = useSetup((s) => s.alignStatus);
   const stopped = useSetup((s) => s.alignStopped);
-  const [root, setRoot] = useState("");
+  const [root, setRoot] = useState(initialRoot);
   const [episode, setEpisode] = useState("0");
   useEffect(() => { if (link === "open") setup.loadDatasets(); }, [link]);
   const ds = datasets?.find((d) => d.root === root) ?? datasets?.[0];
@@ -605,11 +606,13 @@ function AlignStep({ lr }: { lr: LeRobotView }) {
 
   return (
     <>
-      <p className="muted">
-        A policy learns from pictures taken from fixed camera positions. If a camera moved since the dataset was
-        recorded, the policy sees a scene it never trained on. Studio compares each live camera with a still frame of
-        the dataset and says which way to move it, about three times a second, until it lines up.
-      </p>
+      {intro && (
+        <p className="muted">
+          A policy learns from pictures taken from fixed camera positions. If a camera moved since the dataset was
+          recorded, the policy sees a scene it never trained on. Studio compares each live camera with a still frame of
+          the dataset and says which way to move it, about three times a second, until it lines up.
+        </p>
+      )}
       {!session ? (
         <div className="su-card">
           {datasets === null ? <p className="faint">Looking for datasets on this Mac</p>

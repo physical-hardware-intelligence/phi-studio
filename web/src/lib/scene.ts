@@ -3,7 +3,7 @@
 // The pure logic lives in sceneCore.ts (tested under Node); this file adds the store and the React hook.
 import { useRef, useSyncExternalStore } from "react";
 import { studio } from "./studio";
-import { type ArmUnits, type CamPose, parseSettings, type SceneModel, type Settings, type ViewMode } from "./sceneCore";
+import { type ArmUnits, type CamPose, MODE_LAYERS, parseSettings, type SceneMode, type SceneModel, type Settings, type ViewMode } from "./sceneCore";
 
 export * from "./sceneCore";
 
@@ -89,6 +89,8 @@ class SceneStore {
   }
 
   setView(page: string, mode: ViewMode): void { this.update({ view: { ...this.snap.settings.view, [page]: mode } }); }
+  /** Switch what the 3D view is for; the layers follow the mode (the settings sheet can still change each one). */
+  setMode(mode: SceneMode): void { this.update({ mode, ...MODE_LAYERS[mode] }); }
   edit(key: string | null): void { this.set({ editing: key }); }
 }
 
