@@ -272,3 +272,62 @@ def test_a_failed_download_frees_the_slot(api, monkeypatch):
     last = [m for m in api.studio.fanned if m["type"] == "hub_progress"][-1]
     assert last["state"] == "error" and "disk full" in last["message"]
     assert api.cancel is None
+
+
+# -- review fixes --------------------------------------------------------------------------------
+
+
+def test_a_failed_login_check_is_not_cached(api, monkeypatch):
+    calls = []
+    monkeypatch.setattr(hub, "whoami", lambda: calls.append(1) or {
+        "user": None, "orgs": [], "error": "Cannot reach the Hub."})  # fmt: skip
+    c = Client()
+    run(api.whoami(c, {}))
+    run(api.whoami(c, {}))
+    assert len(calls) == 2 and c.pushed[-1]["error"] == "Cannot reach the Hub."
+
+
+def test_a_download_crash_message_is_scrubbed(api, monkeypatch):
+    def boom(*a: Any) -> Any:
+        raise OSError("401 for hf_abcdefghijklmnopqrstuvwxyz0123 at /x")
+
+    monkeypatch.setattr(hub, "download", boom)
+    run(api.download(Client(), {"repo_id": "me/act"}))
+    last = [m for m in api.studio.fanned if m["type"] == "hub_progress"][-1]
+    assert "hf_abcdefgh" not in last["message"] and "<token>" in last["message"]
+
+
+def test_rollout_refuses_a_malformed_request_in_plain_words(api):
+    from phi_studio.errors import Refusal
+
+    _snapshot(api.cache_dir, "me/smol", {"type": "smolvla", **{
+        k: _info(("camera1",))[k] for k in ("input_features", "output_features")}})
+    base = {"repo_id": "me/smol", "revision": SHA, "task": "t", "duration_s": 20,
+            "strategy": "base", "seq": 1}  # fmt: skip
+    bad: list[dict[str, Any]] = [
+        {"rename_map": {IMG + "front": [IMG + "camera1"]}}, {"rename_map": ["x"]},
+        {"episodes": float("inf")}, {"duration_s": float("nan")}, {"episodes": 10**9},
+    ]  # fmt: skip
+    for b in bad:
+        with pytest.raises(Refusal):
+            run(api.rollout(Client(), {**base, **b}))
+
+
+def test_hub_calls_run_on_their_own_threads(api, monkeypatch):
+    # WHY: a stalled Hub call that wait_for abandons keeps its thread; on asyncio's shared
+    # default executor enough of them would starve the rest of Studio.
+    names: list[str] = []
+
+    def search(*a: Any) -> list[Any]:
+        names.append(threading.current_thread().name)
+        return []
+
+    def whoami() -> dict[str, Any]:
+        names.append(threading.current_thread().name)
+        return {"user": "u", "orgs": [], "error": None}
+
+    monkeypatch.setattr(hub, "search_models", search)
+    monkeypatch.setattr(hub, "whoami", whoami)
+    run(api.search(Client(), {"query": "act"}))
+    run(api.whoami(Client(), {}))
+    assert len(names) == 2 and all(n.startswith("phi-hub") for n in names)

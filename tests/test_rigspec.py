@@ -545,3 +545,50 @@ def test_every_rollout_command_parses_with_lerobots_own_cli(
         assert cfg.dataset.episode_time_s == 45 and cfg.dataset.num_episodes == 3
     if strategy == "dagger":
         assert cfg.strategy.num_episodes == 3  # taken from --dataset.num_episodes
+
+
+# -- review fixes: uploads stay private and off unless asked, and plain refusals ----------------
+
+NO_UPLOAD = getattr(rigspec, "ROLLOUT_NO_UPLOAD", None)
+
+
+def test_rollout_recording_is_private_and_auto_upload_is_off_unless_asked():
+    # sentry and dagger push every upload_every_n_episodes whatever push_to_hub says
+    # (strategies/sentry.py:153-154, dagger.py:450-451), so Studio pushes that out of reach.
+    for strategy in ("sentry", "highlight", "episodic", "dagger"):
+        args = _rollout(strategy=strategy, dataset_repo_id="me/rollout_cube")
+        assert "--dataset.private=true" in args, strategy
+        assert "--dataset.push_to_hub=false" in args, strategy
+        every = [a for a in args if a.startswith("--strategy.upload_every_n_episodes=")]
+        assert (every == [f"--strategy.upload_every_n_episodes={NO_UPLOAD}"]) == (
+            strategy in ("sentry", "dagger")), strategy  # fmt: skip
+        up = _rollout(strategy=strategy, dataset_repo_id="me/rollout_cube", upload=True)
+        assert "--dataset.private=true" in up and "--dataset.push_to_hub=false" not in up
+        assert not [a for a in up if a.startswith("--strategy.upload_every_n_episodes")]
+    assert not [a for a in _rollout() if a.startswith(("--dataset", "--strategy.upload"))]
+
+
+@needs_lerobot
+@pytest.mark.parametrize("strategy", ["sentry", "highlight", "episodic", "dagger"])
+@pytest.mark.parametrize("upload", [False, True])
+def test_privacy_flags_parse_with_lerobots_own_cli(strategy, upload, act_dir, monkeypatch):
+    spec = rigspec.parse(SINGLE)
+    cmd = rigspec.rollout_command(spec, act_dir(6), "Pick up the cube", 45, strategy,
+                                  "me/rollout_cube", None, 3, upload)  # fmt: skip
+    cfg = _parse_rollout(cmd, monkeypatch)
+    assert cfg.dataset.private is True and cfg.dataset.push_to_hub is upload
+    if strategy in ("sentry", "dagger"):
+        assert cfg.strategy.upload_every_n_episodes == (5 if upload else NO_UPLOAD)
+
+
+def test_rollout_refusals_are_refusals_and_say_what_they_check():
+    from phi_studio.errors import Refusal
+
+    with pytest.raises(Refusal, match="1 second to 24 hours"):
+        _rollout(duration_s=0.5)  # the message says 1 second, so 0.5 is refused too
+    assert "--duration=1" in _rollout(duration_s=1)
+    # sentry and highlight record no fixed number of episodes, so the count is not checked
+    for strategy in ("sentry", "highlight"):
+        _rollout(strategy=strategy, dataset_repo_id="me/rollout_x", episodes=0)
+    with pytest.raises(Refusal, match="at least 1 episode"):
+        _rollout(strategy="dagger", dataset_repo_id="me/rollout_x", episodes=0)

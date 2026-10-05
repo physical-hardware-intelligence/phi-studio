@@ -11,24 +11,38 @@ The token: hub.py never returns it, and nothing here reads it.
 from __future__ import annotations
 
 import asyncio
+import functools
+import math
 import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import yaml
 
 from phi_studio import hub, rigspec
+from phi_studio.errors import Refusal
 from phi_studio.rigspec import RigSpec
 
+T = TypeVar("T")
+
 # [JUDGEMENT] The Hub limits whoami calls, and who is logged in changes only when the person runs
-# `hf auth login`; the page has a Refresh for that.
+# `hf auth login`; the page has a Refresh for that. A failed check is not cached.
 WHOAMI_TTL_S = 300.0
-# WHY a deadline here: list_models takes no timeout and huggingface_hub's client has none
-# (utils/_http.py:304-312, utils/_pagination.py:27-36), so a stalled link would hang the reply.
+# WHY a deadline here: list_models takes no timeout, and paginate passes timeout=None on every
+# request (utils/_pagination.py:27-36), which overrides any client default
+# (utils/_http.py:304-312), so a stalled link would hang the reply.
 CALL_TIMEOUT_S = 30.0
 INSPECT_TIMEOUT_S = 60.0  # model_info plus config.json, each with hub.TIMEOUT_S
 PROGRESS_EVERY_S = 0.2  # about 5 progress messages a second
+# WHY own threads: wait_for gives up on a stalled call but cannot stop its thread. On asyncio's
+# shared default executor enough of them would starve every other to_thread in Studio; here they
+# can only fill this pool, and later Hub calls time out with a plain message.
+POOL_PREFIX = "phi-hub"
+POOL_THREADS = 4
+MAX_COUNT = 1_000_000  # larger episode counts are a malformed request, not a plan
 
 
 class HubApi:
@@ -41,6 +55,12 @@ class HubApi:
         self.who_lock: asyncio.Lock | None = None
         self.job: dict[str, Any] | None = None  # the newest download, running or finished
         self.cancel: threading.Event | None = None  # set while a download runs
+        self.pool = ThreadPoolExecutor(POOL_THREADS, thread_name_prefix=POOL_PREFIX)
+        # downloads get their own thread, so stalled calls never queue one behind them
+        self.fetcher = ThreadPoolExecutor(1, thread_name_prefix=POOL_PREFIX + "-download")
+
+    async def _on(self, pool: ThreadPoolExecutor, fn: Callable[..., T], *args: Any) -> T:
+        return await asyncio.get_running_loop().run_in_executor(pool, functools.partial(fn, *args))
 
     def register(self) -> None:
         s = self.studio
@@ -115,9 +135,10 @@ class HubApi:
             self.who_lock = asyncio.Lock()
         async with self.who_lock:  # WHY: two windows opening the page make one Hub call, not two
             stale = time.monotonic() - self.who_at > WHOAMI_TTL_S
-            if self.who is None or stale or msg.get("refresh") is True:
+            failed = self.who is not None and bool(self.who.get("error"))
+            if self.who is None or stale or failed or msg.get("refresh") is True:
                 try:
-                    who = await asyncio.wait_for(asyncio.to_thread(hub.whoami), CALL_TIMEOUT_S)
+                    who = await asyncio.wait_for(self._on(self.pool, hub.whoami), CALL_TIMEOUT_S)
                 except TimeoutError:
                     late = (f"The Hugging Face Hub did not answer within {CALL_TIMEOUT_S:.0f} s. "
                             "Check this Mac's connection.")  # fmt: skip
@@ -133,7 +154,7 @@ class HubApi:
         reply: dict[str, Any] = {"type": "hub_search", "query": query, "results": [], "error": None}
         try:
             reply["results"] = await asyncio.wait_for(
-                asyncio.to_thread(hub.search_models, query, 30, sort), CALL_TIMEOUT_S
+                self._on(self.pool, hub.search_models, query, 30, sort), CALL_TIMEOUT_S
             )
         except hub.HubError as e:
             reply["error"] = str(e)
@@ -148,7 +169,7 @@ class HubApi:
         rev = r if isinstance(r, str) and r else None
         try:
             info = await asyncio.wait_for(
-                asyncio.to_thread(hub.inspect_model, asked, rev), INSPECT_TIMEOUT_S
+                self._on(self.pool, hub.inspect_model, asked, rev), INSPECT_TIMEOUT_S
             )
         except hub.HubError as e:
             client.push({"type": "hub_model", "asked": asked, "error": str(e)})
@@ -192,12 +213,12 @@ class HubApi:
     async def rollout(self, client: Any, msg: dict[str, Any]) -> None:
         """The lerobot-rollout command for a model already on this Mac, with the fit after the
         camera mapping. It only builds text; the page types it into the terminal."""
+        ask = _rollout_ask(msg)  # one cleaned copy feeds both the fit and the command
         reply: dict[str, Any] = {"type": "hub_rollout", "seq": msg.get("seq"), "cmd": None,
                                  "error": None, "problems": [], "warnings": []}  # fmt: skip
         spec, _ = await asyncio.to_thread(self.rig)
-        rid, rev = msg.get("repo_id"), msg.get("revision")
-        path = (await asyncio.to_thread(self._local_paths)).get((str(rid), str(rev)))
-        rename = msg.get("rename_map") if isinstance(msg.get("rename_map"), dict) else {}
+        rid, rev = ask["repo_id"], ask["revision"]
+        path = (await asyncio.to_thread(self._local_paths)).get((rid, rev))
         if spec is None:
             reply["error"] = "Studio cannot read robot-config.yaml, so it cannot build the command."
         elif path is None:
@@ -205,13 +226,12 @@ class HubApi:
         else:
             try:
                 info = await asyncio.to_thread(hub.inspect_local, path)
-                reply |= self.fit(info, spec, rename)
+                reply |= self.fit(info, spec, ask["rename_map"])
                 reply["cmd"] = rigspec.rollout_command(
-                    spec, path, str(msg.get("task") or ""), _number(msg.get("duration_s"), 60),
-                    str(msg.get("strategy") or "base"), msg.get("dataset_repo_id") or None, rename,
-                    int(_number(msg.get("episodes"), 10)), msg.get("upload") is True,
+                    spec, path, ask["task"], ask["duration_s"], ask["strategy"],
+                    ask["dataset_repo_id"], ask["rename_map"], ask["episodes"], ask["upload"],
                 )  # fmt: skip
-            except (ValueError, hub.HubError) as e:
+            except (ValueError, hub.HubError) as e:  # Refusal is a ValueError
                 reply["error"] = str(e)
         client.push(reply)
 
@@ -247,13 +267,16 @@ class HubApi:
             loop.call_soon_threadsafe(lambda: self._publish(done=done, total=total))
 
         try:
-            snap = await asyncio.to_thread(hub.download, rid, rev, self.cache_dir, progress, cancel)
+            snap = await self._on(self.fetcher, hub.download, rid, rev, self.cache_dir, progress,
+                                  cancel)  # fmt: skip
         except hub.Cancelled:
             self._publish(state="cancelled", message=f"Download of {rid} cancelled.")
         except hub.HubError as e:
             self._publish(state="error", message=str(e))
         except Exception as e:  # WHY all: a stuck "running" bar would block every later download
-            self._publish(state="error", message=f"The download failed: {type(e).__name__}: {e}")
+            # WHY scrub: an HTTP error's text can carry the request's Authorization header
+            self._publish(state="error",
+                          message=hub._scrub(f"The download failed: {type(e).__name__}: {e}"))
         else:
             self._publish(state="done", path=str(snap), message=f"{rid} is on this Mac.")
         finally:
@@ -272,8 +295,45 @@ class HubApi:
         self._publish(state="cancelling")
 
 
-def _number(v: Any, default: float) -> float:
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
+_GARBLED = "Studio could not read the Run panel's request"
+_RELOAD = "Reload the page and fill in the Run panel again."
+
+
+def _number(msg: dict[str, Any], key: str, default: float) -> float:
+    """A finite number from the page, or a Refusal. WHY: JSON from the page can carry Infinity
+    and NaN (json.loads takes them), and int(inf) raises OverflowError."""
+    v = msg.get(key, default)
+    if v is None:
+        return default
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        raise Refusal(f"{_GARBLED}: {key} is not a number.", _RELOAD)
+    return float(v)
+
+
+def _text(msg: dict[str, Any], key: str) -> str | None:
+    v = msg.get(key)
+    if v is not None and not isinstance(v, str):
+        raise Refusal(f"{_GARBLED}: {key} is not text.", _RELOAD)
+    return v
+
+
+def _rollout_ask(msg: dict[str, Any]) -> dict[str, Any]:
+    """The Run panel's request, checked once, so the fit and the command see the same values."""
+    ren = msg.get("rename_map") or {}
+    if not isinstance(ren, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in ren.items()
+    ):
+        raise Refusal(f"{_GARBLED}: the camera mapping is not one rig camera per model camera.",
+                      _RELOAD)  # fmt: skip
+    episodes = _number(msg, "episodes", 10)
+    if not episodes.is_integer() or abs(episodes) > MAX_COUNT:
+        raise Refusal(f"{_GARBLED}: episodes must be a whole number up to {MAX_COUNT:,}.",
+                      _RELOAD)  # fmt: skip
+    return {"repo_id": _text(msg, "repo_id") or "", "revision": _text(msg, "revision") or "",
+            "task": _text(msg, "task") or "", "duration_s": _number(msg, "duration_s", 60),
+            "strategy": _text(msg, "strategy") or "base",
+            "dataset_repo_id": _text(msg, "dataset_repo_id") or None, "rename_map": dict(ren),
+            "episodes": int(episodes), "upload": msg.get("upload") is True}  # fmt: skip
 
 
 def register(studio: Any) -> None:

@@ -763,3 +763,18 @@ def test_a_policy_that_resizes_frames_turns_a_size_mismatch_into_a_note(ptype, e
     size = [x for x in out if "trained on 256x256 frames" in x]
     assert len(size) == 1 and size[0].startswith(hub.WARNING) is resizes
     assert (f"`{ptype}` scales and pads" in size[0]) is resizes
+
+
+def test_a_model_camera_whose_rig_namesake_was_mapped_away_gets_no_frames():
+    # rig {front, top}; model {front, wrist}; the person feeds wrist from the rig's front and
+    # leaves the model's front on No camera. LeRobot skips its own camera check whenever a
+    # rename_map is set (rollout/context.py:308-310), so the fit check must catch it.
+    two = rigspec.parse(THREE.replace(
+        "  wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}\n", ""))
+    model = _model({"front": (3, 480, 640), "wrist": (3, 480, 640)})
+    out = hub.compatibility(hub.as_seen_by_rig(model, {_k("front")[0]: _k("wrist")[0]}), two)
+    assert _problems(out) == ["The model's `front` camera gets no frames, because the rig's "
+                              "`front` camera now feeds `wrist`. Pick a camera for `front` when "
+                              "you run the model."]  # fmt: skip
+    # with no mapping the same model and rig are only missing `wrist`
+    assert "`wrist`" in _problems(hub.compatibility(model, two))[0]

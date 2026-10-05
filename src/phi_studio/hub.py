@@ -469,6 +469,12 @@ def compatibility(info: dict[str, Any], spec: RigSpec) -> list[str]:
                else "Map one of your cameras to each when you run the model, or rename cameras "
                "in robot-config.yaml.")  # fmt: skip
         out.append(f"This model expects {what}; {has}. {fix}")
+    unfed: dict[str, str] = info.get("unfed") or {}  # from as_seen_by_rig()
+    for key, now in unfed.items():
+        name, target = (f"`{k.removeprefix(IMAGES)}`" for k in (key, now))
+        out.append(f"The model's {name} camera gets no frames, because the rig's {name} camera "
+                   f"now feeds {target}. Pick a camera for {name} when you run the "
+                   "model.")  # fmt: skip
     fed_by: dict[str, str] = info.get("fed_by") or {}  # rig key -> model key, as_seen_by_rig()
     for key, shape in model_cams.items():
         name = f"`{key.removeprefix(IMAGES)}`"
@@ -564,7 +570,19 @@ def as_seen_by_rig(info: dict[str, Any], rename_map: dict[str, str]) -> dict[str
     checks the camera that will really feed it."""
     back = {model: rig for rig, model in rename_map.items()}
     inputs = info.get("input_features") or {}
-    return {**info, "input_features": {back.get(k, k): f for k, f in inputs.items()},
+    seen: dict[str, Any] = {}
+    unfed: dict[str, str] = {}  # model key -> the model key its rig namesake now feeds
+    for k, f in inputs.items():
+        if k in back:  # a rig camera renamed to k feeds it
+            seen[back[k]] = f
+        elif k in rename_map:
+            # WHY: the rig camera named k is renamed to another input, so nothing feeds k. Kept
+            # under k it would look fed; LeRobot skips its own camera check whenever a rename_map
+            # is set (rollout/context.py:308-310).
+            unfed[k] = rename_map[k]
+        else:
+            seen[k] = f
+    return {**info, "input_features": seen, "unfed": unfed,
             "fed_by": {rig: model for model, rig in back.items() if model in inputs}}  # fmt: skip
 
 
