@@ -379,8 +379,9 @@ def check_config_ports(inp: Inputs) -> dict[str, Any]:
             title,
             "fail",
             f"Not plugged in: {what}.{extra}",
-            "Plug in the arm's USB and power. If it is plugged in, macOS renamed the port: run "
-            f"lerobot-find-port and update robot-config.yaml line {first.line}.",
+            "Plug in the arm's USB and power. If it is plugged in, macOS renamed the port: find "
+            "it on the Set up page (Find ports), which saves it to robot-config.yaml "
+            f"(line {first.line}).",
             {**ref, "line": first.line},
         )
     detail = ", ".join(f"{a.id} on {a.port}" for a in arms)
