@@ -6,6 +6,7 @@ import { label } from "../lib/labels";
 import { scene, useScene } from "../lib/scene";
 import { useStudio, useTheme } from "../lib/studio";
 import { Engine, type Preset, type Theme } from "./engine";
+import { PointLayers } from "./pointcloud";
 
 let live = 0; // engines alive now; the leak check reads it through globalThis.__phiScene
 
@@ -70,11 +71,12 @@ export default function Viewer({ compact = false }: { compact?: boolean }) {
       return;
     }
     engine.current = e;
+    const points = new PointLayers(e); // disposed with the engine (Engine.onDispose)
     live++;
     e.setTheme(readTheme(host.current));
     e.setEditing(scene.snap.editing);
-    const g = globalThis as { __phiScene?: { engine: Engine; live: () => number }; __phiSceneLast?: unknown };
-    g.__phiScene = { engine: e, live: () => live };
+    const g = globalThis as { __phiScene?: { engine: Engine; points: PointLayers; live: () => number }; __phiSceneLast?: unknown };
+    g.__phiScene = { engine: e, points, live: () => live };
     return () => {
       const left = e.dispose();
       live--;

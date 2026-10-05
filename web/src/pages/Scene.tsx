@@ -8,6 +8,7 @@ import {
 } from "../lib/scene";
 import { useStudio } from "../lib/studio";
 import { SceneFallback } from "../scene/ViewSwitch";
+import { ReconPanel } from "./ReconPanel";
 
 const Viewer = lazy(() => import("../scene/Viewer"));
 const deg = (rad: number) => (rad * 180) / Math.PI;
@@ -29,6 +30,7 @@ export function Scene() {
           <LayoutPanel />
           <ShowPanel />
           <CamerasPanel />
+          <ReconPanel />
           <ModelPanel />
         </div>
       </div>

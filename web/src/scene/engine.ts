@@ -586,6 +586,7 @@ export class Engine {
   private userMoved = false;
   private camKeysSeen = "";
   private disposed = false;
+  private readonly disposers: (() => void)[] = []; // layers kept in their own modules (scene/pointcloud.ts)
   private readonly q = new Float64Array(6);
   private readonly tmp = new THREE.Vector3();
   readonly stats = { frames: 0, renders: 0, frameMs: [] as number[], renderMs: [] as number[], loadMs: 0, meshBytes: 0 };
@@ -989,6 +990,12 @@ export class Engine {
     this.dirty = true;
   }
 
+  /** For a layer kept in its own module: draw the next frame (the view renders only on change). */
+  requestRender(): void { this.dirty = true; }
+
+  /** Run `fn` when this engine is disposed, before the renderer goes, so a layer frees its GPU buffers with it. */
+  onDispose(fn: () => void): void { this.disposers.push(fn); }
+
   setAutoRotate(on: boolean): void { this.settings = { ...this.settings, autoRotate: on }; this.lastInput = performance.now() - 10_000; }
 
   // -- pointer: click a frustum to select it ----------------------------------------------------------
@@ -1162,6 +1169,7 @@ export class Engine {
   dispose(): { geometries: number; textures: number } {
     this.disposed = true;
     cancelAnimationFrame(this.raf);
+    this.disposers.splice(0).forEach((fn) => fn());
     this.unsub.forEach((u) => u());
     this.resize.disconnect();
     this.gizmo.detach();

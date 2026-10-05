@@ -107,3 +107,16 @@
 .scene-joints tr.is-past td:nth-child(3), .scene-joints tr.is-past td:first-child { color: var(--danger-text); }
 .scene-joints tr.is-past .scene-range > i { background: var(--danger-solid); }
 
+
+/* workspace points (pages/ReconPanel.tsx) */
+.recon-model { display: grid; gap: var(--space-2); padding: var(--space-3); border-radius: var(--radius-lg); background: var(--bg-sunken); border: 1px solid var(--border-subtle); }
+.recon-model > p { margin: 0; font-size: var(--text-sm); color: var(--text-secondary); }
+.recon-bar { width: 100%; }
+.recon-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.recon-row .field-hint { flex: 1; }
+.recon-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
+.recon-grid .input { height: var(--control-h-sm); padding: 0 8px; font-size: var(--text-sm); }
+.recon-layer .scene-cam-head .scene-check { flex: none; }
+.recon-fit { font-size: var(--text-sm); color: var(--text-primary); }
+.recon-warn { margin: 0; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--warn-subtle); color: var(--warn-text); font-size: var(--text-sm); }
+.recon-layer .badge svg { width: 12px; height: 12px; margin-right: 4px; }
