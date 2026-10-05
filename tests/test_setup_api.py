@@ -501,7 +501,11 @@ def test_align_offers_its_frames_under_the_rig_names_and_takes_them_back(
             await a.send_str(json.dumps({"cmd": "align_assign", "assignment": swap}))
             await frame_where(studio, lambda f: "front" in f and abs(grey(f["front"]) - 50) < 3)
 
-            # A worker frame that replaced align's is not align's to take back.
+            # A worker frame that replaced align's is not align's to take back. WHY end the loop
+            # first: its next tick would otherwise overwrite the planted frame before the stop.
+            api = studio.setup_api  # type: ignore[attr-defined]
+            api.align.task.cancel()
+            await asyncio.sleep(0.05)
             worker = {"type": "frame", "key": "top", "seq": 99, "jpeg": b""}
             studio.latest_frame["top"] = worker
             await a.send_str(json.dumps({"cmd": "align_stop"}))
