@@ -99,7 +99,15 @@ def dataset_frame(root: str, episode: int, frame: int, key: str) -> Frame:
     the way camera align does (camera_realign.discover), so the two agree on which datasets exist
     and which camera a key shows."""
     from phi_studio import align
-    from phi_studio import camera_realign as cr
+
+    try:
+        from phi_studio import camera_realign as cr
+    except ImportError as e:  # WHY: camera_realign loads LeRobot and OpenCV when imported
+        raise Refusal(
+            "Reading a dataset frame needs LeRobot and OpenCV, which Studio's Python does not "
+            "have.",
+            "Start Studio from the environment LeRobot is installed in.",
+        ) from e
 
     with align._readable():
         want = str(Path(root).expanduser().resolve())

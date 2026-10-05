@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import importlib.util
 import json
 import socket
 import threading
@@ -282,9 +283,14 @@ def test_capture_without_the_model_says_download(tmp_path: Path) -> None:
     run(go())
 
 
+# WHY: CI has no LeRobot; there the same request must get the plain "needs LeRobot" refusal.
+HAS_LEROBOT = all(importlib.util.find_spec(m) is not None for m in ("lerobot", "cv2"))
+
+
 @pytest.mark.parametrize("req,words", [
     ({"source": "dataset", "root": "/nowhere/at/all", "episode": 0, "frame": 0,
-      "key": "observation.images.front", "camera": "front"}, "No LeRobot dataset"),
+      "key": "observation.images.front", "camera": "front"},
+     "No LeRobot dataset" if HAS_LEROBOT else "needs LeRobot and OpenCV"),
     ({"source": "live", "key": "front", "camera": "front", "poses": {}}, "Place the front camera"),
     ({"source": "live", "key": "front", "camera": "front",
       "poses": {"front": {**POSE, "fovy_deg": 400}}}, "vertical field of view"),
@@ -358,8 +364,8 @@ def test_keep_updating_is_live_only_and_at_most_two_a_second() -> None:
     run(go())
 
 
-@pytest.mark.skipif(not (DATASET.is_dir() and depth_model.cached()),
-                    reason="needs phi_so101_8bin_v1 and the depth model in the local cache")
+@pytest.mark.skipif(not (HAS_LEROBOT and DATASET.is_dir() and depth_model.cached()),
+                    reason="needs LeRobot, phi_so101_8bin_v1 and the depth model in the cache")
 def test_real_frame_end_to_end_smoke() -> None:
     """Frame 60 of the front camera through the real model. NOT an accuracy claim: the true
     camera pose for this dataset is unknown. One placement is phi's starting guess for its own
