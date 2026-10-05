@@ -38,6 +38,8 @@ from phi_studio.identity import Calibration, JointCal, load_calibration
 from phi_studio.rig import JOINTS, JointHealth
 
 RECONNECT_S = 2.0  # how often a lost bus is tried again
+MOTOR_IDS = {j: i + 1 for i, j in enumerate(JOINTS)}  # motor_table's ids, without importing LeRobot
+FULL_TICKS = 4095  # the STS3215's last encoder tick: reset_calibration's Max_Position_Limit
 GRIPPER_LIMITS = {"Max_Torque_Limit": 500, "Protection_Current": 250, "Overload_Torque": 25}
 PID = {"P_Coefficient": 16, "I_Coefficient": 0, "D_Coefficient": 32}
 
@@ -197,7 +199,20 @@ class FeetechArm:
         }
 
     def set_half_turn_homings(self) -> dict[str, int]:
-        return {j: int(v) for j, v in self._call(lambda b: b.set_half_turn_homings()).items()}
+        """LeRobot's homing for the middle pose. WHY the cache: its reset_calibration empties the
+        bus's own calibration (motors_bus.py reset_calibration), so every normalised read would
+        raise until the end of the calibration and the worker would take the arm for dead. The
+        registers now hold these homings and the full 0..4095 range; normalising with the same
+        values, as the mock does, keeps positions flowing (degrees from the middle pose)."""
+
+        def run(b: Any) -> dict[str, int]:
+            homings = {j: int(v) for j, v in b.set_half_turn_homings().items()}
+            cal = {j: JointCal(MOTOR_IDS[j], 0, homings[j], 0, FULL_TICKS) for j in homings}
+            b.calibration = to_motor_calibration(cal)
+            self.calibration = cal
+            return homings
+
+        return dict(self._call(run))
 
     def write_calibration(self, cal: Calibration) -> None:
         mc = to_motor_calibration(cal)

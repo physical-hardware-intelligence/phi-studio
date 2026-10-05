@@ -52,6 +52,8 @@ class FakeBus:
         self.connected = False
 
     def _deg(self, j: str, raw: int) -> float:
+        if not self.calibration:  # LeRobot's _normalize
+            raise RuntimeError(f"{self.port} has no calibration registered.")
         c = self.calibration[j]
         if j == "gripper":
             return (raw - c.range_min) / (c.range_max - c.range_min) * 100
@@ -99,7 +101,12 @@ class FakeBus:
             self.calibration = cal
 
     def set_half_turn_homings(self) -> dict[str, int]:
-        return {j: r - 2047 for j, r in self.raw.items()}
+        """LeRobot's: reset_calibration (homing 0, limits 0..4095, and the cache emptied), then
+        the homing that puts the present position at 2047. The raw reads follow the new homing."""
+        self.calibration = {}
+        homings = {j: r - 2047 for j, r in self.raw.items()}
+        self.raw = {j: 2047 for j in self.raw}
+        return homings
 
 
 @pytest.fixture(autouse=True)
@@ -325,3 +332,56 @@ def test_worker_runs_on_the_hardware_backend(tmp_path) -> None:
         bus.goals and bus.goals[0] == follower.read_positions()
     )  # holds where it is before torque
     assert follower.read_torque()
+
+
+def test_motor_ids_are_lerobots() -> None:
+    assert H.MOTOR_IDS == {j: m.id for j, m in H.motor_table().items()}
+
+
+def test_calibrating_by_hand_on_a_real_bus_keeps_positions_flowing(tmp_path) -> None:
+    """LeRobot's homing empties the bus's calibration; the worker reads every arm each tick, so
+    without a stand-in the middle step faulted a real arm as dead. Middle -> move -> save."""
+    from phi_studio.worker import RigWorker
+
+    root = tmp_path / "cal"
+    leader_cal = {j: c._replace(homing_offset=c.homing_offset + 300) for j, c in CAL.items()}
+    for d, name, cal in (
+        ("robots/so_follower", "f", CAL),
+        ("teleoperators/so_leader", "l", leader_cal),
+    ):
+        (root / d).mkdir(parents=True, exist_ok=True)
+        (root / d / f"{name}.json").write_text(json.dumps({j: c._asdict() for j, c in cal.items()}))
+    cfg = tmp_path / "robot-config.yaml"
+    cfg.write_text(
+        "robot: {type: so101_follower, id: f, port: /dev/a}\n"
+        "teleop: {type: so101_leader, id: l, port: /dev/b}\n"
+    )
+    rig = H.build_rig(
+        cfg,
+        bus_factory=lambda p, c: FakeBus(p, H.to_motor_calibration(c) if c else None),
+        cal_root=root,
+        cameras=False,
+    )
+    sent: list[dict[str, Any]] = []
+    w = RigWorker(rig, sent.append, clock=lambda: 0.0, cal_dir=tmp_path / "out")
+    w.handle({"cmd": "connect"})
+    w.handle({"cmd": "cal_start", "arm": "follower"})
+    w.handle({"cmd": "cal_middle"})
+    w.tick()
+    errors = [m for m in sent if m.get("type") == "error"]
+    assert w.session.state.name == "CALIBRATING" and not errors, errors
+    follower = next(a for a in rig.arms if a.role == "follower")
+    # the middle pose reads 0 degrees, give or take LeRobot's half tick (mid = 2047.5)
+    assert abs(follower.read_positions()["elbow_flex"]) < 0.05
+    bus = follower._bus
+    bus.raw = {j: 2047 + (600 if j != "wrist_roll" else 0) for j in JOINTS}
+    w.tick()
+    bus.raw = {j: 2047 - (500 if j != "wrist_roll" else 0) for j in JOINTS}
+    w.tick()
+    w.handle({"cmd": "cal_finish"})
+    w.handle({"cmd": "cal_save"})
+    saved = next(m for m in sent if m.get("type") == "calibrated")
+    assert saved["path"] and w.session.state.name != "FAULT"
+    new = follower.calibration
+    assert new["elbow_flex"].range_min == 1547 and new["elbow_flex"].range_max == 2647
+    assert new["wrist_roll"].range_min == 0 and new["wrist_roll"].range_max == 4095
