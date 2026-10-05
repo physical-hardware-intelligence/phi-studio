@@ -127,12 +127,13 @@ def test_camera_choices_name_config_cameras_once_each() -> None:
 
 
 # -- end to end through the server ---------------------------------------------------------------
-async def started(tmp: Path) -> tuple[Studio, TestServer, Any]:
+async def started(tmp: Path, cameras: tuple[str, ...] = ("front",)) -> tuple[
+        Studio, TestServer, Any]:  # fmt: skip
     rig = tmp / "rig"
     rig.mkdir()
     (rig / "robot-config.yaml").write_text(CONFIG)
     port = free_port()
-    studio = Studio({"kind": "mock", "pairs": 1, "cameras": ["front"]}, port, token="t0k",
+    studio = Studio({"kind": "mock", "pairs": 1, "cameras": list(cameras)}, port, token="t0k",
                     data_dir=tmp / "data", rig_dir=rig)  # fmt: skip
     server = TestServer(studio.app(), host="127.0.0.1", port=port)
     await server.start_server()
@@ -235,10 +236,15 @@ class FakeCam:
 
     def __init__(self, key: str, fields: dict[str, Any]) -> None:
         self.key, self.fields = key, fields
+        self.seq = 0
         FakeCam.opened.append(fields["index_or_path"])
 
     def read_latest(self) -> tuple[Any, float, int]:
-        return np.zeros((480, 640, 3), np.uint8), 0.0, 1
+        """A new frame each read, grey level 10 x the camera number, so a test can tell whose
+        picture it holds; stamped on time.monotonic as RealCamera does."""
+        self.seq += 1
+        return np.full((480, 640, 3), 10 * self.fields["index_or_path"], np.uint8), \
+            time.monotonic(), self.seq
 
     def close(self) -> None:
         FakeCam.closed.append(self.fields["index_or_path"])
@@ -372,21 +378,25 @@ def test_a_camera_number_already_in_the_config_cannot_be_given_twice() -> None:
         "observation.images.front": 2, "observation.images.top": 0}  # fmt: skip
 
 
-def align_fakes(monkeypatch: Any, root: str, probe_s: float = 0.0) -> None:
+def align_fakes(monkeypatch: Any, root: str, probe_s: float = 0.0,
+                sources: dict[int, str] | None = None) -> None:  # fmt: skip
+    """Camera align on fakes: `sources` maps each live camera number to the dataset key it
+    matches (default: camera 4 shows the front)."""
     from phi_studio import align, cameras
 
-    refs = {"observation.images.front": np.full((480, 640, 3), 90, np.uint8)}
+    sources = sources or {4: "observation.images.front"}
+    refs = {k: np.full((480, 640, 3), 90, np.uint8) for k in sources.values()}
 
     def probe(idx: Any, timeout_s: float = 3.0) -> list[dict[str, Any]]:
         time.sleep(probe_s)
-        return [{"source": 4, "ok": True, "thumbnail": jpeg((90, 90, 90))}]
+        return [{"source": s, "ok": True, "thumbnail": jpeg((90, 90, 90))} for s in sources]
 
     monkeypatch.setattr(align, "list_datasets", lambda: [{"root": root, "name": "ds"}])
     monkeypatch.setattr(align, "references", lambda r, e, cache_dir=None: {
         "root": r, "episode": e, "frame": 0, "motion": 0.0, "images": refs, "physical": {}})
     monkeypatch.setattr(cameras, "probe", probe)
     monkeypatch.setattr(align, "match_cameras", lambda live, r: {
-        "assignment": {4: "observation.images.front"}, "scores": {4: {}}, "unsure": False,
+        "assignment": dict(sources), "scores": {s: {} for s in sources}, "unsure": False,
         "why": None, "unmatched_refs": []})  # fmt: skip
     monkeypatch.setattr(align, "measure", lambda live, ref: {
         "dx": 0.0, "dy": 0.0, "response": 1.0, "aligned": True, "low_match": False,
@@ -444,6 +454,66 @@ def test_align_frees_the_cameras_when_no_window_shows_it(tmp_path: Path, monkeyp
             assert studio.setup_api.align is not None  # type: ignore[attr-defined]
             stop = await until(a, lambda d: d["type"] == "align_stopped", timeout=5)
             assert "no window showed camera align" in stop["why"] and FakeCam.closed == [4]
+        finally:
+            await session.close()
+            await server.close()
+
+    asyncio.run(go())
+
+
+def grey(msg: dict[str, Any]) -> float:
+    """The mean grey level of a frame message's JPEG."""
+    return float(setup_api.decode(msg["jpeg"]).mean())
+
+
+async def frame_where(studio: Studio, pred: Any, timeout: float = 5.0) -> None:
+    end = time.monotonic() + timeout
+    while not pred(studio.latest_frame):
+        assert time.monotonic() < end, f"frames now: {sorted(studio.latest_frame)}"
+        await asyncio.sleep(0.05)
+
+
+def test_align_offers_its_frames_under_the_rig_names_and_takes_them_back(
+        tmp_path: Path, monkeypatch: Any) -> None:  # fmt: skip
+    from phi_studio import recon_api
+
+    root = str(tmp_path / "ds")
+    align_fakes(monkeypatch, root, sources={4: "observation.images.front",
+                                           5: "observation.images.top"})  # fmt: skip
+
+    async def go() -> None:
+        # WHY no worker cameras: every frame Studio holds must then be align's
+        studio, server, session = await started(tmp_path, cameras=())
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            await a.send_str(json.dumps({"cmd": "align_start", "root": root, "episode": 0}))
+            await until(a, lambda d: d["type"] == "align_session")
+            await frame_where(studio, lambda f: {"front", "top"} <= set(f))
+            front, top = studio.latest_frame["front"], studio.latest_frame["top"]
+            assert abs(grey(front) - 40) < 3 and abs(grey(top) - 50) < 3  # camera 4, camera 5
+            assert front["from"] == "camera align" and (front["w"], front["h"]) == (640, 480)
+            # The worker's frame clock and camera list, which the camera check reads, stay its own.
+            assert studio.frame_clock == {} and studio.cameras == {}
+            assert recon_api.state_of(studio).status()["live"] == ["front", "top"]
+
+            swap = {"4": "observation.images.top", "5": "observation.images.front"}
+            await a.send_str(json.dumps({"cmd": "align_assign", "assignment": swap}))
+            await frame_where(studio, lambda f: "front" in f and abs(grey(f["front"]) - 50) < 3)
+
+            # A worker frame that replaced align's is not align's to take back. WHY end the loop
+            # first: its next tick would otherwise overwrite the planted frame before the stop.
+            api = studio.setup_api  # type: ignore[attr-defined]
+            api.align.task.cancel()
+            await asyncio.sleep(0.05)
+            worker = {"type": "frame", "key": "top", "seq": 99, "jpeg": b""}
+            studio.latest_frame["top"] = worker
+            await a.send_str(json.dumps({"cmd": "align_stop"}))
+            await until(a, lambda d: d["type"] == "align_stopped")
+            assert "front" not in studio.latest_frame and studio.latest_frame["top"] is worker
+            assert recon_api.state_of(studio).status()["live"] == []
+            # Only align opened cameras: once, then again for the swap; all closed now.
+            assert sorted(FakeCam.opened) == [4, 4, 5, 5] == sorted(FakeCam.closed)
         finally:
             await session.close()
             await server.close()

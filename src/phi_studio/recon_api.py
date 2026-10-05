@@ -12,7 +12,9 @@ Capture reads, it moves nothing, so any window may ask. The download writes 99 M
 only the window with control may start or stop it.
 
 Frames come only from what Studio already has: a dataset frame decoded from its video file, or
-the newest frame the robot worker streams (teleop, policy). Nothing here opens a camera device.
+the newest frame in Studio.latest_frame, which the robot worker fills during teleop or a policy
+run and camera align fills while it holds the cameras (setup_api.AlignSession). Nothing here opens
+a camera device.
 
 Depth runs on one thread of its own (DEPTH_THREAD), one job at a time, latest wins per camera.
 WHY not asyncio's default executor: it is shared with the terminal and the checks, and a 350 ms
@@ -140,13 +142,24 @@ def dataset_frame(root: str, episode: int, frame: int, key: str) -> Frame:
                   "frame": frame, "key": key})  # fmt: skip
 
 
+def fresh(studio: Studio, key: str) -> dict[str, Any] | None:
+    """The newest frame message for `key` if it is younger than LIVE_FRESH_S, else None. A frame
+    camera align offers says when it arrived; a worker frame's arrival is in the frame clock."""
+    msg = studio.latest_frame.get(key)
+    if msg is None:
+        return None
+    arrived = msg["arrived"] if "arrived" in msg else studio.frame_clock.get(key, (None, None))[0]
+    if arrived is None or time.monotonic() - arrived > LIVE_FRESH_S:
+        return None
+    return msg
+
+
 def live_frame(studio: Studio, key: str) -> Frame:
-    """The newest frame the worker streamed for `key`, with the newest joint readings."""
+    """The newest frame streamed for `key`, with the newest joint readings."""
     from PIL import Image
 
-    msg = studio.latest_frame.get(key)
-    arrived = studio.frame_clock.get(key, (None, None))[0]
-    if msg is None or arrived is None or time.monotonic() - arrived > LIVE_FRESH_S:
+    msg = fresh(studio, key)
+    if msg is None:
         raise Refusal(NO_LIVE)
     rgb = np.asarray(Image.open(io.BytesIO(msg["jpeg"])).convert("RGB"), dtype=np.uint8)
     arms = (studio.telemetry or {}).get("arms") or {}
@@ -209,9 +222,7 @@ class Recon:
 
     # -- status ---------------------------------------------------------------------------------
     def status(self) -> dict[str, Any]:
-        now = time.monotonic()
-        live = sorted(k for k, (t, _) in list(self.studio.frame_clock.items())
-                      if t is not None and now - t <= LIVE_FRESH_S)  # fmt: skip
+        live = sorted(k for k in list(self.studio.latest_frame) if fresh(self.studio, k))
         self.download.cache_dir = self.cache_dir
         return {
             "type": "recon", "kind": "status",
@@ -432,8 +443,7 @@ class Recon:
                 out = await self.submit(Job(k["camera"], k["request"]))
                 if out and out.get("kind") == "refused" and out.get("message") == NO_LIVE:
                     break
-            elif msg is None or time.monotonic() - (self.studio.frame_clock.get(
-                    k["request"]["key"], (0.0, None))[0] or 0.0) > LIVE_FRESH_S:  # fmt: skip
+            elif fresh(self.studio, k["request"]["key"]) is None:
                 self.broadcast({"type": "recon", "kind": "refused", "camera": k["camera"],
                                 "message": NO_LIVE})  # fmt: skip
                 break
