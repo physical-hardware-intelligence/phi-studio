@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ActionBar } from "../components/ActionBar";
 import { Cameras } from "../components/Cameras";
 import { Notices } from "../components/Notices";
+import { Preflight, usePreflight } from "../components/Preflight";
 import { pct, studio, useStudio, wilson, type EvalRecord, type EvalSummary } from "../lib/studio";
 import { PolicySetup, usePolicyChoice } from "./Policy";
 
@@ -27,13 +28,15 @@ function Setup({ past, dir }: { past: EvalSummary[]; dir: string }) {
   const policies = useStudio((s) => s.rig?.policies ?? []);
   const control = useStudio((s) => s.control);
   const choice = usePolicyChoice(policies);
+  const pre = usePreflight(choice.chosen);
   const [planned, setPlanned] = useState(10);
   const okN = Number.isInteger(planned) && planned >= 1 && planned <= 500;
   const [lo, hi] = wilson(Math.round(planned * 0.8), okN ? planned : 1);
-  const why = !control ? "Another window has control" : choice.problem ?? (okN ? null : "Plan 1 to 500 episodes");
+  const why = !control ? "Another window has control" : choice.problem ?? pre.block ?? (okN ? null : "Plan 1 to 500 episodes");
 
   return (
     <div className="page evaluate">
+      <Preflight items={pre.items} />
       <Notices />
       <div className="eval-setup">
         <PolicySetup policies={policies} choice={choice} title="New eval">
@@ -98,13 +101,17 @@ function Running({ rec }: { rec: EvalRecord }) {
   const judged = mine && rec.episodes.some((e) => e.run_id === run.run_id);
   const toJudge = mine && !run.running && !judged;
   const next = rec.n + 1;
+  const policy = useStudio((s) => s.rig?.policies.find((p) => p.id === rec.policy));
+  const pre = usePreflight(policy);
+  const blocked = toJudge ? "Judge the last episode first" : pre.block;
 
   return (
     <div className="page evaluate">
       <Summary rec={rec} />
-      <ActionBar activity="policy" startLabel={`Run episode ${next}`} canStart={!toJudge}
-        startBlocked={toJudge ? "Judge the last episode first" : undefined}
+      <ActionBar activity="policy" startLabel={`Run episode ${next}`} canStart={blocked === null}
+        startBlocked={blocked ?? undefined}
         startMsg={{ policy: rec.policy, task: rec.task, limit_s: rec.limit_s }} />
+      <Preflight items={pre.items} />
       <Notices />
       <div className="work-grid">
         <div className="col">

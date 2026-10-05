@@ -30,8 +30,10 @@ MACHINE_FILES = ("robot-config.yaml",)
 
 
 def root_order(rel: str) -> tuple[str, ...]:
-    """Which roots to try first for a relative path. Docs: the running code's copy."""
-    return ("repo", "code") if rel in MACHINE_FILES else ("code", "repo")
+    """Which roots to try first for a relative path. Docs: the running code's copy. The rig config:
+    the phi checkout when Studio was given one, else Studio's own data folder, so Studio runs
+    without a phi checkout."""
+    return ("repo", "studio", "code") if rel in MACHINE_FILES else ("code", "repo")
 
 
 NOTES = (

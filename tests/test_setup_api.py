@@ -542,3 +542,44 @@ def test_refusals_read_as_written_and_name_their_command(tmp_path: Path) -> None
             await server.close()
 
     asyncio.run(go())
+
+
+def test_align_records_its_verdict_for_every_window_and_the_next_start(tmp_path: Path,
+                                                                       monkeypatch: Any) -> None:
+    """Run and Evaluate say whether the cameras sit where the training data was recorded: the
+    session records its verdict, a window opened later gets it, and so does a restarted Studio."""
+    root = str(tmp_path / "ds")
+    align_fakes(monkeypatch, root)  # every reading: in line
+
+    async def go() -> None:
+        studio, server, session = await started(tmp_path)
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            await a.send_str(json.dumps({"cmd": "align_start", "root": root, "episode": 0}))
+            r = await until(a, lambda d: d["type"] == "align_result", timeout=5)
+            assert r["aligned"] is True and r["root"] == root and r["episode"] == 0
+            assert r["cameras"] == {"observation.images.front": True}
+            late = await ws(session, server.port)
+            assert (await until(late, lambda d: d["type"] == "align_result"))["at"] == r["at"]
+            await a.send_str(json.dumps({"cmd": "align_stop"}))
+            await until(a, lambda d: d["type"] == "align_stopped")
+        finally:
+            await session.close()
+            await server.close()
+
+        port = free_port()
+        again = Studio({"kind": "mock", "pairs": 1, "cameras": []}, port, token="t0k",
+                       data_dir=tmp_path / "data", rig_dir=tmp_path / "rig")  # fmt: skip
+        server = TestServer(again.app(), host="127.0.0.1", port=port)
+        await server.start_server()
+        session = aiohttp.ClientSession()
+        try:
+            b = await ws(session, port)
+            got = await until(b, lambda d: d["type"] == "align_result")
+            assert got["root"] == root and got["aligned"] is True and got["at"] == r["at"]
+        finally:
+            await session.close()
+            await server.close()
+
+    asyncio.run(go())

@@ -50,11 +50,15 @@ log = logging.getLogger(__name__)
 Handler = Callable[["Client", dict[str, Any]], Awaitable[None]]
 # Modules that add commands to Studio, each with register(studio). A missing one is skipped, so a
 # feature can land on its own.
-FEATURES = ("setup_api", "hub_api", "train_api", "scene_api", "recon_api")
+FEATURES = (
+    "setup_api", "hub_api", "train_api", "scene_api", "recon_api", "data_api", "onboard_api",
+)
 
 COMMANDS = {"heartbeat", "connect", "identify", "confirm", "arm", "start", "stop", "resume",
             "release", "clear", "disconnect", "inject",
-            "cal_start", "cal_middle", "cal_finish", "cal_save", "cal_cancel"}  # fmt: skip
+            "cal_start", "cal_middle", "cal_finish", "cal_save", "cal_cancel",
+            "autocal_start", "autocal_go", "autocal_resume", "autocal_save",
+            "autocal_cancel", "rec_start", "rec_next", "rec_redo", "rec_stop"}  # fmt: skip
 EVAL_COMMANDS = {"eval_begin", "eval_mark", "eval_undo", "eval_end"}  # answered by the server
 ANYONE = {"stop", "take_control"}  # allowed from a window without control
 # Answered by the server, from any window: they read, and none reaches the worker.
@@ -62,7 +66,9 @@ READ_ONLY = {"assist_status", "assist_context", "assist_ask", "assist_stop", "as
              "files_index", "file_read", "files_search", "ports", "checks_run"}  # fmt: skip
 CODE_ROOT = Path(__file__).resolve().parents[2]  # src/phi_studio/server.py -> the repo
 LOG_SIZE = 200
-REPLAYED = ("rig", "state", "identity", "worker_exit")  # newest of each, sent to a new window
+WORKER_EXIT_S = 16.0  # a closing worker may finalize a recording first (worker.FINISH_S = 15)
+# newest of each, sent to a new window
+REPLAYED = ("rig", "state", "identity", "worker_exit", "align_result")
 
 
 def frame_packet(msg: dict[str, Any]) -> bytes:
@@ -158,6 +164,7 @@ class Studio:
         self.latest_frame: dict[str, dict[str, Any]] = {}
         self.checks: dict[str, Any] | None = None  # the newest check run, for the assistant
         self.code_root = code_root or CODE_ROOT
+        self.rig_dir = rig_dir  # the phi checkout: data_api also looks for datasets in its data/
         roots = default_roots(self.code_root, self.data_dir, rig_dir)
         self.files = Files(roots)
         self.terminal: Terminal | None = None  # started when a window first opens the panel
@@ -183,18 +190,23 @@ class Studio:
 
         ctx = mp.get_context("spawn")
         self.conn, child = ctx.Pipe()
-        self.proc = ctx.Process(target=run_worker, args=(child, self.spec), daemon=True)
+        # WHY not a daemon: a daemonic process may not start processes, and the worker starts one
+        # to write a recording (recorder.WriterProcess). It still never outlives Studio: its
+        # reader sees the pipe close (stop_worker, or the OS when Studio dies) and it exits.
+        self.proc = ctx.Process(target=run_worker, args=(child, self.spec), daemon=False)
         self.proc.start()
         child.close()  # WHY: otherwise recv() never sees EOF when the worker dies
-        threading.Thread(target=self._pump, daemon=True).start()
+        threading.Thread(target=self._pump, args=(self.conn, self.proc), daemon=True).start()
 
-    def _pump(self) -> None:
+    def _pump(self, conn: Any, proc: Any) -> None:
         """Worker -> windows. Runs in a thread because Pipe.recv blocks."""
         while True:
             try:
-                msg = self.conn.recv()
+                msg = conn.recv()
             except (EOFError, OSError):
-                code = self.proc.exitcode if self.proc else None
+                if conn is not self.conn:  # a worker Studio retired for another rig: no alarm
+                    return
+                code = proc.exitcode if proc else None
                 msg = {"type": "worker_exit", "code": code,
                        "message": "The robot worker stopped. Restart Studio."}  # fmt: skip
                 self._dispatch(msg)
@@ -259,11 +271,49 @@ class Studio:
             except (BrokenPipeError, OSError):
                 pass
 
+    def switch_rig(self, spec: dict[str, Any]) -> None:
+        """Retire the arm worker and start one for another rig: the simulated arms, or the real
+        ones in robot-config.yaml. Blocks while the old process exits, so call it off the loop.
+        The caller checks that no arm holds torque. Every window then gets a fresh hello, as
+        after a restart, so nothing of the old rig stays on screen."""
+        conn, proc = self.conn, self.proc
+        self.conn = self.proc = None  # first: the old pump then sees its pipe close and stays quiet
+        if conn is not None:
+            conn.close()  # the worker reads EOF and exits (run_worker)
+        if proc is not None:
+            proc.join(WORKER_EXIT_S)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(1)
+        for kind in ("rig", "state", "identity", "worker_exit"):
+            self.last.pop(kind, None)
+        self.telemetry = self.run = None
+        self.cameras.clear()
+        self.frame_clock.clear()
+        self.latest_frame.clear()
+        data = self.spec.get("data_dir")
+        self.spec = {**spec, "data_dir": data} if data else dict(spec)
+        self.start_worker()
+        if self.loop is not None:
+            self.loop.call_soon_threadsafe(self._hello_all)
+
+    def _hello_all(self) -> None:
+        """A hello as on connect, then what a new window gets replayed: a new worker's first
+        messages may have overtaken this, and a hello clears them on the page."""
+        for c in list(self.clients):
+            c.push({"type": "hello", "control": self.controller is c, "client": c.id,
+                    "mock": self.spec.get("kind", "mock") == "mock"})  # fmt: skip
+            for kind in REPLAYED:
+                if kind in self.last:
+                    c.push(self.last[kind])
+
     def stop_worker(self) -> None:
         if self.conn is not None:
             self.conn.close()
         if self.proc is not None:
-            self.proc.join(3)
+            # WHY this long: the worker finalizes a recording on its way out (worker.FINISH_S);
+            # killed mid-finalize, the dataset cannot be read. It usually takes under a second.
+            self.proc.join(WORKER_EXIT_S)
             if self.proc.is_alive():
                 self.proc.terminate()
 

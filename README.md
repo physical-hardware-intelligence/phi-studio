@@ -1,67 +1,134 @@
-# Phi Studio
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/phi-mark-dark.svg">
+    <img src="docs/assets/phi-mark-light.svg" width="64" height="64" alt="Phi">
+  </picture>
+</p>
 
-A local web app for SO-101 robot arms, single or bimanual. It walks a rig from first plug-in to running and
-scoring a policy: find ports, set motor ids, calibrate, teleoperate, set up and align cameras, record, train,
-import models from Hugging Face, run a policy and evaluate it.
+<h1 align="center">Phi Studio</h1>
 
-Studio runs on your Mac and opens in your browser. It listens on 127.0.0.1 only, and every launch prints a link
-with a fresh token.
+<p align="center">
+  <b>The robot-learning studio for SO-101 arms.</b><br>
+  Set up a rig, drive it, inspect every episode, train, run and evaluate. One local app.
+</p>
 
-## Status
+<p align="center">
+  <a href="https://github.com/physical-hardware-intelligence/phi-studio/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/physical-hardware-intelligence/phi-studio/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="LeRobot 0.6.0" src="https://img.shields.io/badge/LeRobot-0.6.0-1f6feb">
+  <img alt="SO-101, single or bimanual" src="https://img.shields.io/badge/SO--101-single%20%7C%20bimanual-444">
+  <img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-444">
+</p>
 
-| Part | State |
-|---|---|
-| Mock rig (1 or 2 pairs, cameras, faults) | Works. Every page runs on it. |
-| Real arms | Through LeRobot's own commands, run from Studio's terminal panel with one click. Studio's own real-arm backend is not built yet, so `--hardware` stops with a message. |
-| Terminal panel | Your shell, in the phi env, in the phi checkout. Run buttons type a command for you. |
-| robot-config.yaml edits | Studio changes single values in place and keeps your comments. It saves a backup first. |
-| Set up | Twelve steps from a new rig to a recorded dataset. Finds each arm's port by unplugging it, finds the cameras by picture, and saves both to `robot-config.yaml`. |
-| Camera align | Compares live cameras with a dataset's resting frame and says which way to move each one. |
-| Models | Hub login status, search or repo id, a fit check against your rig from the model's config, verified download, and the `lerobot-rollout` command. Recordings upload as private. |
-| Train | On Explorer over ssh and SLURM (read-only checks, chained parts that resume from checkpoints, live loss chart, checkpoint fetch, cancel), or on this Mac in the terminal panel. A real submit has not been run yet. |
-| 3D view | The SO-101 CAD model (Apache-2.0, see `NOTICE`) driven by live joint readings, on its own page and on Teleoperate and Run policy. The joint mapping is not yet checked on a physical arm. |
-| Workspace points | A metric point cloud from one camera picture: Depth Anything V2 Small gives inverse depth up to scale and shift, and Studio fits both against the table plane. Needs a one-time 99 MB model download. Accuracy on a real rig depends on the camera pose you set, which is not measured. |
+<p align="center">
+  <img src="docs/assets/studio-walkthrough.gif" width="960" alt="Phi Studio: the rig overview, the dataset library, one dataset's episodes, an episode with cameras, 3D twin and signals, a bimanual folding episode, and the live 3D view">
+</p>
 
-## Install
+## Quick start
 
-Studio needs Python 3.12. Install it into the env that has LeRobot 0.6.0, so the Run buttons and camera
-previews use the same LeRobot as your commands.
+You need a Mac with the `phi` conda env (Python 3.12, LeRobot 0.6.0) and Node 20 or newer.
 
 ```bash
 conda activate phi
 pip install -e .
-npm --prefix web ci
-npm --prefix web run build
+npm --prefix web ci && npm --prefix web run build
+phi-studio --pairs 2
 ```
 
-## Run
+Studio opens in your browser on `127.0.0.1:8765`. No arms needed to look around: it starts a simulated rig, and your
+recordings appear under **Datasets**.
 
-```bash
-phi-studio
-```
+| Option | |
+|---|---|
+| `--pairs 1` / `2` | one arm pair, or bimanual |
+| `--port 8766` | another port |
+| `--rig-dir PATH` | the phi checkout with `robot-config.yaml` (default: here, then `~/phi`) |
+| `--data-dir PATH` | notes, evals and caches (default `~/.cache/phi/studio`) |
+| `--no-browser` | print the link only |
 
-Options: `--pairs 2` for a bimanual mock rig, `--port 8766`, `--no-browser`, `--rig-dir PATH` for the folder
-with `robot-config.yaml` (default: the current folder, then `~/phi`), `--data-dir PATH` for evals and config
-backups (default `~/.cache/phi/studio`).
+## What's inside
+
+| | Page | What it does |
+|---|---|---|
+| **Rig** | Set up | Twelve steps from a new rig to a recorded dataset: finds each arm's port by unplugging it and each camera by its picture, aligns cameras live, saves to `robot-config.yaml` |
+| | Calibrate | Each arm's homing and ranges, reviewed before saving |
+| | Teleoperate | Torque, Stop, cameras and joints for each pair |
+| | 3D view | The SO-101 CAD driven by live joint readings (also on Teleoperate and Run policy), cameras placed in the scene, and workspace points: a metric point cloud from one camera picture |
+| **Data** | Datasets | Every LeRobot dataset on this Mac (v3.0 or v2.1, single or bimanual), each with a health bar |
+| | Episode inspector | Cameras, a 3D twin (measured arm, commanded ghost, tool path), a timeline and per-joint signals on one playhead |
+| | Issues | Notes, issues and excluded episodes across datasets, shared live between windows |
+| **Policies** | Train | On Explorer over ssh and SLURM (chained parts that resume from checkpoints, live loss chart, checkpoint fetch), or on this Mac |
+| | Models | Find a policy on Hugging Face, check it fits your rig, download it, get its `lerobot-rollout` command |
+| | Run policy · Evaluate | Run a policy, judge each episode, get the success rate with a 95% interval |
+
+**Inspector keys:** `Space` play · `←` `→` one frame · `Shift` + arrow one second · `[` `]` episode · `N` note ·
+`B` bad · `G` good · `1` `2` `3` position, velocity, tracking
+
+### What the analysis flags
+
+Every threshold is measured on our own recordings and written down in `analysis.py`.
+
+| Flag | Means |
+|---|---|
+| Idle start / end | The arm is still for 1.5 s or more at an end of the episode: trim it |
+| Tracking | The follower is 12° or more off its leader, after removing the lag. It says why: the leader **outran** the follower, or something **held** the follower back |
+| Squeeze | An object holds the gripper open while it is commanded shut: the servo keeps pushing |
+| Jump | A joint moves further in one frame than an STS3215 can turn |
+| Frozen | A joint never changes while its leader moves it |
+| No grasp | A pick or fold task whose gripper never closes |
+| Video length | A camera's video and the joint data disagree in length |
+| Outlier | Length, tool path, idle time or tracking far from this dataset's median |
+
+Mark an episode **bad** and it drops out of the `--dataset.episodes=[…]` list that Studio builds for `lerobot-train`.
+
+## Status
+
+| | |
+|---|---|
+| Simulated rig | Every page runs on it |
+| Real arms | Through LeRobot's own commands, which a Run button types into Studio's terminal panel. Studio's own real-arm control is next |
+| Datasets, inspector, analysis, notes | Work on real datasets today |
+| 3D view | The joint mapping is not yet checked on a physical arm |
+| Cluster training | Checks and the job script are built; a real submit has not been run yet |
+| Workspace points | Needs a one-time 99 MB model download (Depth Anything V2 Small). Accuracy depends on the camera pose you set, which is not measured |
+
+## Coming next
+
+- [ ] **Real-arm control** in Studio, with the live 3D twin in Teleoperate
+- [ ] **Onboarding:** name your rig, identify its arms, auto-calibrate, test drive, set the cameras, ready
+- [ ] **Auto-calibration:** every joint to its mechanical stops, checked against the expected travel and compared
+  across arms, so every rig calibrates the same
+- [ ] **Hub datasets:** open a Hugging Face dataset without downloading it (joints in seconds, video streamed per
+  episode)
+- [ ] **Recording in Studio:** phase timer, a task per episode, live quality checks, keep the last 30 s
+- [ ] **Eval record:** outcome, partial credit, failure tag, note and video for every rollout; checkpoints compared
+  with confidence intervals
+- [ ] **Remote inference** on a lab GPU, with the latency shown
+- [ ] **One 3D engine** for live and replay
+- [ ] **UMI and egocentric video** capture
 
 ## Develop
 
 ```bash
 pip install -e ".[dev]"
-ruff check src tests
-mypy src
-pytest -q
-npm --prefix web run typecheck
-npm --prefix web test
-npm --prefix web run build
+ruff check src tests && mypy src && pytest -q
+npm --prefix web run typecheck && npm --prefix web test && npm --prefix web run build
 ```
 
-- `src/phi_studio/`: the server (aiohttp), the robot worker process, LeRobot command builder (`rigspec.py`),
-  config writer (`configedit.py`), Hub client (`hub.py`, `hub_api.py`), cameras (`cameras.py`), Set up and
-  camera align (`setup_api.py`, `align.py`), training (`train.py`, `hpc.py`, `train_api.py`), the 3D model and
-  forward kinematics (`robot_model.py`, `scene_api.py`), workspace points (`recon.py`, `depth_model.py`,
-  `recon_api.py`), terminal (`terminal.py`).
+- `src/phi_studio/`: the server (aiohttp), the robot worker and rig contracts (`worker.py`, `rig.py`, `session.py`),
+  the LeRobot command builder and config writer (`rigspec.py`, `configedit.py`), Set up and cameras (`setup_api.py`,
+  `cameras.py`, `align.py`), the Hub (`hub.py`, `hub_api.py`), training (`train.py`, `hpc.py`, `train_api.py`), the
+  3D model (`robot_model.py`, `scene_api.py`), workspace points (`recon.py`, `depth_model.py`, `recon_api.py`), the
+  data layer (`datasets.py`, `analysis.py`, `kinematics.py`, `notes.py`, `data_api.py`) and the terminal.
 - `web/`: the React app. `npm run build` writes it into `src/phi_studio/static/`, which the server serves.
+  `web/tests/` holds Node tests for page logic that runs without a browser (`npm test`).
+- `tests/`: unit and end-to-end tests on the simulated rig. Tests that need LeRobot, OpenCV or the Hub skip without
+  them.
+- `scripts/build_so101_model.py`: rebuilds the SO-101 model bundle from TheRobotStudio's MJCF.
+
+## Safety and security
+
+Studio listens on `127.0.0.1` only. Each launch makes a fresh token, and the WebSocket and the data routes check it
+along with the Host and Origin. One window holds control at a time, and `Esc` stops the arms from any page.
 - `web/tests/`: Node tests for the page logic that runs without a browser (`npm test`).
 - `tests/`: unit and end-to-end tests on the mock rig. Tests that need LeRobot, OpenCV or the Hub client skip
   when those are not installed.
@@ -70,4 +137,5 @@ npm --prefix web run build
 
 ## License
 
-Apache 2.0. See `LICENSE`.
+Apache 2.0, see `LICENSE`. The SO-101 model is from [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100)
+(Apache 2.0). Built on [LeRobot](https://github.com/huggingface/lerobot).

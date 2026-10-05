@@ -1,7 +1,11 @@
-// The 3D view page: the followers at full size, a joint readout, and the view's settings.
-import { RotateCcw } from "lucide-react";
+// The 3D view page: the followers at full size and, under them, what the view's mode is about: the joints for Pose
+// and Policy, the live cameras for Cameras. The rest sits in one settings sheet.
+import * as Dialog from "@radix-ui/react-dialog";
+import { RotateCcw, X } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Boundary } from "../components/Boundary";
+import { Cameras } from "../components/Cameras";
+import { JointStrip } from "../components/JointStrip";
 import { label } from "../lib/labels";
 import {
   type CamPose, cameraPose, DEGREES, followerSlots, FOVY, frustumKeys, limitState, PRINT, type PrintColour, readArm, scene,
@@ -16,27 +20,37 @@ const deg = (rad: number) => (rad * 180) / Math.PI;
 
 export function Scene() {
   useEffect(() => { scene.loadModel(); }, []);
+  const [open, setOpen] = useState(false);
+  const mode = useScene((s) => s.settings.mode);
   return (
-    <div className="page scene-page">
-      <div className="work-grid">
-        <div className="col">
-          <section className="panel scene-panel">
-            <div className="scene-panel-body is-full">
-              <Boundary what="The 3D view">
-                <Suspense fallback={<SceneFallback />}><Viewer /></Suspense>
-              </Boundary>
+    <div className="page scene-page is-simple">
+      <section className="panel scene-panel">
+        <div className="scene-panel-body is-full">
+          <Boundary what="The 3D view">
+            <Suspense fallback={<SceneFallback />}><Viewer onSettings={() => setOpen(true)} /></Suspense>
+          </Boundary>
+        </div>
+      </section>
+      {mode === "cameras" ? <Cameras /> : <JointStrip />}
+      <Dialog.Root open={open} onOpenChange={setOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="sheet-overlay" />
+          <Dialog.Content className="sheet" aria-describedby={undefined}>
+            <div className="sheet-head">
+              <Dialog.Title className="panel-title">3D view settings</Dialog.Title>
+              <Dialog.Close className="btn btn-ghost btn-sm btn-icon" aria-label="Close"><X aria-hidden /></Dialog.Close>
             </div>
-          </section>
-          <JointReadout />
-        </div>
-        <div className="col rail">
-          <LayoutPanel />
-          <ShowPanel />
-          <CamerasPanel />
-          <ReconPanel />
-          <ModelPanel />
-        </div>
-      </div>
+            <div className="sheet-body">
+              <ShowPanel />
+              <LayoutPanel />
+              <CamerasPanel />
+              <ReconPanel />
+              <JointReadout />
+              <ModelPanel />
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </div>
   );
 }

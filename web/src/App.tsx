@@ -5,35 +5,48 @@ import { Sidebar } from "./components/Sidebar";
 import { TerminalDock } from "./components/TerminalDock";
 import { TopBar } from "./components/TopBar";
 import { getTheme, setTheme, studio, useRoute, useStudio, type Route } from "./lib/studio";
+import { Align } from "./pages/Align";
 import { Calibrate } from "./pages/Calibrate";
 import { Checks } from "./pages/Checks";
 import { Evaluate } from "./pages/Evaluate";
 import { Files } from "./pages/Files";
 import { Guide } from "./pages/Guide";
-import { Overview } from "./pages/Overview";
+import { Home } from "./pages/Home";
+import { Onboard } from "./pages/Onboard";
+import { Settings } from "./pages/Settings";
 import { Models } from "./pages/Models";
 import { Policy } from "./pages/Policy";
+import { Record } from "./pages/Record";
 import { Scene } from "./pages/Scene";
 import { Setup } from "./pages/Setup";
 import { Teleop } from "./pages/Teleop";
 import { Train } from "./pages/Train";
 
+// WHY lazy: the data pages carry three.js and the 3D model code; pages that never show them do not pay.
+const Data = lazy(() => import("./pages/Data").then((m) => ({ default: m.Data })));
+const Issues = lazy(() => import("./pages/Issues").then((m) => ({ default: m.Issues })));
 // WHY lazy: the panel carries the markdown renderer, a third of the bundle, and most sessions never open it.
 const AssistantPanel = lazy(() => import("./components/Assistant").then((m) => ({ default: m.AssistantPanel })));
 
 const PAGES: Record<Route, { title: string; sub: string; el: ComponentType }> = {
-  overview: { title: "Overview", sub: "Rig status, and what to do next", el: Overview },
-  checks: { title: "Checks", sub: "Every read-only check of this Mac, the rig and Studio, in one run", el: Checks },
-  calibrate: { title: "Calibrate", sub: "Write each arm's homing offsets and joint ranges", el: Calibrate },
-  teleop: { title: "Teleoperate", sub: "Drive each follower with its leader", el: Teleop },
-  policy: { title: "Run policy", sub: "Run a trained policy on the followers", el: Policy },
-  evaluate: { title: "Evaluate", sub: "Judge episodes and measure the success rate", el: Evaluate },
-  setup: { title: "Set up", sub: "Every step from a new rig to a recorded dataset, in order", el: Setup },
-  scene: { title: "3D view", sub: "The arms as they move, in 3D", el: Scene },
-  train: { title: "Train", sub: "Train a policy on this Mac or on the Northeastern cluster", el: Train },
-  models: { title: "Models", sub: "Find a policy on Hugging Face, check it fits this rig, and download it", el: Models },
-  files: { title: "Files", sub: "Serial ports, rig notes, calibration files and code on this Mac", el: Files },
-  guide: { title: "Guide", sub: "How to set up a rig and use each page", el: Guide },
+  overview: { title: "Home", sub: "Your rig and your latest data", el: Home },
+  teleop: { title: "Teleop", sub: "Drive the followers with the leaders", el: Teleop },
+  scene: { title: "3D view", sub: "The arms, live", el: Scene },
+  align: { title: "Align", sub: "Each camera back where the training data was recorded", el: Align },
+  record: { title: "Record", sub: "Teleop episodes into a LeRobot dataset", el: Record },
+  data: { title: "Datasets", sub: "Every recording on this Mac", el: Data },
+  issues: { title: "Issues", sub: "Notes and excluded episodes", el: Issues },
+  train: { title: "Train", sub: "On this Mac or the cluster", el: Train },
+  models: { title: "Models", sub: "Policies from Hugging Face", el: Models },
+  policy: { title: "Run", sub: "A policy on the arms", el: Policy },
+  evaluate: { title: "Evaluate", sub: "Score episodes, get a success rate", el: Evaluate },
+  settings: { title: "Settings", sub: "Rig, setup, calibration, checks, files", el: Settings },
+  onboard: { title: "Rig setup", sub: "Name, arms, calibration, cameras", el: Onboard },
+  setup: { title: "Advanced setup", sub: "Every LeRobot step, in order", el: Setup },
+  calibrate: { title: "Calibrate", sub: "Homing offsets and joint ranges, by hand", el: Calibrate },
+  checks: { title: "Checks", sub: "This Mac, the rig and Studio", el: Checks },
+  files: { title: "Files", sub: "Ports, calibration files and code", el: Files },
+  guide: { title: "Guide", sub: "How each page works", el: Guide },
 };
 
 export function App() {
@@ -62,7 +75,9 @@ export function App() {
         <div className="main">
           <TopBar route={route} title={page.title} sub={page.sub} onStop={() => studio.stop()} />
           <main className="content" key={route}>
-            <Boundary what={`The ${page.title} page`}><Page /></Boundary>
+            <Boundary what={`The ${page.title} page`}>
+              <Suspense fallback={<div className="page"><div className="empty">Loading</div></div>}><Page /></Suspense>
+            </Boundary>
           </main>
           <Boundary what="The terminal"><TerminalDock /></Boundary>
         </div>

@@ -1,7 +1,8 @@
-import { CircleAlert, CircleCheck, CircleX, Check, Hand, Power, RotateCcw, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, CircleAlert, CircleCheck, CircleX, Check, Hand, Hourglass, Pause, Play, Power, RotateCcw, Undo2, Wand2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Notices } from "../components/Notices";
 import { label, labels } from "../lib/labels";
+import { Segmented } from "../scene/ViewSwitch";
 import {
   JOINTS, go, studio, useStudio, TICKS_PER_DEG,
   type ArmIdentity, type CalStep, type CalView, type SessionState,
@@ -19,6 +20,7 @@ const STEPS: { key: CalStep | "check"; title: string; detail: string }[] = [
 // this page shows where it is and sends the next command.
 export function Calibrate() {
   const cal = useStudio((s) => s.telemetry?.calibration ?? null);
+  const autos = useStudio((s) => s.telemetry?.autocal ?? null);
   const done = useStudio((s) => s.calibrated);
   const [hidden, setHidden] = useState<number | null>(null);
   return (
@@ -39,8 +41,8 @@ export function Calibrate() {
         </div>
       )}
       <div className="cal-grid">
-        <ArmPicker active={cal?.arm ?? null} />
-        {cal ? <Wizard cal={cal} /> : <HowItWorks />}
+        <ArmPicker active={autos ? autos.map((r) => r.arm) : cal ? [cal.arm] : []} />
+        {autos ? <AutoWizard runs={autos} /> : cal ? <Wizard cal={cal} /> : <HowItWorks />}
       </div>
     </div>
   );
@@ -56,17 +58,24 @@ function blockedReason(a: ArmIdentity, st: SessionState | undefined, control: bo
   return null;
 }
 
-function ArmPicker({ active }: { active: string | null }) {
+function ArmPicker({ active }: { active: string[] }) {
   const arms = useStudio((s) => s.identity);
   const st = useStudio((s) => s.state?.state);
   const control = useStudio((s) => s.control);
   const tele = useStudio((s) => s.telemetry);
   const holding = Object.entries(tele?.arms ?? {}).filter(([, a]) => a.torque).map(([n]) => n);
+  const autoWhy = arms.map((a) => blockedReason(a, st, control, holding)).find((w) => w) ?? null;
 
   return (
     <section className="panel cal-arms">
       <div className="panel-head">
         <h2 className="panel-title">Arms</h2>
+        {arms.length > 0 && !active.length && (
+          <button className="btn btn-sm btn-primary" disabled={autoWhy !== null} title={autoWhy ?? "Every arm finds its own end stops"}
+            onClick={() => studio.send({ cmd: "autocal_start" })}>
+            <Wand2 aria-hidden /> Auto-calibrate
+          </button>
+        )}
       </div>
       {st === "DISCONNECTED" || !st ? (
         <div className="empty empty-action">
@@ -81,7 +90,7 @@ function ArmPicker({ active }: { active: string | null }) {
         <ul className="pick-list">
           {arms.map((a) => {
             const why = blockedReason(a, st, control, holding);
-            const isActive = active === a.name;
+            const isActive = active.includes(a.name);
             return (
               <li key={a.name} className={`pick-row ${isActive ? "is-active" : ""}`}>
                 <div className="pick-text">
@@ -94,9 +103,9 @@ function ArmPicker({ active }: { active: string | null }) {
                 {isActive ? (
                   <span className="badge tone-info">In progress</span>
                 ) : (
-                  <button className="btn btn-sm" disabled={why !== null} title={why ?? undefined}
+                  <button className="btn btn-sm btn-ghost" disabled={why !== null} title={why ?? undefined}
                     onClick={() => studio.send({ cmd: "cal_start", arm: a.name })}>
-                    Calibrate
+                    By hand
                   </button>
                 )}
               </li>
@@ -297,6 +306,179 @@ function ReviewTable({ cal }: { cal: CalView }) {
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// -- auto-calibration (autocal.py through the worker) ----------------------------------------------
+const AUTO_STEPS: { key: CalStep; title: string }[] = [
+  { key: "auto-middle", title: "Middle pose" }, { key: "auto", title: "Sweep" }, { key: "auto-review", title: "Save" },
+];
+const SCOPES: { mode: "all" | "gripper"; text: string }[] = [{ mode: "all", text: "All joints" }, { mode: "gripper", text: "Gripper only" }];
+const PHASE = { out: [ArrowRight, "far stop"], back: [ArrowLeft, "near stop"], home: [Undo2, "back"] } as const;
+const SWEEP_DEFAULT = 350; // autocal.SWEEP_LIMIT_DEFAULT, of 1000
+
+/** The SO-101 from the side in the middle pose: the model's zero pose (so101_new_calib), its body positions from the
+ * FK scaled into the picture. Upper arm up, forearm and gripper level, pointing forward. */
+function MiddlePose() {
+  const pts = "20,110 33,90 42,72 52,36 95,34 115,34 147,37";
+  return (
+    <svg className="mid-pose" viewBox="0 0 160 120" role="img" aria-label="Middle pose: upper arm straight up, forearm and gripper level, pointing forward">
+      <rect x="6" y="108" width="40" height="6" rx="2" className="mp-base" />
+      <polyline points={pts} className="mp-arm" />
+      {pts.split(" ").slice(1, 6).map((p) => { const [x, y] = p.split(",").map(Number); return <circle key={p} cx={x} cy={y} r="3.2" className="mp-joint" />; })}
+      <path d="M147,37 l9,-5 M147,37 l9,5" className="mp-jaw" />
+    </svg>
+  );
+}
+
+function AutoWizard({ runs }: { runs: CalView[] }) {
+  const control = useStudio((s) => s.control);
+  const step: CalStep = runs.every((r) => r.step === "auto-middle") ? "auto-middle"
+    : runs.some((r) => r.step === "auto") ? "auto" : "auto-review";
+  const holding = step !== "auto-middle";
+  const at = AUTO_STEPS.findIndex((s) => s.key === step);
+  const paused = runs.find((r) => r.auto?.state === "paused");
+  return (
+    <section className="panel wizard">
+      <div className="panel-head">
+        <div>
+          <h2 className="panel-title">Auto-calibration</h2>
+          <p className="panel-sub">{runs.length} {runs.length === 1 ? "arm" : "arms"}{holding ? " · holding torque" : ""}</p>
+        </div>
+        <button className="btn btn-ghost" onClick={() => studio.send({ cmd: "autocal_cancel" })} disabled={!control}
+          title={holding ? "Torque goes off: support the arms" : undefined}>
+          <RotateCcw aria-hidden /> {holding ? "Cancel (arms go limp)" : "Cancel"}
+        </button>
+      </div>
+      <ol className="stepper" aria-label="Auto-calibration steps">
+        {AUTO_STEPS.map((s, i) => (
+          <li key={s.key} className={`stepper-item ${i < at ? "is-done" : i === at ? "is-current" : ""}`} aria-current={i === at ? "step" : undefined}>
+            <span className="step-mark" aria-hidden>{i < at ? <Check /> : i + 1}</span>
+            <span className="stepper-title">{s.title}</span>
+          </li>
+        ))}
+      </ol>
+      <hr className="divider" />
+      {step === "auto-middle" && <AutoMiddle runs={runs} />}
+      {step === "auto" && (
+        <div className="wizard-body">
+          {paused && (
+            <div className="auto-paused">
+              <Pause aria-hidden /><span>{paused.auto?.why ?? "Paused"}</span>
+              <button className="btn btn-sm btn-primary" disabled={!control} onClick={() => studio.send({ cmd: "autocal_resume" })}><Play aria-hidden />Resume</button>
+            </div>
+          )}
+          <div className="auto-arms">{runs.map((r) => <AutoArm key={r.arm} run={r} />)}</div>
+          <p className="wizard-hint">Stop (Esc) pauses every arm where it is.</p>
+        </div>
+      )}
+      {step === "auto-review" && <AutoReview runs={runs} />}
+    </section>
+  );
+}
+
+function AutoMiddle({ runs }: { runs: CalView[] }) {
+  const control = useStudio((s) => s.control);
+  const [keep, setKeep] = useState<string[]>(runs.map((r) => r.arm));
+  const [scope, setScope] = useState<"all" | "gripper">("all");
+  const [torque, setTorque] = useState(SWEEP_DEFAULT);
+  const toggle = (arm: string) => setKeep(keep.includes(arm) ? keep.filter((a) => a !== arm) : [...keep, arm]);
+  const go = () => studio.send({
+    cmd: "autocal_go", arms: keep, joints: scope === "gripper" ? ["gripper"] : undefined,
+    torque: torque === SWEEP_DEFAULT ? undefined : torque,
+  });
+  return (
+    <div className="wizard-body">
+      <div className="auto-middle">
+        <MiddlePose />
+        <div className="instr">
+          <p className="instr-lead">Put each arm in the middle pose, then Start: the arms hold themselves.</p>
+          <ul className="auto-tips">
+            <li>Roughly is enough</li>
+            <li>Wrist roll takes its zero here: gripper not twisted</li>
+            <li>Clear the workspace: the arms move</li>
+          </ul>
+        </div>
+      </div>
+      <div className="auto-opts">
+        <div className="auto-chips" role="group" aria-label="Arms">
+          {runs.map((r) => (
+            <button key={r.arm} type="button" className={`auto-chip ${keep.includes(r.arm) ? "is-on" : ""}`} aria-pressed={keep.includes(r.arm)}
+              onClick={() => toggle(r.arm)}>{keep.includes(r.arm) && <Check aria-hidden className="ico-inline" />}{label(r.arm)}</button>
+          ))}
+        </div>
+        <Segmented label="Joints" value={scope} options={SCOPES} onChange={setScope} />
+        <details className="auto-adv">
+          <summary>Advanced</summary>
+          <label className="auto-torque">
+            <span>Sweep torque</span>
+            <input type="range" min={150} max={600} step={10} value={torque} onChange={(e) => setTorque(Number(e.target.value))} />
+            <span className="num">{Math.round(torque / 10)}%</span>
+          </label>
+          <p className="faint t-sm">How hard a joint may press into its stops. The gripper never goes over 20%.</p>
+        </details>
+      </div>
+      <div className="wizard-actions">
+        <span className="wizard-hint">{scope === "gripper" ? "A first, careful run: one joint per arm." : "About two minutes; the shoulder pans take turns."}</span>
+        <button className="btn btn-primary" disabled={!control || !keep.length} onClick={go}><Wand2 aria-hidden /> Start</button>
+      </div>
+    </div>
+  );
+}
+
+function AutoArm({ run }: { run: CalView }) {
+  const a = run.auto;
+  const order = a?.joints ?? [];
+  const pos = (x: number) => `${(Math.min(4095, Math.max(0, x)) / 4095) * 100}%`;
+  const state = run.step === "auto-failed" ? ["danger", "Failed"] : run.step === "auto-review" ? ["ok", "Done"]
+    : a?.state === "paused" ? ["warn", "Paused"] : a?.joint ? ["info", label(a.joint)] : ["neutral", "Waiting"];
+  return (
+    <div className="auto-arm">
+      <div className="auto-arm-head">
+        <span className="strong">{label(run.arm)}</span>
+        <span className={`badge tone-${state[0]}`}>{state[1]}</span>
+      </div>
+      <ul className="auto-joints">
+        {order.map((j) => {
+          const f = a?.found[j];
+          const now = a?.joint === j && run.step === "auto";
+          const v = run.joints[j];
+          const [Icon, what] = now && a?.waiting ? [Hourglass, "waits its turn"] : now && a?.phase ? PHASE[a.phase] : [null, ""];
+          return (
+            <li key={j} className={`aj ${f ? "is-done" : now ? "is-now" : ""}`}>
+              <span className="aj-name">{label(j)}</span>
+              <span className="aj-track" aria-hidden>
+                {f && <span className="aj-fill" style={{ left: pos(f.lo), width: `calc(${pos(f.hi)} - ${pos(f.lo)})` }} />}
+                {v && (now || f) && <span className="aj-pos" style={{ left: pos(v.pos) }} />}
+              </span>
+              <span className="aj-val num">{f ? `${f.deg.toFixed(0)}°` : Icon ? <><Icon aria-hidden className="ico-inline" />{what}</> : ""}</span>
+            </li>
+          );
+        })}
+      </ul>
+      {a?.state === "failed" && <p className="text-danger t-sm">{a.why}</p>}
+      {Object.entries(a?.notes ?? {}).map(([j, n]) => <p key={j} className="text-warn t-sm">{label(j)}: {n}</p>)}
+    </div>
+  );
+}
+
+function AutoReview({ runs }: { runs: CalView[] }) {
+  const control = useStudio((s) => s.control);
+  const failed = runs.filter((r) => r.step === "auto-failed").map((r) => r.arm);
+  return (
+    <div className="wizard-body">
+      <div className="auto-arms">{runs.map((r) => <AutoArm key={r.arm} run={r} />)}</div>
+      <details className="auto-adv">
+        <summary>Registers, old and new</summary>
+        {runs.filter((r) => r.new).map((r) => <div key={r.arm}><p className="strong t-sm">{label(r.arm)}</p><ReviewTable cal={r} /></div>)}
+      </details>
+      <div className="wizard-actions">
+        <span className="wizard-hint">
+          Support the arms: Save turns their torque off.{failed.length ? ` ${labels(failed)} ${failed.length === 1 ? "keeps its" : "keep their"} old calibration.` : ""}
+        </span>
+        <button className="btn btn-primary" disabled={!control} onClick={() => studio.send({ cmd: "autocal_save" })}>Save</button>
+      </div>
     </div>
   );
 }

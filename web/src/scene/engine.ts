@@ -33,7 +33,8 @@ export interface EngineOptions {
   onProgress: (loaded: number, total: number) => void;
   onCameraEdit: (key: string, pose: CamPose) => void;
   onSelectCamera: (key: string | null) => void;
-  onWristView: (on: boolean) => void;
+  onWristView: (key: string | null) => void; // the wrist camera the view looks through, or null: orbiting
+  onWrists: (keys: string[]) => void; // the wrist cameras riding on an arm now, left before right
   onLoadError: (message: string | null) => void; // a mesh did not load; null: loading again
   onContextLost: (lost: boolean) => void; // the browser took the GPU context away, or gave it back
 }
@@ -545,6 +546,8 @@ export class Engine {
   private shadowsDirty = true;
   private tween: { from: [THREE.Vector3, THREE.Vector3]; to: [THREE.Vector3, THREE.Vector3]; t0: number; ms: number } | null = null;
   private wristView = false;
+  private rideKey: string | null = null; // the wrist camera picked to look through; null: the chosen arm's
+  private wristKeys = "";
   private lastInput = performance.now();
   private lastFrameAt = performance.now();
   private editing: string | null = null;
@@ -841,6 +844,9 @@ export class Engine {
 
   private syncCameras(): void {
     this.mounts = this.wristMounts();
+    const keys = [...this.mounts.keys()].sort();
+    if (keys.join() !== this.wristKeys) { this.wristKeys = keys.join(); this.opts.onWrists(keys); }
+    if (this.wristView && !this.wristRide()) this.exitWrist();
     // The camera bodies are drawn on each follower that carries a wrist camera.
     for (const sl of this.slots) for (const p of sl.arm.wristParts) p.visible = [...this.mounts.values()].includes(sl);
     const want = this.settings.frustums ? frustumKeys(Object.keys(studio.snap.cameras)) : [];
@@ -976,8 +982,26 @@ export class Engine {
     this.lastInput = performance.now();
   }
 
-  /** The wrist camera the Wrist view looks through: the one on the chosen follower, else the first mounted. */
+  /** Look through one wrist camera, or with no key the chosen follower's. From one wrist camera straight to
+   * another, without orbiting in between. */
+  rideWrist(key?: string): void {
+    if (key !== undefined && !this.mounts.has(key)) return;
+    if (!this.wristView) { this.rideKey = key ?? null; this.enterWrist(); return; }
+    if (key === undefined || key === this.wristRide()?.key) return;
+    const was = this.cams.get(this.wristRide()?.key ?? "");
+    if (was) was.group.visible = true;
+    this.rideKey = key;
+    const wc = this.cams.get(key);
+    if (wc) wc.group.visible = false; // its own frustum would sit in front of the lens
+    this.opts.onWristView(key);
+    this.dirty = true;
+  }
+
+  /** The wrist camera the Wrist view looks through: the one picked, else the one on the chosen follower, else the
+   * first mounted. */
   private wristRide(): { key: string; slot: Slot } | null {
+    const picked = this.rideKey ? this.mounts.get(this.rideKey) : undefined;
+    if (picked) return { key: this.rideKey!, slot: picked };
     const pick = this.wristArm();
     let first: { key: string; slot: Slot } | null = null;
     for (const [key, slot] of this.mounts) {
@@ -991,10 +1015,11 @@ export class Engine {
     if (!this.wristRide() || this.wristView) return;
     this.wristView = true;
     this.controls.enabled = false;
-    const wc = this.cams.get(this.wristRide()!.key);
+    const ride = this.wristRide()!;
+    const wc = this.cams.get(ride.key);
     if (wc) wc.group.visible = false; // its own frustum would sit in front of the lens
     this.tween = null;
-    this.opts.onWristView(true);
+    this.opts.onWristView(ride.key);
     this.dirty = true;
   }
 
@@ -1009,7 +1034,8 @@ export class Engine {
     // Orbit about a point ahead of where the wrist camera was looking.
     const ahead = new THREE.Vector3(0, 0, -0.25).applyQuaternion(this.camera.quaternion).add(this.camera.position);
     this.controls.target.copy(ahead);
-    this.opts.onWristView(false);
+    this.rideKey = null;
+    this.opts.onWristView(null);
     this.dirty = true;
   }
 
@@ -1236,7 +1262,7 @@ export class Engine {
       const p = s.arm.root.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(-0.12, 0, 0)); // behind the base
       const posed = this.posed?.arm === s.slot.name ? this.posed : null;
       if (posed) { place(s.pill, p, `${label(s.slot.name)}: ${posed.text}`, posed.q ? "accent" : "warn"); continue; }
-      const what = s.problem ?? (!s.seen ? "no reading yet, drawn at zero" : !s.online ? "not answering" : stale ? "no reading" : "");
+      const what = s.problem ?? (!s.seen ? "no reading" : !s.online ? "not answering" : stale ? "stale" : "");
       place(s.pill, p, what ? `${label(s.slot.name)}: ${what}` : label(s.slot.name), what ? "warn" : "neutral");
     }
     for (const c of this.cams.values()) {

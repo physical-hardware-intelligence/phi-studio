@@ -23,10 +23,7 @@
   overflow-y: auto;
 }
 .brand { display: flex; align-items: center; gap: 10px; padding: var(--space-1) var(--space-2) 0; }
-.brand-mark {
-  display: grid; place-items: center; width: 26px; height: 1.75rem; border-radius: var(--radius-lg);
-  background: var(--action-primary-bg); color: var(--action-primary-fg); font: 600 var(--text-md)/1 var(--font-sans);
-}
+.brand-mark { display: block; flex: none; width: 30px; height: 30px; color: var(--text-primary); }
 .brand-text { display: grid; }
 .brand-name { font-weight: 600; font-size: var(--text-base); line-height: 1.4375rem; }
 .brand-rig { font-size: var(--text-sm); line-height: 1.3125rem; color: var(--text-tertiary); }

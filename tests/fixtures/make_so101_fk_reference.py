@@ -20,9 +20,8 @@ phi env runs). Use a separate venv:
         tests/fixtures/so101_fk_reference.json /path/to/phi/simulation/so101_forward_kinematics.py
 
 The committed fixture was made with mujoco 3.14.0 and numpy 2.5.3, and phi's
-so101_forward_kinematics.py with sha256 3c04f879...cb64bc19. Running the command above reproduces
-it byte for byte (checked 2026-10-04). The 4 random poses come from a fixed seed (20261004).
-"""
+so101_forward_kinematics.py with sha256 3c04f879...cb64bc19. Running the command above reproduces it
+byte for byte (checked 2026-10-04). The 4 random poses come from a fixed seed (20261004). """
 
 import importlib.util
 import json
@@ -70,10 +69,15 @@ for key, q in poses.items():
     bodies = {}
     for b in range(1, m.nbody):
         bodies[mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b)] = {
-            "pos": d.xpos[b].tolist(), "quat": d.xquat[b].tolist()}
+            "pos": d.xpos[b].tolist(),
+            "quat": d.xquat[b].tolist(),
+        }
     sid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
-    rec = {"q": q.tolist(), "bodies": bodies,
-           "gripperframe": {"pos": d.site_xpos[sid].tolist(), "mat": d.site_xmat[sid].tolist()}}
+    rec = {
+        "q": q.tolist(),
+        "bodies": bodies,
+        "gripperframe": {"pos": d.site_xpos[sid].tolist(), "mat": d.site_xmat[sid].tolist()},
+    }
     if key in ("zero", "random0"):
         # World bounding box of every visual mesh as MuJoCo places it: its stored vertices are
         # recentred, so this also checks Studio's use of the raw STL with the geom pos/quat.
@@ -83,12 +87,17 @@ for key, q in poses.items():
                 continue
             mid = m.geom_dataid[g]
             a, n = m.mesh_vertadr[mid], m.mesh_vertnum[mid]
-            v = m.mesh_vert[a:a + n].astype(float)
+            v = m.mesh_vert[a : a + n].astype(float)
             w = d.geom_xpos[g] + v @ d.geom_xmat[g].reshape(3, 3).T
-            boxes.append({"geom": int(g), "body": mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY,
-                                                                    m.geom_bodyid[g]),
-                          "mesh": mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_MESH, mid),
-                          "min": w.min(0).tolist(), "max": w.max(0).tolist()})
+            boxes.append(
+                {
+                    "geom": int(g),
+                    "body": mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, m.geom_bodyid[g]),
+                    "mesh": mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_MESH, mid),
+                    "min": w.min(0).tolist(),
+                    "max": w.max(0).tolist(),
+                }
+            )
         rec["visual_boxes"] = boxes
     g = phi_gripper(np.rad2deg(q[:5]))
     rec["phi_fk_gripper"] = {"pos": g[:3, 3].tolist(), "mat": g[:3, :3].reshape(-1).tolist()}

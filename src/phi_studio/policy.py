@@ -38,9 +38,14 @@ class PolicyInfo:
     available: bool
     note: str = ""
     factory: Callable[[float], Policy] | None = None  # control rate in Hz -> policy
+    # The camera features it reads (observation.images.*): what Run and Evaluate check is in line
+    # before it moves an arm (Preflight.tsx). The scripted mock reads none.
+    cameras: tuple[str, ...] = ()
+    dataset: str | None = None  # the dataset it was trained on, when known: what to align against
 
     def public(self) -> dict[str, object]:
-        return {"id": self.id, "name": self.name, "available": self.available, "note": self.note}
+        return {"id": self.id, "name": self.name, "available": self.available, "note": self.note,
+                "cameras": list(self.cameras), "dataset": self.dataset}  # fmt: skip
 
 
 # Keyframes of a reach, grasp, lift, carry and release, in absolute joint degrees (gripper 0-100,

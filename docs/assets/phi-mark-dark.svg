@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="500" height="500" role="img" aria-label="Phi mark">
+  <!-- The Φ lab mark, as physical-hardware-intelligence.github.io/assets/phi-mark-ink.svg -->
+  <g fill="none" stroke="#EDEDEF" stroke-width="30" stroke-linecap="butt">
+    <path d="M 279.5 118 A 136 136 0 0 1 279.5 382"/>
+    <path d="M 220.5 118 A 136 136 0 0 0 220.5 382"/>
+  </g>
+  <rect x="239" y="56" width="22" height="388" rx="11" fill="#EDEDEF"/>
+  <circle cx="193" cy="254" r="21" fill="#EDEDEF"/>
+  <circle cx="307" cy="254" r="21" fill="#EDEDEF"/>
+</svg>

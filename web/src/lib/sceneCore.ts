@@ -29,7 +29,11 @@ export interface CamPose { pos: Vec3; target: Vec3; up: Vec3; fovy_deg: number }
 export type ViewMode = "both" | "3d" | "cameras";
 export type PrintColour = "model" | "white" | "grey" | "black" | "orange" | "red" | "blue";
 
+/** What the 3D view is for right now. Each mode draws only the layers its question needs (MODE_LAYERS). */
+export type SceneMode = "pose" | "cameras" | "policy";
+
 export interface Settings {
+  mode: SceneMode;
   spacing: number | null; // metres between the two followers; null: the default
   cameras: Record<string, CamPose>; // user-placed cameras that differ from the default
   ghost: boolean; // the leader (or the policy target) as a translucent arm
@@ -42,9 +46,17 @@ export interface Settings {
   view: Record<string, ViewMode>; // per page
 }
 
+/** Pose: does the twin match the arm, is a joint near its limit (leader as a ghost). Cameras: where each camera
+ * sits and what it sees. Policy: where the policy is taking the arm (its target as a ghost, the gripper's path). */
+export const MODE_LAYERS: Record<SceneMode, Pick<Settings, "ghost" | "trail" | "frustums" | "video">> = {
+  pose: { ghost: true, trail: false, frustums: false, video: false },
+  cameras: { ghost: false, trail: false, frustums: true, video: true },
+  policy: { ghost: true, trail: true, frustums: false, video: false },
+};
+
 export const DEFAULTS: Settings = {
-  spacing: null, cameras: {}, ghost: true, trail: true, frustums: true, video: true, autoRotate: false,
-  print: "model", wristArm: null, view: {},
+  mode: "pose", ...MODE_LAYERS.pose,
+  spacing: null, cameras: {}, autoRotate: false, print: "model", wristArm: null, view: {},
 };
 
 // Printed-part colours as sRGB, physical material data rather than UI colour. "model" is the MJCF's own material
@@ -87,6 +99,7 @@ export function parseSettings(raw: string | null): Settings {
   let s: unknown;
   try { s = raw ? JSON.parse(raw) : null; } catch { return out; }
   if (!isObj(s)) return out;
+  if (typeof s.mode === "string" && Object.hasOwn(MODE_LAYERS, s.mode)) out.mode = s.mode as SceneMode;
   if (isNum(s.spacing) && s.spacing >= SPACING.min && s.spacing <= SPACING.max) out.spacing = s.spacing;
   for (const k of ["ghost", "trail", "frustums", "video", "autoRotate"] as const) if (typeof s[k] === "boolean") out[k] = s[k];
   if (typeof s.print === "string" && Object.hasOwn(PRINT, s.print)) out.print = s.print as PrintColour;

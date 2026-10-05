@@ -16,6 +16,7 @@ dependencies = [
     "pyserial>=3.5",
     "pyyaml>=6.0",
     "huggingface_hub>=1.0,<2",  # the range LeRobot 0.6.0 requires
+    "pyarrow>=14",  # reads LeRobot datasets (parquet) without importing LeRobot or torch
 ]
 
 [project.optional-dependencies]
@@ -35,7 +36,7 @@ phi_studio = ["static/**/*", "assets/**/*"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["src/phi_studio/camera_realign.py", "src/phi_studio/camera_backend.py"]
+extend-exclude = ["src/phi_studio/camera_realign.py", "src/phi_studio/camera_backend.py", "**/._*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

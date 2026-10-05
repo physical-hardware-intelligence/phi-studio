@@ -1,12 +1,13 @@
 // The 3D view's canvas with its toolbar and notes. The default export, so pages load it with React.lazy and
 // three.js arrives only when a 3D view is on screen.
-import { ArrowLeft, Maximize2, Minimize2, OctagonX, Rotate3d, RotateCw, Scan } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ArrowLeft, Info, Maximize2, Minimize2, OctagonX, Rotate3d, RotateCw, Scan, ScanSearch, SlidersHorizontal } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { label } from "../lib/labels";
-import { scene, useScene } from "../lib/scene";
+import { MODE_LAYERS, scene, type SceneMode, type Settings, useScene } from "../lib/scene";
 import { studio, useStudio, useTheme } from "../lib/studio";
 import { Engine, type Preset, type Theme } from "./engine";
 import { PointLayers } from "./pointcloud";
+import { Segmented } from "./ViewSwitch";
 
 let live = 0; // engines alive now; the leak check reads it through globalThis.__phiScene
 
@@ -34,22 +35,38 @@ function readTheme(el: HTMLElement): Theme {
 }
 
 const PRESETS: Preset[] = ["front", "side", "top"];
+const MODES: { mode: SceneMode; text: string }[] = [
+  { mode: "pose", text: "Pose" }, { mode: "cameras", text: "Cameras" }, { mode: "policy", text: "Policy" },
+];
+// The info tooltip: what the drawing means in each mode.
+const LEGEND: Record<SceneMode, (policy: boolean) => string> = {
+  pose: (policy) => `Solid: follower. Ghost: ${policy ? "policy target" : "leader"}. Grid: 5 cm squares.`,
+  cameras: () => "Each cone is a camera: where it sits, where it looks, and its live picture. Wrist cameras ride on their arm.",
+  policy: () => "Ghost: where the policy is sending the follower. Line: the gripper's path over the last 3 s.",
+};
+/** left_wrist -> "Left wrist camera"; the plain wrist key -> "Wrist camera". */
+const wristName = (k: string) => `${k.charAt(0).toUpperCase()}${k.slice(1).replace(/_/g, " ")} camera`;
+const wristShort = (k: string) => k.replace(/^left_/, "L ").replace(/^right_/, "R ").replace(/^wrist$/, "Wrist");
 const mb = (b: number) => (b / 1e6).toFixed(1);
 
-export default function Viewer({ compact = false }: { compact?: boolean }) {
+/** onSettings: a gear at the end of the toolbar opens the page's settings (the 3D view page passes one).
+ * mode: a fixed mode for a page with one job (Teleoperate: pose, Run policy: policy); the switch then hides. */
+export default function Viewer({ compact = false, onSettings, mode }: { compact?: boolean; onSettings?: () => void; mode?: SceneMode }) {
   const stage = useRef<HTMLDivElement>(null);
   const host = useRef<HTMLDivElement>(null);
   const labels = useRef<HTMLDivElement>(null);
   const engine = useRef<Engine | null>(null);
   const model = useScene((s) => s.model);
   const error = useScene((s) => s.error);
-  const settings = useScene((s) => s.settings);
+  const saved = useScene((s) => s.settings);
+  const settings: Settings = useMemo(() => (mode ? { ...saved, mode, ...MODE_LAYERS[mode] } : saved), [saved, mode]);
   const editing = useScene((s) => s.editing);
   const units = useScene((s) => s.units);
   const theme = useTheme();
   const policy = useStudio((s) => s.state?.activity === "policy");
   const [progress, setProgress] = useState<[number, number] | null>(null);
-  const [wrist, setWrist] = useState(false);
+  const [wrist, setWrist] = useState<string | null>(null); // the wrist camera looked through, or null
+  const [wrists, setWrists] = useState<string[]>([]);
   const [full, setFull] = useState(false);
   const [glError, setGlError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -66,13 +83,14 @@ export default function Viewer({ compact = false }: { compact?: boolean }) {
     if (!model || !host.current || !labels.current) return;
     let e: Engine;
     try {
-      e = new Engine(host.current, model, scene.snap.settings, {
+      e = new Engine(host.current, model, mode ? { ...scene.snap.settings, mode, ...MODE_LAYERS[mode] } : scene.snap.settings, {
         compact,
         labels: labels.current,
         onProgress: (a, b) => setProgress([a, b]),
         onCameraEdit: (k, p) => scene.setCamera(k, p),
         onSelectCamera: (k) => scene.edit(k),
         onWristView: setWrist,
+        onWrists: setWrists,
         onLoadError: setLoadError,
         onContextLost: setLost,
       });
@@ -102,6 +120,9 @@ export default function Viewer({ compact = false }: { compact?: boolean }) {
   useEffect(() => { engine.current?.setUnits(units); }, [units]);
   useEffect(() => { if (engine.current && host.current) engine.current.setTheme(readTheme(host.current)); }, [theme]);
 
+  // Riding a wrist camera belongs to Cameras mode; leaving the mode goes back to orbiting.
+  useEffect(() => { if (settings.mode !== "cameras") engine.current?.frame("home"); }, [settings.mode]);
+
   useEffect(() => {
     const on = () => setFull(document.fullscreenElement === stage.current);
     document.addEventListener("fullscreenchange", on);
@@ -123,39 +144,54 @@ export default function Viewer({ compact = false }: { compact?: boolean }) {
       <div ref={host} className="scene-host" />
       <div ref={labels} className="scene-labels" aria-hidden />
 
+      <div className="scene-left">
+        {full && (
+          // WHY: full screen covers the top bar and its Stop. This one calls the same studio.stop().
+          <button type="button" className="btn stop-btn is-live" onClick={() => studio.stop()} aria-keyshortcuts="Escape">
+            <OctagonX aria-hidden /> Stop
+          </button>
+        )}
+        {!mode && <Segmented label="What the 3D view shows" value={settings.mode} options={MODES} onChange={(m) => scene.setMode(m)} />}
+      </div>
+
       <div className="scene-tools" role="toolbar" aria-label="3D view">
-        {PRESETS.map((p) => (
+        {settings.mode === "cameras" ? (
+          <>
+            {wrists.map((k) => (
+              <button key={k} type="button" className={`btn btn-sm btn-ghost ${wrist === k ? "is-on" : ""}`} aria-pressed={wrist === k}
+                onClick={() => (wrist === k ? engine.current?.frame("home") : engine.current?.rideWrist(k))}
+                title={`Look through the ${wristName(k).toLowerCase()}`}>{wristShort(k)}</button>
+            ))}
+            <a className="btn btn-sm btn-ghost" href="#/align" title="Put each camera back where the training data was recorded">
+              <ScanSearch aria-hidden />Align
+            </a>
+          </>
+        ) : PRESETS.map((p) => (
           <button key={p} type="button" className="btn btn-sm btn-ghost" onClick={() => engine.current?.frame(p)}>{label(p)}</button>
         ))}
-        <button type="button" className={`btn btn-sm btn-ghost ${wrist ? "is-on" : ""}`} aria-pressed={wrist}
-          onClick={() => engine.current?.frame(wrist ? "home" : "wrist")} title="Look through the wrist camera">Wrist</button>
         <span className="scene-tools-gap" />
         <button type="button" className="btn btn-sm btn-ghost btn-icon" onClick={() => engine.current?.fit()} title="Fit the arms in view" aria-label="Fit the arms in view"><Scan /></button>
         <button type="button" className={`btn btn-sm btn-ghost btn-icon ${settings.autoRotate ? "is-on" : ""}`} aria-pressed={settings.autoRotate}
           onClick={autoRotate} title="Turn slowly after 6 s without input" aria-label="Turn slowly when idle"><Rotate3d /></button>
         <button type="button" className="btn btn-sm btn-ghost btn-icon" onClick={fullscreen}
           title={full ? "Leave full screen" : "Full screen"} aria-label={full ? "Leave full screen" : "Full screen"}>{full ? <Minimize2 /> : <Maximize2 />}</button>
+        {onSettings && (
+          <button type="button" className="btn btn-sm btn-ghost btn-icon" onClick={onSettings} title="Settings" aria-label="3D view settings"><SlidersHorizontal /></button>
+        )}
       </div>
 
       {wrist && (
         <div className="scene-banner">
           <button type="button" className="btn btn-sm" onClick={() => engine.current?.frame("home")}><ArrowLeft />Back to orbit</button>
-          <span>Wrist camera. Mount pose from the CAD; vertical field of view estimated, not measured.</span>
+          <span title="Mount pose from the CAD; vertical field of view estimated, not measured.">{wristName(wrist)}</span>
         </div>
       )}
 
-      <div className="scene-notes">
-        {settings.ghost && <span>Solid: follower. Ghost: {policy ? "policy target" : "leader"}.</span>}
-        <span>Grid: 5 cm squares.</span>
-        <span>Joint angles go through an assumed mapping, not checked on a physical arm.</span>
-      </div>
-
-      {full && (
-        // WHY: full screen covers the top bar and its Stop. This one calls the same studio.stop().
-        <button type="button" className="btn stop-btn is-live scene-stop" onClick={() => studio.stop()} aria-keyshortcuts="Escape">
-          <OctagonX aria-hidden /> Stop
-        </button>
-      )}
+      {/* WHY a tooltip, not a footnote: the caveats matter, but three sentences under the arms crowd them. */}
+      <span className="scene-info" tabIndex={0}
+        title={`${LEGEND[settings.mode](policy)} Joint angles go through an assumed mapping, not yet checked on a physical arm.`}>
+        <Info aria-hidden />
+      </span>
 
       {(error || glError) && <div className="scene-overlay"><p className="scene-error">{glError ?? error}</p></div>}
       {loadError && !error && !glError && (

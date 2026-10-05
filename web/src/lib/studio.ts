@@ -40,7 +40,32 @@ export interface ArmTelemetry {
   health: Record<string, JointHealth>;
 }
 export interface JointCal { id: number; drive_mode: number; homing_offset: number; range_min: number; range_max: number }
-export type CalStep = "middle" | "ranges" | "review";
+export type CalStep = "middle" | "ranges" | "review" | "auto-middle" | "auto" | "auto-review" | "auto-failed";
+// An auto-calibration sweep (autocal.py view): where it is and the stops it found, in raw ticks.
+export interface AutoView {
+  state: "running" | "paused" | "done" | "failed";
+  why: string | null;
+  joints: string[];
+  joint: string | null;
+  phase: "out" | "back" | "home" | null;
+  found: Record<string, { lo: number; hi: number; deg: number }>;
+  notes: Record<string, string>;
+  waiting?: boolean; // holding for another arm's shoulder-pan turn
+}
+// A take's health check (recorder.py Take.health): analysis flags plus what only recording knows.
+export interface TakeHealth {
+  episode: number; frames: number; seconds: number; dropped: number; late: number; hz?: number;
+  health: "ok" | "info" | "warn" | "error";
+  flags: { kind: string; severity: string; text: string }[];
+}
+export interface RecView {
+  repo_id: string; root: string; task: string;
+  phase: "warmup" | "record" | "reset" | "paused" | "done";
+  episode: number; of: number; t: number; limit: number | null;
+  frames: number; target: number; why: string | null; late: number;
+  dropped: number; saved: number; error: string | null; finished: boolean; ready: boolean;
+  takes: TakeHealth[];
+}
 export interface CalView {
   arm: string;
   role: "leader" | "follower";
@@ -48,6 +73,7 @@ export interface CalView {
   joints: Record<string, { min: number; pos: number; max: number; fixed: boolean }>; // raw ticks
   old: Record<string, JointCal>;
   new: Record<string, JointCal> | null;
+  auto?: AutoView | null;
 }
 export interface PolicyView {
   id: string;
@@ -72,10 +98,15 @@ export interface Telemetry {
   arms: Record<string, ArmTelemetry>;
   loop: { hz: number; p50_ms: number; p99_ms: number };
   calibration: CalView | null;
+  autocal?: CalView[] | null; // every arm an auto-calibration sweeps
+  recording?: RecView | null; // the recording, also after it ends (recorder.py Recording.view)
   policy: PolicyView | null;
 }
 
-export interface PolicyInfo { id: string; name: string; available: boolean; note: string }
+// cameras: the camera features the policy reads; dataset: what it was trained on, when known (policy.py).
+export interface PolicyInfo { id: string; name: string; available: boolean; note: string; cameras?: string[]; dataset?: string | null }
+// The last camera align (setup_api.py record): were all cameras in line with that dataset's resting frame.
+export interface AlignResult { root: string; episode: number; at: number; aligned: boolean; cameras: Record<string, boolean> }
 export interface RigInfo {
   mock: boolean;
   bimanual: boolean;
@@ -192,6 +223,7 @@ export interface Snapshot {
   assist: Assist;
   files: FilesState;
   checks: ChecksState;
+  align: AlignResult | null;
 }
 
 export interface Frame { key: string; t: number; seq: number; w: number; h: number; jpeg: Blob }
@@ -218,6 +250,7 @@ class Studio {
     assist: { open: false, status: null, turns: [], focus: null, context: null },
     files: { index: null, open: null, loading: null, error: null, search: null, searching: null, ports: null },
     checks: { running: false, at: null, ms: null, results: null },
+    align: null,
   };
   private turnId = 0;
   private activityId = 0;
@@ -469,7 +502,7 @@ class Studio {
       // telemetry and camera status stream again within a tick, so a value kept from an earlier server
       // (a restarted Studio) would otherwise stay on screen for good. Checks keep their own timestamp.
       case "hello":
-        this.set({ mock: m.mock, control: m.control, client: m.client ?? null, workerExit: null, identity: [], telemetry: null, cameras: {} });
+        this.set({ mock: m.mock, control: m.control, client: m.client ?? null, workerExit: null, identity: [], telemetry: null, cameras: {}, align: null });
         break;
       case "control":
         if ("control" in m) this.set({ control: m.control });
@@ -490,6 +523,7 @@ class Studio {
         break;
       }
       case "telemetry": this.set({ telemetry: m }); break;
+      case "align_result": this.set({ align: { root: m.root, episode: m.episode, at: m.at, aligned: !!m.aligned, cameras: m.cameras ?? {} } }); break;
       case "rig": this.set({ rig: { mock: m.mock, bimanual: !!m.bimanual, arms: m.arms, policies: m.policies, cal_dir: m.cal_dir } }); break;
       case "eval": this.set({ evals: { current: m.current, past: m.past, dir: m.dir } }); break;
       case "calibrated":
@@ -582,8 +616,8 @@ export function useStudio<T>(select: (s: Snapshot) => T): T {
 }
 
 // -- routing and theme -------------------------------------------------------------------------
-export type Route = "overview" | "checks" | "setup" | "calibrate" | "teleop" | "scene" | "train" | "models" | "policy" | "evaluate" | "files" | "guide";
-export const ROUTES: Route[] = ["overview", "checks", "setup", "calibrate", "teleop", "scene", "train", "models", "policy", "evaluate", "files", "guide"];
+export type Route = "overview" | "checks" | "setup" | "calibrate" | "teleop" | "scene" | "align" | "record" | "data" | "issues" | "train" | "models" | "policy" | "evaluate" | "files" | "guide" | "settings" | "onboard";
+export const ROUTES: Route[] = ["overview", "checks", "setup", "calibrate", "teleop", "scene", "align", "record", "data", "issues", "train", "models", "policy", "evaluate", "files", "guide", "settings", "onboard"];
 
 // A route is the hash's first segment; the guide also takes a section, as in #/guide/teleop.
 function hashParts(): string[] { return location.hash.replace(/^#\/?/, "").split("/"); }
@@ -591,6 +625,15 @@ function hashParts(): string[] { return location.hash.replace(/^#\/?/, "").split
 function readRoute(): Route {
   const r = hashParts()[0] as Route;
   return ROUTES.includes(r) ? r : "overview";
+}
+
+/** Every segment after the route: #/data/<dataset>/<episode> gives ["<dataset>", "<episode>"]. */
+export function useSubpath(): string[] {
+  const raw = useSyncExternalStore(
+    (l) => { window.addEventListener("hashchange", l); return () => window.removeEventListener("hashchange", l); },
+    () => hashParts().slice(1).join("/"),
+  );
+  return raw ? raw.split("/").map(decodeURIComponent) : [];
 }
 
 export function useSection(): string | null {

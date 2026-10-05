@@ -15,6 +15,11 @@ Rules it enforces, whatever the UI sends:
   * a fault clears only with torque off, since clearing re-checks every arm's identity
   * calibration runs only with every arm's torque off, never on an arm whose cable is swapped, and
     restores the old registers if it ends any way other than Save
+  * recording only writes what teleop already does: it reads, it never moves an arm, and it ends
+    with the session's motion (a stop, a fault, a lost heartbeat)
+  * auto-calibration turns torque on its own follower only, writes goal = present first, presses
+    into the stops only through a lowered torque limit, pauses on Stop or a lost heartbeat, and
+    writes registers only with that arm's torque off (a new homing under torque would jump it)
   * a policy drives followers only while MOVING, through the same clip as teleop, and stops itself
     at its time limit
 """
@@ -30,7 +35,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from phi_studio import rigspec
+import numpy as np
+
+from phi_studio import autocal, recorder, rigspec
 from phi_studio.identity import Calibration, JointCal, match_fingerprint, save_calibration
 from phi_studio.policy import Policy, PolicyInfo, catalog, is_finite_number
 from phi_studio.rig import BUS_ERRORS, JOINTS, ArmBus, JointHealth, label, labels
@@ -48,11 +55,15 @@ STOP_REASONS = {"user", "window closed", "control moved"}  # what a stop message
 FULL_TURN = "wrist_roll"
 FULL_RANGE = (0, 4095)
 POLICY_LIMIT_S = (1.0, 600.0)
+REC_LIMITS = {"episodes": (1, 500), "episode_s": (1.0, 600.0), "reset_s": (0.0, 300.0)}
+FULL_TORQUE = 1000  # Torque_Limit's top: what a swept joint goes back to
+FINISH_S = 15.0  # how long a closing worker waits for a recording to finalize (usually < 1 s)
 
 
 @dataclass
 class CalRun:
-    """One arm's calibration in progress: middle -> ranges -> review, then save or cancel."""
+    """One arm's calibration in progress. By hand: middle -> ranges -> review. Auto: auto-middle ->
+    auto (the sweep) -> auto-review, or auto-failed. Then save or cancel."""
 
     arm: ArmBus
     old: Calibration  # registers before calibration, written back on cancel
@@ -63,16 +74,25 @@ class CalRun:
     mins: dict[str, int] = field(default_factory=dict)
     maxes: dict[str, int] = field(default_factory=dict)
     new: Calibration | None = None
+    joints: list[str] = field(default_factory=list)  # auto: the joints asked for
+    auto: autocal.AutoCal | None = None
+    limited: str | None = None  # auto: the joint whose torque limit is lowered now
+    torque: int | None = None  # auto: Torque_Limit for a swept joint; None: autocal.sweep_limit
+    waiting: bool = False  # auto: holding for another arm's shoulder-pan turn
 
     def view(self) -> dict[str, Any]:
         joints = {}
-        for j in self.pos:
-            lo, hi = FULL_RANGE if j == FULL_TURN else (self.mins[j], self.maxes[j])
-            joints[j] = {"min": lo, "pos": self.pos[j], "max": hi, "fixed": j == FULL_TURN}
+        found = self.auto.found if self.auto else {}
+        for j, p in self.pos.items():
+            lo, hi = (FULL_RANGE if j == FULL_TURN else found.get(j)
+                      or (self.mins.get(j, p), self.maxes.get(j, p)))  # fmt: skip
+            joints[j] = {"min": lo, "pos": p, "max": hi, "fixed": j == FULL_TURN}
         return {"arm": self.arm.name, "role": self.arm.role, "step": self.step, "joints": joints,
                 "old": {j: c._asdict() for j, c in self.old.items()},
                 "new": ({j: c._asdict() for j, c in self.new.items()}
-                        if self.new else None)}  # fmt: skip
+                        if self.new else None),
+                "auto": ({**self.auto.view(), "waiting": self.waiting}
+                         if self.auto else None)}  # fmt: skip
 
 
 @dataclass
@@ -170,7 +190,13 @@ class RigWorker:
         found = policies if policies is not None else catalog(self.mock)
         self.policies = {p.id: p for p in found}
         self.cal: CalRun | None = None
+        self.autos: list[CalRun] = []  # an auto-calibration: every arm it sweeps, at once
+        self.pan_turn: str | None = None  # the one arm sweeping its shoulder pan now
+        # Calibrations that ended under torque (a fault, a disconnect): their old registers go back
+        # once that arm's torque is off (_release_all), never under torque.
+        self.restores: list[CalRun] = []
         self.run: PolicyRun | None = None
+        self.rec: recorder.Recording | None = None  # the recording, kept after it ends for its view
         self.session = Session(on_change=self._on_state)
         self.last_heartbeat = clock()
         self.dead: set[str] = set()  # arms whose bus stopped answering
@@ -207,6 +233,8 @@ class RigWorker:
         if self.run is not None and self.run.running and s.state is not State.MOVING:
             self.run.running = False
             self.run.ended = s.stop_reason or ("fault" if s.state is State.FAULT else "stopped")
+        if self.rec is not None and self.rec.phase != "done" and s.state is not State.MOVING:
+            self._rec_end()  # recording follows teleop: whatever stopped the arms stops it too
         self.send({"type": "state", **s.snapshot()})
 
     def describe(self) -> dict[str, Any]:
@@ -227,7 +255,7 @@ class RigWorker:
         self._identify()
 
     def _cmd_identify(self, msg: dict[str, Any]) -> None:
-        if self.cal is not None:
+        if self.cal is not None or self.autos:
             self.error("Finish or cancel the calibration first.")
             return
         self._identify()
@@ -311,11 +339,202 @@ class RigWorker:
         r.step += 1
         return [(f, self._clip(r.action[f.name], pos[f.name])) for f in self.followers]
 
+    # -- recording (recorder.py): episodes of teleop into a LeRobot dataset ------------------------
+    def _cmd_rec_start(self, msg: dict[str, Any]) -> None:
+        if self.session.state is not State.MOVING or self.session.activity != "teleop":
+            self.error("Recording needs teleop running.", "Enable torque and start teleop first.")
+            return
+        if self.rec is not None and self.rec.phase != "done":
+            self.error("A recording is running.")
+            return
+        nums: dict[str, float] = {}
+        for k, (lo, hi) in REC_LIMITS.items():
+            v = msg.get(k)
+            if not is_finite_number(v) or not lo <= v <= hi:
+                self.error(f"{k.replace('_', ' ')} must be between {lo:g} and {hi:g}.")
+                return
+            nums[k] = float(v)
+        task = msg.get("task", "")
+        if not isinstance(task, str) or not task.strip() or len(task) > 300:
+            self.error("Say the task in a few words (at most 300 characters).",
+                       "A policy trained on this data is given it as its instruction.")  # fmt: skip
+            return
+        try:
+            repo = recorder.check_repo_id(msg.get("repo_id"))
+            home = recorder.dataset_home()
+        except (ValueError, ImportError) as e:
+            self.error(str(e))
+            return
+        resume = msg.get("resume") is True
+        if not resume:
+            repo = recorder.stamped(repo)
+        root = home / repo
+        if resume and not (root / "meta" / "info.json").is_file():
+            self.error(f"There is no dataset {repo} to add to.")
+            return
+        shapes = {}
+        for cam in self.rig.cameras:
+            try:
+                img = cam.read_latest()[0]
+            except ConnectionError as e:
+                self.error(f"Camera {cam.key} has no picture: {e}", "Plug it in, or remove it.")
+                return
+            shapes[cam.key] = tuple(int(x) for x in img.shape)
+        names, state_cols, action_cols = recorder.columns(self.pairs)
+        spec = recorder.RecSpec(repo, root, int(round(self.loop_hz)), task.strip(),
+                                int(nums["episodes"]), nums["episode_s"], nums["reset_s"],
+                                resume=resume)  # fmt: skip
+        robot_type = "bi_so_follower" if len(self.pairs) > 1 else "so_follower"
+        writer = recorder.WriterProcess(spec, recorder.features(names, shapes), robot_type,
+                                        self.send, shapes)  # fmt: skip
+        writer.start()
+        self.rec = recorder.Recording(spec, writer, names, state_cols, action_cols,
+                                      list(self.rig.cameras), t0=self.clock())  # fmt: skip
+
+    def _rec_now(self, step: str) -> recorder.Recording | None:
+        r = self.rec
+        if r is None or r.phase == "done":
+            self.error("No recording is running.")
+            return None
+        return r
+
+    def _cmd_rec_next(self, msg: dict[str, Any]) -> None:
+        """Get on with it: start now (warm-up), keep this take (record), end the reset."""
+        r = self._rec_now("next")
+        if r is None:
+            return
+        now = self.clock()
+        if r.phase == "warmup":
+            r.t0 = min(r.t0, now - r.spec.warmup_s)  # as soon as the writer is ready
+        elif r.phase == "paused":
+            self._rec_take(now)
+        elif r.phase == "record":
+            if r.take is None or len(r.take.state) < 2:
+                self._rec_take(now)  # nothing to keep yet: start it again
+            else:
+                self._rec_keep(now)
+        elif r.phase == "reset":
+            self._rec_after_reset(now)
+
+    def _cmd_rec_redo(self, msg: dict[str, Any]) -> None:
+        """Throw the take away and record it again: the one running, or the one in the reset."""
+        r = self._rec_now("redo")
+        if r is None:
+            return
+        if r.phase == "paused":
+            self._rec_take(self.clock())
+            return
+        if r.phase == "record" or (r.phase == "reset" and r.waiting):
+            r.writer.discard()
+            if r.take is not None:
+                r.take.discarded = True
+            r.takes.pop(r.episode, None)
+            r.waiting = False
+            self._rec_take(self.clock())
+
+    def _cmd_rec_stop(self, msg: dict[str, Any]) -> None:
+        if self._rec_now("stop") is not None:
+            self._rec_end()
+
+    def _rec_take(self, now: float) -> None:
+        r = self.rec
+        assert r is not None
+        r.phase, r.t0, r.why = "record", now, None
+        r.take = recorder.Take(r.episode, now, dropped0=r.writer.dropped)
+
+    def _rec_pause(self, why: str) -> None:
+        """A camera went dark: drop this take, keep teleop, wait for Resume (or Stop)."""
+        r = self.rec
+        assert r is not None
+        if r.phase == "record":
+            r.writer.discard()
+            if r.take is not None:
+                r.take.discarded = True
+        r.phase, r.t0, r.why = "paused", self.clock(), why
+        self.send({"type": "rec_paused", "why": why})
+
+    def _rec_keep(self, now: float) -> None:
+        """The take is over and kept: its health now, saved when the reset ends (or now, if it was
+        the last)."""
+        r = self.rec
+        assert r is not None and r.take is not None
+        take, dropped = r.take, r.writer.dropped - r.take.dropped0
+
+        def check() -> None:  # WHY a thread: an analysis of a long take must not stall the loop
+            h = take.health(r.spec.fps, r.names, dropped)
+            if not take.discarded:
+                r.takes[take.index] = h
+                self.send({"type": "rec_take", **h})
+
+        threading.Thread(target=check, name="phi-take-health", daemon=True).start()
+        if r.episode + 1 >= r.spec.episodes:
+            r.writer.save()
+            r.writer.finish()
+            r.phase, r.t0, r.take = "done", now, None
+            return
+        r.phase, r.t0, r.waiting = "reset", now, True
+
+    def _rec_after_reset(self, now: float) -> None:
+        r = self.rec
+        assert r is not None
+        if r.waiting:
+            r.writer.save()
+            r.waiting = False
+        r.episode += 1
+        self._rec_take(now)
+
+    def _rec_end(self) -> None:
+        """Stop: a take in progress is dropped, one waiting in the reset is kept, then finalize."""
+        r = self.rec
+        if r is None or r.phase == "done":
+            return
+        if r.phase == "record":
+            r.writer.discard()
+        elif r.phase == "reset" and r.waiting:
+            r.writer.save()
+        r.writer.finish()
+        r.phase, r.t0, r.take, r.waiting = "done", self.clock(), None, False
+
+    def _rec_tick(self, now: float, pos: dict[str, dict[str, float]]) -> None:
+        r = self.rec
+        assert r is not None
+        if r.phase == "warmup" and now - r.t0 >= r.spec.warmup_s and r.writer.ready.is_set():
+            self._rec_take(now)  # WHY wait for ready: the writer process takes a moment to start
+        elif r.phase == "reset" and now - r.t0 >= r.spec.reset_s:
+            self._rec_after_reset(now)
+        if r.phase != "record" or r.take is None:
+            return
+        state = np.array([pos[a][j] for a, j in r.state_cols], np.float32)
+        action = np.array([pos[a][j] for a, j in r.action_cols], np.float32)
+        frame: dict[str, Any] = {"observation.state": state, "action": action, "task": r.spec.task}
+        for cam in r.cameras:
+            try:
+                img, t, _ = cam.read_latest()
+                r.seen[cam.key] = (img, t)
+            except ConnectionError:  # reopening (RealCamera retries): its last picture, if fresh
+                img, t = r.seen.get(cam.key, (None, -1e9))
+            if img is None or now - t > recorder.CAMERA_GRACE_S:
+                self._rec_pause(f"Camera {cam.key} has had no picture for "
+                                f"{recorder.CAMERA_GRACE_S:g} s.")  # fmt: skip
+                return
+            if now - t > recorder.LATE_S:
+                r.take.late += 1
+            frame[f"observation.images.{cam.key}"] = img
+        r.writer.frame(frame)
+        r.take.state.append(state)
+        r.take.action.append(action)
+        r.take.ticks.append(now)
+        if len(r.take.state) >= r.target:
+            self._rec_keep(now)
+
     # -- calibration: LeRobot so_follower.py:126-157, one step per command ------------------------
     def _cmd_cal_start(self, msg: dict[str, Any]) -> None:
         a = next((x for x in self.arms if x.name == msg.get("arm")), None)
         if a is None:
             self.error(f"There is no arm named {msg.get('arm')!r}.")
+            return
+        if self.autos:
+            self.error("An auto-calibration is running.", "Finish or cancel it first.")
             return
         holding = [n for n, on in self.torque.items() if on]
         if holding:
@@ -333,6 +552,179 @@ class RigWorker:
         self.session.calibration_started()  # raises unless IDENTIFIED or READY
         a.set_torque(False)  # LeRobot disables torque first (so_follower.py:127)
         self.cal = CalRun(a, old=a.read_calibration())
+
+    # -- auto-calibration (autocal.py): every arm asked for at once, leaders too -------------------
+    def _cmd_autocal_start(self, msg: dict[str, Any]) -> None:
+        """Step 1: the same checks as calibrating by hand, for each arm; then wait for the middle
+        pose. arms: names (default every arm); torque stays off until autocal_go."""
+        names = msg.get("arms") or [a.name for a in self.arms]
+        arms = [a for a in self.arms if a.name in names] if isinstance(names, list) else []
+        if not arms or len(arms) != len(set(names)):
+            self.error(f"Arms must be some of {', '.join(a.name for a in self.arms)}.")
+            return
+        if self.cal is not None or self.autos:
+            self.error("A calibration is running.", "Finish or cancel it first.")
+            return
+        holding = [n for n, on in self.torque.items() if on]
+        if holding:
+            self.error(f"Turn torque off before calibrating: {labels(holding)} "
+                       f"{'holds' if len(holding) == 1 else 'hold'} torque.",
+                       "Support the arm, then use Torque off.")  # fmt: skip
+            return
+        for a in arms:
+            mine = next((x for x in self.identity if x["name"] == a.name), None)
+            if mine and mine["exact"] and mine["match"] != a.calibration_id:
+                self.error(f"{label(a.name)} holds the calibration in {mine['match']}.json: are "
+                           "the cables swapped?", "Fix the cables first.")  # fmt: skip
+                return
+        self.session.calibration_started()  # raises unless IDENTIFIED or READY
+        runs = []
+        for a in arms:
+            a.set_torque(False)
+            runs.append(CalRun(a, old=a.read_calibration(), step="auto-middle"))
+        self.autos = runs
+
+    def _cmd_autocal_go(self, msg: dict[str, Any]) -> None:
+        """Every arm is in the middle pose: home them, hold them, sweep. joints: which ones
+        (default all; wrist roll is homed, never swept). torque: Torque_Limit for swept joints."""
+        if not self.autos or any(c.step != "auto-middle" for c in self.autos):
+            self.error("Auto-calibration is not waiting for the middle pose.")
+            return
+        if self.clock() - self.last_heartbeat > HEARTBEAT_TIMEOUT_S:
+            self.error("This window is not sending heartbeats, so Studio will not move the arms.",
+                       "Reload the window, then start again.")  # fmt: skip
+            return
+        joints = msg.get("joints") or list(JOINTS)
+        if not isinstance(joints, list) or any(j not in JOINTS for j in joints):
+            self.error(f"Joints must be some of {', '.join(JOINTS)}.")
+            return
+        keep = msg.get("arms")  # the person may leave some arms out at the middle pose
+        if keep is not None:
+            if not isinstance(keep, list) or not keep or any(
+                k not in {c.arm.name for c in self.autos} for k in keep
+            ):
+                self.error("Pick at least one of the arms being calibrated.")
+                return
+            self.autos = [c for c in self.autos if c.arm.name in keep]  # nothing written yet
+        torque = msg.get("torque")
+        if torque is not None and (not isinstance(torque, int) or isinstance(torque, bool)
+                                   or not 100 <= torque <= 800):  # fmt: skip
+            self.error("The sweep torque must be between 100 and 800 (of 1000).")
+            return
+        order = [j for j in JOINTS if j in joints]
+        homed = list(JOINTS) if len(order) == len(JOINTS) else order  # roll's homing: middle pose
+        now = self.clock()
+        for c in self.autos:
+            c.joints, c.torque = order, torque
+            c.written = True  # before the write: one that fails halfway still changed registers
+            c.homings = c.arm.set_half_turn_homings(homed)
+            raw = c.arm.read_raw_positions()
+            c.pos = raw
+            c.arm.write_raw_goals(raw)  # goal = present before torque, as for teleop (_cmd_arm)
+            self._set_torque(c.arm, True)
+            c.auto = autocal.AutoCal([j for j in order if j != FULL_TURN], raw, now,
+                                     expected_deg=autocal.expected_travel())  # fmt: skip
+            c.step = "auto"
+        self.last_heartbeat = now
+
+    def _cmd_autocal_resume(self, msg: dict[str, Any]) -> None:
+        paused = [c for c in self.autos if c.auto is not None and c.auto.state == "paused"]
+        if not paused:
+            self.error("Auto-calibration is not paused.")
+            return
+        now = self.last_heartbeat = self.clock()
+        for c in paused:
+            assert c.auto is not None
+            c.auto.resume(c.arm.read_raw_positions(), now)
+
+    def _cmd_autocal_save(self, msg: dict[str, Any]) -> None:
+        """Write what every arm found, torque off first. An arm that failed gets its old
+        registers back instead."""
+        if not self.autos or any(c.step not in ("auto-review", "auto-failed") for c in self.autos):
+            self.error("Auto-calibration has not finished.")
+            return
+        runs, self.autos, self.pan_turn = self.autos, [], None
+        for c in runs:
+            if self.torque[c.arm.name]:
+                # WHY torque off first: a new homing written under torque moves the goal the servo
+                # holds by the homing's change, and the arm jumps. The page asks to support it.
+                self._set_torque(c.arm, False)
+            if c.step == "auto-failed" or c.new is None:
+                self._restore(c)
+                continue
+            self._save_run(c)
+        self.session.calibration_ended()
+        self._identify()
+
+    def _cmd_autocal_cancel(self, msg: dict[str, Any]) -> None:
+        if not self.autos:
+            self.error("No auto-calibration is running.")
+            return
+        runs, self.autos, self.pan_turn = self.autos, [], None
+        for c in runs:
+            if self.torque[c.arm.name]:
+                self._set_torque(c.arm, False)  # the person supports the arm (the page asks)
+            if c.written:
+                self._restore(c)
+        self.session.calibration_ended()
+        self._identify()
+
+    def _autocal_abort(self) -> None:
+        """A fault or a disconnect: arms holding torque keep holding, and get their old registers
+        back once their torque goes off; the rest get them back now."""
+        runs, self.autos, self.pan_turn = self.autos, [], None
+        for c in runs:
+            if not c.written:
+                continue
+            if self.torque.get(c.arm.name):
+                self.restores.append(c)
+            else:
+                self._restore(c)
+
+    def _autocal_tick(self, now: float) -> None:
+        """One sweep step for every arm. Shoulder pans take turns, so two followers side by side
+        never swing into each other."""
+        stale = now - self.last_heartbeat > HEARTBEAT_TIMEOUT_S
+        for c in self.autos:
+            e = c.auto
+            if c.step != "auto" or e is None:
+                continue
+            if stale and e.state == "running":
+                e.pause("This window stopped answering, so the sweep paused.")
+            panning = e.state == "running" and e.current is not None \
+                and e.current.joint == "shoulder_pan"  # fmt: skip
+            if panning and self.pan_turn is None:
+                self.pan_turn = c.arm.name
+            c.pos = c.arm.read_raw_positions()
+            # WHY the goals first: a joint leaving the sweep gets its full torque back only once
+            # its goal is where it stands, so it never presses into a stop at full strength.
+            wait = panning and self.pan_turn != c.arm.name
+            c.waiting = wait
+            c.arm.write_raw_goals(e.step(c.pos, now, advance=not wait))
+            j = e.current.joint if e.state == "running" and e.current and not wait else None
+            if j != c.limited:
+                limits = {c.limited: FULL_TORQUE} if c.limited else {}
+                if j:
+                    limits[j] = autocal.sweep_limit(j, c.torque)
+                c.arm.set_torque_limits(limits)
+                c.limited = j
+            still_panning = e.state in ("running", "paused") and e.current is not None \
+                and e.current.joint == "shoulder_pan"  # fmt: skip
+            if self.pan_turn == c.arm.name and not still_panning:
+                self.pan_turn = None
+            if e.state == "done":
+                c.new = dict(c.old)
+                for jj in c.homings:
+                    if jj in e.found:
+                        homing, lo, hi = e.range(jj, c.homings[jj])
+                    elif jj == FULL_TURN:
+                        homing, (lo, hi) = c.homings[jj], FULL_RANGE
+                    else:
+                        continue
+                    c.new[jj] = JointCal(c.old[jj].id, 0, homing, lo, hi)  # drive_mode 0
+                c.step = "auto-review"
+            elif e.state == "failed":
+                c.step = "auto-failed"
 
     def _cal_at(self, step: str) -> CalRun | None:
         if self.cal is None:
@@ -373,6 +765,14 @@ class RigWorker:
         c = self._cal_at("review")
         if c is None or c.new is None:
             return
+        self._save_run(c)
+        self.cal = None
+        self.session.calibration_ended()
+        self._identify()
+
+    def _save_run(self, c: CalRun) -> None:
+        """Write a finished calibration to the servos and its file, and say so."""
+        assert c.new is not None
         c.arm.write_calibration(c.new)
         self.calibrations[c.arm.calibration_id] = c.new
         path = None
@@ -384,10 +784,7 @@ class RigWorker:
                 self.error(f"Wrote {c.arm.name}'s registers but could not save {path}: {e}",
                            "Studio uses the new calibration until it restarts.")  # fmt: skip
                 path = None
-        self.cal = None
-        self.session.calibration_ended()
         self.send({"type": "calibrated", "arm": c.arm.name, "path": str(path) if path else None})
-        self._identify()
 
     def _cmd_cal_cancel(self, msg: dict[str, Any]) -> None:
         if self.cal is None:
@@ -402,7 +799,12 @@ class RigWorker:
         c, self.cal = self.cal, None
         if c is None or not c.written:
             return
+        self._restore(c)
+
+    def _restore(self, c: CalRun) -> None:
         try:
+            if c.limited:
+                c.arm.set_torque_limits({c.limited: FULL_TORQUE})
             c.arm.write_calibration(c.old)
         except BUS_ERRORS as e:
             self.error(f"Could not restore {c.arm.name}'s calibration registers: {e}",
@@ -411,6 +813,9 @@ class RigWorker:
 
     def _cmd_stop(self, msg: dict[str, Any]) -> None:
         reason = msg.get("reason", "user")
+        for c in self.autos:
+            if c.auto is not None:
+                c.auto.pause("Stopped")  # holds where it is; Resume goes on, Cancel ends it
         if self.session.state in (State.MOVING, State.ARMED):
             self.session.stopped(reason if reason in STOP_REASONS else "user")
             self._freeze()
@@ -451,7 +856,9 @@ class RigWorker:
         self._identify()
 
     def _cmd_disconnect(self, msg: dict[str, Any]) -> None:
+        self._rec_end()
         self._cal_abort()
+        self._autocal_abort()
         self._release_all()
         # WHY keep the run: Disconnect is how the scene gets reset, and an ended eval episode must
         # stay judgeable after it. Dropping the run lost it from the eval record with no message.
@@ -477,6 +884,19 @@ class RigWorker:
             self.rig.swap_cables(target.name)
             return
         target.inject(msg["kind"], joint=msg.get("joint"))
+
+    def shutdown(self, finish_s: float = FINISH_S) -> None:
+        """The server is gone or Studio is closing: nobody can stop an arm from now on, so freeze
+        it and release torque (LeRobot itself releases torque on disconnect,
+        config_so_follower.py:31); put calibrations back; and let a recording finalize, or its
+        dataset cannot be read."""
+        self._freeze()
+        self._rec_end()
+        self._autocal_abort()  # restored as each arm's torque goes off, just below
+        self._cal_abort()
+        self._release_all()
+        if self.rec is not None:
+            self.rec.writer.done.wait(finish_s)
 
     # -- internals --------------------------------------------------------------------------------
     def _identify(self) -> None:
@@ -517,13 +937,19 @@ class RigWorker:
                 self._set_torque(a, False)
             except BUS_ERRORS:
                 silent.append(a.name)
+                continue
+            for c in [c for c in self.restores if c.arm is a]:
+                self.restores.remove(c)
+                self._restore(c)
         return silent
 
     def _freeze(self) -> None:
         """Goal = present position on every reachable follower with torque on. Torque stays on.
         A follower that does not answer is marked dead and faults the session."""
         lost = None
-        for f in self.followers:
+        # Leaders too while an auto-calibration drives them: they hold torque then.
+        driven = [c.arm for c in self.autos if c.arm.role == "leader"]
+        for f in [*self.followers, *driven]:
             # WHY skip limp followers: a goal write may enable torque on some Feetech firmware
             # (bench test 22), and a limp arm has nothing to hold.
             if f.name in self.dead or not self.torque[f.name]:
@@ -540,6 +966,7 @@ class RigWorker:
         self.session.faulted(why)
         self._freeze()
         self._cal_abort()
+        self._autocal_abort()
 
     def _clip(self, goal: dict[str, float], present: dict[str, float]) -> dict[str, float]:
         return {
@@ -570,10 +997,15 @@ class RigWorker:
                 for lead, fol in self.pairs:
                     current = fol
                     fol.write_goals(self._clip(pos[lead.name], pos[fol.name]))
+                if self.rec is not None and self.rec.phase != "done":
+                    self._rec_tick(now, pos)
             elif self.session.may_move and self.session.activity == "policy" and self.run:
                 for fol, goal in self._policy_goals(now, pos):
                     current = fol
                     fol.write_goals(goal)
+            if self.autos:
+                current = self.autos[0].arm
+                self._autocal_tick(now)
             if self.cal is not None and self.cal.step == "ranges":
                 c = self.cal
                 current = c.arm
@@ -622,6 +1054,8 @@ class RigWorker:
         self.send({
             "type": "telemetry", "t": self.clock(), "arms": arms,
             "calibration": self.cal.view() if self.cal else None,
+            "autocal": [c.view() for c in self.autos] or None,
+            "recording": self.rec.view(self.clock()) if self.rec else None,
             "policy": self.run.view() if self.run else None,
             "loop": {"hz": round((len(self._ticks) - 1) / span, 1) if span else 0.0,
                      "p50_ms": round(costs[len(costs) // 2], 2) if costs else 0.0,
@@ -678,9 +1112,16 @@ def build_rig(spec: dict[str, Any]) -> Any:
     if spec.get("kind", "mock") == "mock":
         from phi_studio.mock import mock_rig
 
-        cams = tuple(spec.get("cameras", ("front", "wrist", "top")))
-        return mock_rig(pairs=int(spec.get("pairs", 1)), cameras=cams)
-    raise ValueError(f"rig kind {spec.get('kind')!r} is not available yet; use the mock rig")
+        cams = spec.get("cameras")  # None: the mock's own set for that many pairs
+        pairs = int(spec.get("pairs", 1))
+        return mock_rig(pairs=pairs, cameras=None if cams is None else tuple(cams))
+    if spec.get("kind") == "lerobot":
+        # Real arms over LeRobot's Feetech bus, from robot-config.yaml (hardware.py). Connecting
+        # reads and configures; it never turns torque on.
+        from phi_studio.hardware import build_rig as hardware_rig
+
+        return hardware_rig(Path(spec["config"]))
+    raise ValueError(f"rig kind {spec.get('kind')!r} is not available")
 
 
 def encode_jpeg(frame: Any, quality: int = 80) -> bytes:
@@ -718,7 +1159,13 @@ def run_worker(conn: Any, spec: dict[str, Any]) -> None:
     # calibration directory, where a real arm's file would be overwritten.
     data = spec.get("data_dir")
     mock = spec.get("kind", "mock") == "mock"
-    cal_dir = Path(data) / "mock-calibration" if data and mock else None
+    if mock:
+        cal_dir = Path(data) / "mock-calibration" if data else None
+    else:
+        # A real arm's calibration goes where LeRobot reads it, so lerobot-record uses that file.
+        from phi_studio.files import lerobot_calibration_dir
+
+        cal_dir = lerobot_calibration_dir()
     w = RigWorker(rig, outbox.put, loop_hz=hz, cal_dir=cal_dir)
     inbox: queue.SimpleQueue[dict[str, Any]] = queue.SimpleQueue()
     done = threading.Event()
@@ -769,11 +1216,7 @@ def run_worker(conn: Any, spec: dict[str, Any]) -> None:
                 nxt = time.monotonic()
             time.sleep(max(0.0, delay))
     finally:
-        # WHY freeze then release: the server is gone, so nobody can stop the arm from now on.
-        # LeRobot itself releases torque on disconnect (config_so_follower.py:31).
         done.set()
-        w._freeze()
-        w._release_all()
-        w._cal_abort()
+        w.shutdown()
         for cam in rig.cameras:
             cam.close()
