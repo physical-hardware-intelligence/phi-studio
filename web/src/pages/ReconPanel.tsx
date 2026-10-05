@@ -147,8 +147,8 @@ export function ReconPanel() {
           </>
         )}
         <p className="field-hint">
-          Depth from Depth Anything V2 Small. It gives depth only up to an unknown scale and offset, so Studio sets both from
-          the table the arm stands on. The points are only as right as the camera's place and vertical field of view in this view.
+          Depth from Depth Anything V2 Small. It says how near each pixel is (inverse depth), but only up to an unknown
+          scale and offset, so Studio sets both from the table the arm stands on. The points are only as right as the camera's place and vertical field of view in this view.
         </p>
       </div>
     </section>

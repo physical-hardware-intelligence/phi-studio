@@ -336,6 +336,52 @@ def test_latest_wins_per_camera() -> None:
     run(go())
 
 
+def test_camera_align_frames_capture_live_and_end_with_its_idle_stop(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:  # fmt: skip
+    """While camera align holds the cameras, a live capture uses align's frames and opens no
+    camera itself; keep updating does not keep align alive, and ends when align frees them."""
+    from test_setup_api import FakeCam, align_fakes
+
+    from phi_studio import setup_api
+
+    root = str(tmp_path / "ds")
+    align_fakes(monkeypatch, root)  # camera 4 shows the dataset's front
+    monkeypatch.setattr(setup_api, "ALIGN_IDLE_S", 2.0)
+
+    async def go() -> None:
+        studio, server, session = await started([])  # the worker streams nothing
+        st = recon_api.state_of(studio)
+        st.model = FakeModel()
+        try:
+            sock = await ws(session, server.port)
+            await until(sock, lambda m: m.get("type") == "hello")
+            await sock.send_str(json.dumps({"cmd": "align_start", "root": root, "episode": 0}))
+            await until(sock, lambda m: m.get("type") == "align_session")
+            end = time.monotonic() + 5
+            while st.status()["live"] != ["front"]:
+                assert time.monotonic() < end, st.status()["live"]
+                await asyncio.sleep(0.05)
+            req = {"source": "live", "key": "front", "camera": "front", "poses": {"front": POSE}}
+            await sock.send_str(json.dumps({"cmd": "recon_capture", **req}))
+            msg = await until(sock, lambda m: m.get("kind") in ("cloud", "refused"))
+            assert msg["kind"] == "cloud" and msg["source"]["kind"] == "live", msg
+
+            await sock.send_str(json.dumps({"cmd": "recon_keep", "on": True, **req}))
+            await until(sock, lambda m: m.get("kind") == "cloud")
+            # No align_alive is sent: captures alone must not hold the cameras past the idle stop.
+            stop = await until(sock, lambda m: m.get("type") == "align_stopped")
+            assert "no window showed camera align" in stop["why"]
+            gone = await until(sock, lambda m: m.get("kind") == "refused")
+            assert gone["message"] == recon_api.NO_LIVE
+            await until(sock, lambda m: m.get("kind") == "status" and m["keep"] is None)
+            assert FakeCam.opened == [4] and FakeCam.closed == [4]  # align's camera, nothing more
+        finally:
+            await session.close()
+            await server.close()
+
+    run(go())
+
+
 def test_keep_updating_is_live_only_and_at_most_two_a_second() -> None:
     async def go() -> None:
         studio, server, session = await started(["front"])
