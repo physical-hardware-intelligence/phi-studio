@@ -17,6 +17,10 @@ with a fresh token.
 | robot-config.yaml edits | Studio changes single values in place and keeps your comments. It saves a backup first. |
 | Hugging Face | Login status, model inspect, fit check against your rig, verified download. |
 | Camera align | Compares live cameras with a dataset's resting frame and says which way to move each one. |
+| Datasets | Every LeRobot dataset on this Mac (v3.0 and v2.1), read with pyarrow, single arm or bimanual, with a health bar each. |
+| Episode inspector | Cameras, a 3D SO-101 twin (measured solid, commanded ghost, tool path), a timeline and per-joint signals on one playhead. Keyboard: Space, ←/→, [ ], N, B, G. |
+| Analysis | Follower lag, tracking error with the lag removed, idle time, grasps, gripper squeeze, one-frame jumps, frozen joints, smoothness, outliers. Thresholds measured on our recordings (`analysis.py`). |
+| Notes and issues | Shared live across windows, kept in `studio.db` in the data folder. Episodes marked bad drop out of `--dataset.episodes`. |
 
 ## Install
 
@@ -54,6 +58,11 @@ npm --prefix web run build
 - `src/phi_studio/`: the server (aiohttp), the robot worker process, LeRobot command builder (`rigspec.py`),
   config writer (`configedit.py`), Hub client (`hub.py`), cameras (`cameras.py`), camera align (`align.py`),
   terminal (`terminal.py`).
+- Data: `datasets.py` (LeRobot datasets, no torch), `analysis.py` (episode and dataset analysis), `kinematics.py`
+  (SO-101 forward kinematics, checked against MuJoCo), `notes.py` (SQLite notes), `data_api.py` (HTTP routes and
+  note commands).
+- `assets/so101/`: the SO-101 model for the 3D view and the kinematics, compiled from TheRobotStudio's MJCF by
+  `scripts/build_so101_model.py <phi>/simulation/model` (see its `NOTICE.md`).
 - `web/`: the React app. `npm run build` writes it into `src/phi_studio/static/`, which the server serves.
 - `tests/`: unit and end-to-end tests on the mock rig. Tests that need LeRobot, OpenCV or the Hub client skip
   when those are not installed.
