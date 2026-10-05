@@ -40,6 +40,7 @@ from pathlib import Path
 import numpy as np
 
 from phi_studio import robot_model
+from phi_studio.errors import Refusal
 
 # [JUDGEMENT] Table pixels count only within this radius of an arm base. WHY: near the arm the
 # plane z = 0 is almost surely the desk the arm is screwed to; farther out a ray's hit with z = 0
@@ -82,7 +83,7 @@ RANSAC_SCORE_SAMPLE = 4000  # pixels each hypothesis is scored on; the refit use
 MAGIC = b"PCL1"
 
 
-class ScaleRefused(ValueError):
+class ScaleRefused(Refusal):
     """No metric cloud: the scale from the table is not trustworthy. Carries the fit."""
 
     def __init__(self, message: str, fit: Fit | None = None) -> None:

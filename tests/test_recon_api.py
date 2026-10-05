@@ -415,14 +415,35 @@ def test_only_the_exact_wrist_key_rides_on_the_arm() -> None:
     assert not recon_api._is_wrist("left_wrist") and not recon_api._is_wrist("front")
 
 
-def test_dataset_cloud_carries_its_pose_for_the_drawn_arm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A dataset cloud says which follower shows the frame's pose, and the arm boxes use that
-    follower's base and the same joint angles the page will draw."""
+class Bare:
+    """Just enough of Studio for Recon.compute; no file roots, so every arm reads degrees."""
+
+    frame_clock: dict[str, Any] = {}
+    latest_frame: dict[str, Any] = {}
+    telemetry = None
+    loop = None
+
+    def _fanout(self, m: dict[str, Any]) -> None:
+        pass
+
+
+CAL = {j: {"range_min": 1000, "range_max": 3000, "drive_mode": 0} for j in robot_model.ARM_JOINTS}
+NO_CAL = robot_model.arm_units(False, None)
+
+
+@pytest.mark.parametrize("units", [None, robot_model.arm_units(False, CAL), NO_CAL],
+                         ids=["degrees", "m100-calibrated", "m100-no-calibration"])
+def test_dataset_cloud_pose_uses_the_drawn_arms_units(monkeypatch: pytest.MonkeyPatch,
+                                                      units: dict[str, Any] | None) -> None:
+    """A dataset cloud names the follower that shows the frame's pose and the units it is read in.
+    The arm boxes use that follower's base and the same conversion the page applies; an arm the
+    3D view would not draw (-100..100 with no calibration) gets no boxes and says why."""
     readings = {j: 10.0 for j in robot_model.JOINTS}
     frame = recon_api.Frame(np.zeros((480, 640, 3), np.uint8), {"dataset": readings}, "front",
                             {"kind": "dataset", "name": "x", "root": "/x", "episode": 0,
                              "frame": 60, "key": "observation.images.front"})  # fmt: skip
     monkeypatch.setattr(recon_api, "dataset_frame", lambda *a: frame)
+    monkeypatch.setattr(recon_api.Recon, "_units", lambda self: {"right": units} if units else {})
     seen: list[tuple[dict[str, float], Any]] = []
     real = recon.arm_boxes
 
@@ -431,16 +452,6 @@ def test_dataset_cloud_carries_its_pose_for_the_drawn_arm(monkeypatch: pytest.Mo
         return real(model, q, base)
 
     monkeypatch.setattr(recon, "arm_boxes", spy)
-
-    class Bare:
-        frame_clock: dict[str, Any] = {}
-        latest_frame: dict[str, Any] = {}
-        telemetry = None
-        loop = None
-
-        def _fanout(self, m: dict[str, Any]) -> None:
-            pass
-
     st = recon_api.Recon(Bare())  # type: ignore[arg-type]
     st.model = FakeModel()  # type: ignore[assignment]
     req = {"source": "dataset", "root": "/x", "episode": 0, "frame": 60,
@@ -449,10 +460,19 @@ def test_dataset_cloud_carries_its_pose_for_the_drawn_arm(monkeypatch: pytest.Mo
            "wrist_arm": "right"}  # fmt: skip
     try:
         out = st.compute(recon_api.Job("front", req))
+        wrist = st.compute(recon_api.Job("wrist", {**req, "key": "observation.images.wrist"}))
     finally:
         st.close()
     assert out["kind"] == "cloud", out
-    want = {"arm": "right", "pos": readings, "label": "pose from episode 0, frame 60"}
+    u = units or recon_api.DEGREES
+    want = {"arm": "right", "pos": readings, "units": u, "label": "pose from episode 0, frame 60"}
     assert out["pose"] == want
-    q = robot_model.lerobot_to_mjcf(robot_model.load(), readings)
-    assert seen == [(q, (0.0, -0.2, 0.0))]
+    if u["problem"]:
+        assert seen == [] and out["arm_hidden_by"] is None
+        assert wrist["kind"] == "refused" and "calibration" in wrist["message"], wrist
+    else:
+        q = robot_model.lerobot_to_mjcf(robot_model.load(), readings, units=u["unit"],
+                                        calibration=u["calibration"])  # fmt: skip
+        assert seen[0] == (q, (0.0, -0.2, 0.0))
+
+

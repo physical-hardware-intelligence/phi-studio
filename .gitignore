@@ -15,3 +15,6 @@ src/phi_studio/static/
 robot-config.yaml
 .env
 .env.*
+
+# Agent worktrees and local Claude settings
+.claude/

@@ -1,10 +1,10 @@
 // The 3D view's canvas with its toolbar and notes. The default export, so pages load it with React.lazy and
 // three.js arrives only when a 3D view is on screen.
-import { ArrowLeft, Maximize2, Minimize2, Rotate3d, Scan } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { ArrowLeft, Maximize2, Minimize2, OctagonX, Rotate3d, RotateCw, Scan } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { label } from "../lib/labels";
 import { scene, useScene } from "../lib/scene";
-import { useStudio, useTheme } from "../lib/studio";
+import { studio, useStudio, useTheme } from "../lib/studio";
 import { Engine, type Preset, type Theme } from "./engine";
 import { PointLayers } from "./pointcloud";
 
@@ -45,16 +45,24 @@ export default function Viewer({ compact = false }: { compact?: boolean }) {
   const error = useScene((s) => s.error);
   const settings = useScene((s) => s.settings);
   const editing = useScene((s) => s.editing);
+  const units = useScene((s) => s.units);
   const theme = useTheme();
   const policy = useStudio((s) => s.state?.activity === "policy");
   const [progress, setProgress] = useState<[number, number] | null>(null);
   const [wrist, setWrist] = useState(false);
   const [full, setFull] = useState(false);
   const [glError, setGlError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [lost, setLost] = useState(false);
 
   useEffect(() => { scene.loadModel(); }, []);
+  useEffect(() => scene.watchUnits(), []);
 
-  useEffect(() => {
+  // WHY layout effect: React runs a useEffect cleanup after the page's DOM is already detached. OrbitControls.dispose
+  // removes its document keydown listener from canvas.getRootNode(), which is then the detached subtree, not the
+  // document, so the listener stayed and kept every disposed engine alive (about 1 MB per open). A layout effect's
+  // cleanup runs before React removes the nodes.
+  useLayoutEffect(() => {
     if (!model || !host.current || !labels.current) return;
     let e: Engine;
     try {
@@ -65,6 +73,8 @@ export default function Viewer({ compact = false }: { compact?: boolean }) {
         onCameraEdit: (k, p) => scene.setCamera(k, p),
         onSelectCamera: (k) => scene.edit(k),
         onWristView: setWrist,
+        onLoadError: setLoadError,
+        onContextLost: setLost,
       });
     } catch (err) {
       setGlError(`This browser could not start WebGL: ${err instanceof Error ? err.message : String(err)}`);
@@ -75,6 +85,7 @@ export default function Viewer({ compact = false }: { compact?: boolean }) {
     live++;
     e.setTheme(readTheme(host.current));
     e.setEditing(scene.snap.editing);
+    e.setUnits(scene.snap.units);
     const g = globalThis as { __phiScene?: { engine: Engine; points: PointLayers; live: () => number }; __phiSceneLast?: unknown };
     g.__phiScene = { engine: e, points, live: () => live };
     return () => {
@@ -88,6 +99,7 @@ export default function Viewer({ compact = false }: { compact?: boolean }) {
 
   useEffect(() => { engine.current?.setSettings(settings); }, [settings]);
   useEffect(() => { engine.current?.setEditing(editing); }, [editing]);
+  useEffect(() => { engine.current?.setUnits(units); }, [units]);
   useEffect(() => { if (engine.current && host.current) engine.current.setTheme(readTheme(host.current)); }, [theme]);
 
   useEffect(() => {
@@ -96,7 +108,7 @@ export default function Viewer({ compact = false }: { compact?: boolean }) {
     return () => document.removeEventListener("fullscreenchange", on);
   }, []);
 
-  const loading = !error && !glError && (!model || !progress || progress[0] < progress[1]);
+  const loading = !error && !glError && !loadError && (!model || !progress || progress[0] < progress[1]);
   const autoRotate = () => {
     if (!settings.autoRotate) engine.current?.setAutoRotate(true); // start now, not after the idle wait
     scene.update({ autoRotate: !settings.autoRotate });
@@ -138,7 +150,27 @@ export default function Viewer({ compact = false }: { compact?: boolean }) {
         <span>Joint angles go through an assumed mapping, not checked on a physical arm.</span>
       </div>
 
+      {full && (
+        // WHY: full screen covers the top bar and its Stop. This one calls the same studio.stop().
+        <button type="button" className="btn stop-btn is-live scene-stop" onClick={() => studio.stop()} aria-keyshortcuts="Escape">
+          <OctagonX aria-hidden /> Stop
+        </button>
+      )}
+
       {(error || glError) && <div className="scene-overlay"><p className="scene-error">{glError ?? error}</p></div>}
+      {loadError && !error && !glError && (
+        <div className="scene-overlay">
+          <div className="scene-progress">
+            <p className="scene-error">{loadError} Check that Studio is still running.</p>
+            <button type="button" className="btn btn-sm" onClick={() => engine.current?.retryLoad()}><RotateCw aria-hidden /> Try again</button>
+          </div>
+        </div>
+      )}
+      {lost && (
+        <div className="scene-overlay">
+          <p className="scene-error">The browser took the graphics context away from this view. It comes back on its own when the browser allows; if it does not, reload the window. Stop and Esc still work.</p>
+        </div>
+      )}
       {loading && (
         <div className="scene-overlay">
           <div className="scene-progress">

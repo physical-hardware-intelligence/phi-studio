@@ -141,3 +141,9 @@ def test_nothing_can_enable_torque_or_start_while_calibrating() -> None:
             event()
     assert s.heartbeat_lost() is False and s.state is State.CALIBRATING
     assert not s.torque_allowed
+
+
+def test_disconnected_label_names_the_rig() -> None:
+    """The sidebar says the window is connected to Studio; this pill is about the rig, so a bare
+    "Offline" next to it reads as a contradiction."""
+    assert State.DISCONNECTED.label == "Rig not connected"

@@ -23,7 +23,7 @@ class State(Enum):
     # value: (label, tone, next action shown to the user)
     # Labels, tones and priorities follow the robot-state legend in the Studio design brief
     # (after Franka's light scheme): neutral idle, info holding, ok moving, warn attention.
-    DISCONNECTED = ("Offline", "neutral", "Connect the rig")
+    DISCONNECTED = ("Rig not connected", "neutral", "Connect the rig")
     CONNECTED = ("Connecting", "info", "Reading each arm's identity")
     IDENTIFIED = ("Confirm arms", "warn", "Check each arm's role and calibration, then confirm")
     READY = ("Torque off", "neutral", "Enable torque to start")

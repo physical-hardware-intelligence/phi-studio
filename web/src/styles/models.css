@@ -1,0 +1,89 @@
+/* ---- Models page: Hub login, search, a model's fit, downloads, and the rollout command ----
+   Colours and sizes come only from tokens.css, so both themes work. */
+
+.mdl-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: var(--space-4); align-items: start; }
+@container content (max-width: 1080px) { .mdl-grid { grid-template-columns: 1fr; } }
+
+/* Hub status */
+.mdl-status { padding: var(--space-3) var(--space-4); display: grid; gap: var(--space-3); }
+.mdl-status-row { display: flex; align-items: center; gap: var(--space-3); }
+.mdl-status-icon { width: 18px; height: 18px; color: var(--text-tertiary); flex: none; }
+.mdl-status-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.mdl-status-err { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.3125rem; }
+.mdl-login { display: grid; gap: var(--space-2); max-width: 640px; }
+
+/* search */
+.mdl-find { display: grid; gap: var(--space-2); }
+.mdl-search { position: relative; display: block; }
+.mdl-search > svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; color: var(--text-tertiary); pointer-events: none; }
+.mdl-search .input { padding-left: 34px; }
+.mdl-error { color: var(--danger-text); font-size: var(--text-sm); line-height: 1.4375rem; }
+.mdl-text-danger { color: var(--danger-text); }
+
+.mdl-results { list-style: none; margin: 0; padding: 0 0 var(--space-2); max-height: 560px; overflow-y: auto; }
+.mdl-results li + li .mdl-result { border-top: 1px solid var(--border-subtle); }
+.mdl-result {
+  display: grid; gap: 4px; width: 100%; padding: 10px var(--space-4); text-align: left;
+  background: transparent; border: 0; cursor: pointer; color: var(--text-primary);
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.mdl-result:hover { background: var(--bg-hover); }
+.mdl-result.is-active { background: var(--bg-selected); }
+.mdl-result-name { font-weight: 600; overflow-wrap: anywhere; }
+.mdl-result-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px var(--space-3); font-size: var(--text-sm); color: var(--text-secondary); }
+.mdl-result-meta > span { display: inline-flex; align-items: center; gap: 4px; }
+.mdl-result-meta svg { width: 13px; height: 13px; color: var(--text-tertiary); }
+
+/* detail */
+.mdl-title { min-width: 0; display: grid; gap: 2px; }
+.mdl-title .panel-title { overflow-wrap: anywhere; }
+.mdl-title a { display: inline-flex; align-items: center; gap: 4px; color: var(--accent-text); }
+.mdl-ext { width: 13px; height: 13px; }
+.mdl-head-actions { display: flex; align-items: center; gap: var(--space-1); flex: none; }
+.mdl-detail { display: grid; gap: var(--space-5); }
+.mdl-kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px var(--space-5); margin: 0; }
+.mdl-kv dt { color: var(--text-secondary); }
+.mdl-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.mdl-inputs { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.mdl-h3 { font-size: var(--text-base); line-height: 1.5rem; font-weight: 600; margin-bottom: var(--space-2); }
+.mdl-fit { display: grid; }
+.mdl-lines { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.mdl-lines + .mdl-lines { margin-top: var(--space-3); }
+.mdl-lines li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: var(--space-2); align-items: start; line-height: 1.5rem; }
+.mdl-lines.tone-danger li { color: var(--tone-text); }
+.mdl-lines.tone-neutral li { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.4375rem; }
+.mdl-lines svg { width: 16px; height: 16px; margin-top: 4px; color: var(--tone-solid); }
+.mdl-lines .dot { margin: 8px 0 0 5px; }
+.mdl-lines code, .mdl-error code, .mdl-status-err code { color: var(--text-primary); }
+.mdl-download { display: grid; justify-items: start; gap: var(--space-2); padding-top: var(--space-4); border-top: 1px solid var(--border-subtle); }
+.mdl-progress { display: grid; gap: var(--space-2); width: 100%; }
+.mdl-progress .progress-label { margin-top: 0; gap: var(--space-3); font-size: var(--text-sm); }
+.mdl-progress .btn { justify-self: start; }
+
+/* on this Mac */
+.mdl-busy { display: grid; gap: var(--space-2); }
+.mdl-table td { white-space: nowrap; }
+.mdl-table tr.is-active > td { background: var(--bg-selected); }
+/* WHY wrap the name: repo ids run to 60 characters and would push Run on the arms out of view. */
+.mdl-table td.mdl-name-td { white-space: normal; min-width: 14rem; }
+.mdl-cell-name { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--space-2); padding: 8px 0; }
+.mdl-link { background: none; border: 0; padding: 0; color: var(--text-primary); font-weight: 500; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
+.mdl-link:hover { color: var(--accent-text); text-decoration: underline; }
+
+/* run on the arms */
+.mdl-run { gap: var(--space-4); }
+.mdl-row { display: flex; flex-wrap: wrap; gap: var(--space-5); }
+.mdl-narrow { width: 120px; }
+.mdl-dataset { display: flex; align-items: center; gap: 6px; }
+.mdl-dataset .mono { color: var(--text-secondary); white-space: nowrap; }
+.mdl-dataset .input { flex: 1; min-width: 120px; }
+.mdl-check { display: flex; align-items: flex-start; gap: var(--space-2); font-size: var(--text-sm); line-height: 1.4375rem; color: var(--text-secondary); margin-top: var(--space-1); cursor: pointer; }
+.mdl-check input { margin-top: 4px; accent-color: var(--accent); }
+.mdl-map-open { justify-self: start; }
+.mdl-pending { min-height: 2.5rem; }
+.mdl-cammap { display: grid; grid-template-columns: minmax(120px, max-content) minmax(0, 1fr); gap: var(--space-2) var(--space-4); align-items: center; margin-top: var(--space-1); }
+.mdl-safety {
+  display: flex; align-items: flex-start; gap: var(--space-2); padding: 10px 12px; border-radius: var(--radius-lg);
+  background: var(--warn-subtle); color: var(--warn-text); font-weight: 500; line-height: 1.5rem;
+}
+.mdl-safety svg { width: 16px; height: 16px; margin-top: 4px; flex: none; color: var(--warn-solid); }

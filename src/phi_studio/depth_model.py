@@ -15,10 +15,13 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+
+from phi_studio.errors import Refusal
 
 REPO = "depth-anything/Depth-Anything-V2-Small-hf"
 REVISION = "5426e4f0f36572d16453bbda7a8389317b1bef99"
@@ -28,7 +31,7 @@ FILES = ("config.json", "preprocessor_config.json", "model.safetensors")
 WEIGHTS_BYTES = 99_173_660
 
 
-class DepthUnavailable(ValueError):
+class DepthUnavailable(Refusal):
     """The model cannot run here. The message says why in plain words."""
 
 
@@ -102,24 +105,22 @@ class DepthModel:
         return cast(np.ndarray, out[0, 0].float().cpu().numpy())
 
 
-class Cancelled(Exception):
-    pass
-
-
 Downloader = Callable[..., Any]
+DOWNLOAD_THREAD = "phi-depth-download"
 
 
 class Download:
-    """One download of the model's files, in its own thread, with progress and cancel.
+    """One download of the model's files, on its own one-thread executor, with progress and cancel.
 
-    WHY its own thread, not Studio's depth thread or asyncio's default executor: a 99 MB fetch
-    must not hold up depth jobs, and the default executor is shared with the terminal.
-    WHY cancel works over plain HTTP: hf_hub_download calls the progress bar's update() for every
-    chunk it writes (huggingface_hub file_download.py http_get); update() raises once cancel is
-    pressed, which ends the transfer, and a later download resumes from the .incomplete file.
-    NOT VERIFIED for a file served through Xet (hf_xet is installed): that path reports progress
-    from its own callback, and whether it passes the exception up is untested. Cancel is also
-    checked between files."""
+    The same pattern as the Models page (hub_api.HubApi.fetcher, hub.download): its own executor,
+    a threading.Event to cancel, and hub._silent_bar as the progress bar.
+    WHY its own executor, not Studio's depth thread or asyncio's default one: a 99 MB fetch must
+    not hold up depth jobs, and the default executor is shared with the rest of Studio.
+    WHY cancel works over plain HTTP: hf_hub_download calls the bar's update() for every chunk it
+    writes; on_bytes raises once cancel is pressed, which ends the transfer, and a later download
+    resumes from the .incomplete file. On the Xet path the exception may come back wrapped, or only
+    when the file is done, so cancel is checked first on any error and again between files.
+    NOT VERIFIED against the network: Xet cancel has only been exercised with a fake downloader."""
 
     def __init__(self, on_change: Callable[[dict[str, Any]], None],
                  cache_dir: Path | None = None,
@@ -132,7 +133,8 @@ class Download:
         self.total = WEIGHTS_BYTES
         self.error: str | None = None
         self._cancel = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._pool = ThreadPoolExecutor(1, thread_name_prefix=DOWNLOAD_THREAD)
+        self._future: Future[None] | None = None
         self._last_push = 0.0
 
     def view(self) -> dict[str, Any]:
@@ -147,56 +149,35 @@ class Download:
             return False
         self._cancel.clear()
         self.state, self.done, self.error = "running", 0, None
-        self._thread = threading.Thread(target=self._run, name="phi-depth-download", daemon=True)
-        self._thread.start()
+        self._future = self._pool.submit(self._run)
         self.on_change(self.view())
         return True
 
     def cancel(self) -> None:
         self._cancel.set()
 
-    def join(self, timeout: float | None = None) -> None:
-        if self._thread is not None:
-            self._thread.join(timeout)
+    def close(self) -> None:
+        self._cancel.set()
+        self._pool.shutdown(wait=False, cancel_futures=True)
 
-    def _progress(self, n: int) -> None:
-        if self._cancel.is_set():
-            raise Cancelled()
-        self.done += n
-        now = time.monotonic()
-        # WHY throttle: chunks come many times a second; 4 pushes a second is plenty for a bar
-        if now - self._last_push > 0.25:
-            self._last_push = now
-            self.on_change(self.view())
+    def join(self, timeout: float | None = None) -> None:
+        if self._future is not None:
+            wait([self._future], timeout)
 
     def _run(self) -> None:
-        job = self
-        finished: list[int] = []  # bytes of the files already complete, so progress adds up
+        from phi_studio import hub
 
-        class Bar:
-            """The progress bar hf_hub_download builds per file. Not a tqdm: it prints nothing."""
+        finished = 0  # bytes of the files already complete
 
-            def __init__(self, **kw: Any) -> None:
-                self.n = int(kw.get("initial") or 0)
-                job.done = sum(finished) + self.n
-
-            def __enter__(self) -> Bar:
-                return self
-
-            def __exit__(self, *exc: object) -> None:
-                return None
-
-            def update(self, n: int = 1) -> None:
-                self.n += n
-                job._progress(n)
-
-            def close(self) -> None:
-                return None
-
-            def __getattr__(self, name: str) -> Any:
-                # WHY: huggingface_hub's Xet path (XetDownloadProgressReporter) also calls
-                # set_postfix_str and other tqdm methods; a missing one failed every download.
-                return lambda *a, **k: None
+        def on_bytes(n: int) -> None:
+            self.done += n
+            now = time.monotonic()
+            # WHY throttle: chunks come many times a second; 4 pushes a second is plenty for a bar
+            if now - self._last_push > 0.25:
+                self._last_push = now
+                self.on_change(self.view())
+            if self._cancel.is_set():
+                raise hub.Cancelled("Download cancelled.")
 
         try:
             if self.downloader is None:
@@ -207,16 +188,25 @@ class Download:
                 fetch = self.downloader
             for f in FILES:
                 if self._cancel.is_set():
-                    raise Cancelled()
-                path = fetch(REPO, f, revision=REVISION, cache_dir=self.cache_dir, token=False,
-                             tqdm_class=cast(Any, Bar))  # fmt: skip
-                finished.append(Path(path).stat().st_size if Path(path).is_file() else 0)
+                    raise hub.Cancelled("Download cancelled.")
+                try:
+                    path = fetch(REPO, f, revision=REVISION, cache_dir=self.cache_dir, token=False,
+                                 tqdm_class=cast(Any, hub._silent_bar(on_bytes)))  # fmt: skip
+                except Exception:
+                    if self._cancel.is_set():
+                        raise hub.Cancelled("Download cancelled.") from None
+                    raise
+                finished += Path(path).stat().st_size if Path(path).is_file() else 0
+                self.done = finished  # WHY: retries and Range resets can skew the summed chunks
             self.state = "done" if cached(self.cache_dir) else "failed"
             if self.state == "failed":
                 self.error = "The files arrived but the cache does not show them. Try again."
-        except Cancelled:
+        except hub.Cancelled:
             self.state, self.error = "cancelled", None
         except Exception as e:  # WHY all: a network or disk error must reach the page, not a log
             self.state = "failed"
-            self.error = f"The download failed: {type(e).__name__}: {e}"
+            # WHY the pattern only, not hub._scrub: that reads the stored token to blank it, and
+            # this download never reads one (token=False sends none).
+            msg = f"The download failed: {type(e).__name__}: {e}"
+            self.error = hub._TOKEN_RE.sub("<token>", msg)
         self.on_change(self.view())

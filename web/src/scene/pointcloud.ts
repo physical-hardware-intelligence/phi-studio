@@ -1,31 +1,16 @@
 // Point clouds from environment reconstruction, one layer per camera, drawn in the 3D view's world frame (metres,
-// z up, the arm base at the origin). Kept out of engine.ts: the engine only gives a scene, requestRender and onDispose.
+// z up, the arm base at the origin). Kept out of engine.ts: the engine gives a scene, requestRender, onDispose,
+// onContext and setPosed. The binary format and the pose choice are pure, in lib/reconCore.ts (tested in Node).
 //
-// Each cloud arrives as binary from GET /api/recon/cloud/{id} (src/phi_studio/recon.py pack): "PCL1", uint32 n,
-// uint32 n_off_arm, float32 xyz * n, uint8 rgb * n. Points off the arm come first, so "hide points on the arm" is a
-// draw range, not a rebuild.
+// Points off the arm come first in each cloud, so "hide points on the arm" is a draw range, not a rebuild.
+// The view draws only when something changes: each change here (a cloud in or out, a style) asks for one frame.
 import * as THREE from "three";
 import { type CloudInfo, reconStore, type ReconState } from "../lib/recon";
+import { parseCloud, posedFrom } from "../lib/reconCore";
 import { studio } from "../lib/studio";
 import type { Engine } from "./engine";
 
-// sRGB byte to linear float: three treats vertex colours as linear and converts to sRGB on output.
-const LINEAR = new Float32Array(256).map((_, i) => new THREE.Color().setRGB(i / 255, 0, 0, THREE.SRGBColorSpace).r);
-
 interface Layer { id: string; points: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>; n: number; nOff: number }
-
-/** Parse the binary cloud. Throws on a wrong header or a short body. */
-export function parseCloud(buf: ArrayBuffer): { n: number; nOff: number; positions: Float32Array; colors: Float32Array } {
-  const v = new DataView(buf);
-  if (buf.byteLength < 12 || v.getUint32(0, false) !== 0x50434c31) throw new Error("not a point cloud"); // "PCL1"
-  const n = v.getUint32(4, true), nOff = v.getUint32(8, true);
-  if (buf.byteLength !== 12 + 15 * n || nOff > n) throw new Error("point cloud size does not match its header");
-  const positions = new Float32Array(buf, 12, 3 * n); // a view, no copy: byte 12 is a multiple of 4
-  const rgb = new Uint8Array(buf, 12 + 12 * n, 3 * n);
-  const colors = new Float32Array(3 * n);
-  for (let i = 0; i < rgb.length; i++) colors[i] = LINEAR[rgb[i]];
-  return { n, nOff, positions, colors };
-}
 
 export class PointLayers {
   readonly group = new THREE.Group();
@@ -41,6 +26,7 @@ export class PointLayers {
     engine.scene.add(this.group);
     this.unsub = reconStore.subscribe(() => this.sync());
     engine.onDispose(() => this.dispose());
+    engine.onContext((lost) => this.context(lost));
     this.sync();
   }
 
@@ -67,8 +53,7 @@ export class PointLayers {
   /** While a dataset cloud is shown, draw its arm in that frame's pose (the same angles its arm boxes used); the
    * newest one wins when several are shown. Back to live or zero when none is. */
   private pose(s: ReconState): void {
-    const shown = Object.values(s.clouds).filter((c) => c.pose && s.settings.visible[c.camera] !== false);
-    const newest = shown.sort((a, b) => b.at - a.at)[0]?.pose ?? null;
+    const newest = posedFrom(s.clouds, s.settings.visible);
     const key = newest ? JSON.stringify(newest) : "";
     if (key === this.poseKey) return;
     this.poseKey = key;
@@ -128,6 +113,14 @@ export class PointLayers {
     l.points.material.dispose();
     this.layers.delete(cam);
     this.engine.requestRender();
+  }
+
+  /** The GPU context went away or came back. WHY free on loss: like the engine's own render targets, the buffers
+   * are freed against the dead context, not the new one. The CPU copies stay in each geometry's attributes, so
+   * three uploads them again on the first frame after the restore. */
+  private context(lost: boolean): void {
+    if (lost) for (const l of this.layers.values()) l.points.geometry.dispose();
+    else this.engine.requestRender();
   }
 
   /** How many layers and points are drawn, for checks in the browser. */

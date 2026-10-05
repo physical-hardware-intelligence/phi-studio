@@ -257,3 +257,19 @@ def test_table_fit_cannot_see_a_wrong_camera_height() -> None:
     fit = recon.fit_scale(disp, recon.table_depth(cam, wrong, bases=[(0.0, 0.0)]))
     assert fit.ok and fit.inlier_fraction > 0.99 and fit.median_mm < 0.01
     assert abs(fit.s - 0.7) > 0.1  # the scale is wrong all the same
+
+
+def small_cloud_blob() -> bytes:
+    """Three points, two off the arm, with colours that pin the byte order and the colour LUT."""
+    pos = np.array([[0.25, -0.5, 0.0], [1.0, 2.0, 3.0], [-0.125, 0.0625, 0.5]], dtype=np.float64)
+    col = np.array([[0, 128, 255], [255, 0, 1], [10, 20, 30]], dtype=np.uint8)
+    return recon.pack(recon.Cloud(pos, col, 2, recon.Fit(True, "")))
+
+
+def test_pack_matches_the_web_fixture() -> None:
+    """web/tests/recon.test.ts parses this same file with the page's parser: the two sides of the
+    binary format are checked against one set of bytes."""
+    from pathlib import Path
+
+    fixture = Path(__file__).parents[1] / "web" / "tests" / "fixtures" / "cloud3.pcl"
+    assert fixture.read_bytes() == small_cloud_blob()

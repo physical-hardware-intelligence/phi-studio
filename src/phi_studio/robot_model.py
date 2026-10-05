@@ -366,10 +366,12 @@ def geom_pose(model: RobotModel, world: Mapping[str, np.ndarray], g: Geom) -> np
 #     says this mapping "is not yet reflected" in the MJCF. One indirect check
 #     (SIM_SETUP.md:138-139) put it 2.5 deg off. Studio uses the same placeholder.
 MAP_STATUS = "assumed: not checked on a physical arm"
+# Sent to the page, so plain words only. Arm: phi simulation/so101_mujoco_utils.py:80-84 and
+# group/sim/sim_gate.py:56-58. Gripper: phi group/sim/sim_gate.py:20-23 and
+# simulation/so101_mujoco_utils.py:63-70.
 MAP_SOURCES = {
-    "arm": "phi simulation/so101_mujoco_utils.py:80-84, group/sim/sim_gate.py:56-58",
-    GRIPPER: "phi group/sim/sim_gate.py:20-23, simulation/so101_mujoco_utils.py:63-70 "
-    "(a placeholder there too)",
+    "arm": "The same mapping phi's simulation uses.",
+    GRIPPER: "The same mapping phi's simulation uses, a placeholder there too.",
 }
 TICKS_PER_REV = 4096  # STS3215; LeRobot divides by 4095, its max_res (motors_bus.py:872)
 
@@ -439,6 +441,32 @@ def lerobot_to_mjcf(
     return out
 
 
+def arm_units(use_degrees: bool, calibration: Any) -> dict[str, Any]:
+    """What one arm's joint readings mean, for the web view (web/src/lib/sceneCore.ts readArm, which
+    applies m100_to_degrees's formula). `calibration` is the arm's LeRobot calibration JSON, or None
+    when there is no file. A -100..100 arm with no usable range on every body joint gets a problem
+    instead of ranges: its pose cannot be drawn."""
+    if use_degrees:
+        return {"unit": "degrees", "calibration": None, "problem": None}
+    ranges: dict[str, dict[str, int]] = {}
+    for j in ARM_JOINTS:
+        c = calibration.get(j) if isinstance(calibration, dict) else None
+        try:
+            lo, hi = int(c["range_min"]), int(c["range_max"])  # type: ignore[index]
+            mode = int(c.get("drive_mode", 0))  # type: ignore[union-attr]
+        except (TypeError, KeyError, ValueError, AttributeError):
+            break
+        if hi <= lo:
+            break
+        ranges[j] = {"range_min": lo, "range_max": hi, "drive_mode": mode}
+    if len(ranges) == len(ARM_JOINTS):
+        return {"unit": "m100", "calibration": ranges, "problem": None}
+    why = ("no calibration file" if calibration is None
+           else "no usable range in its calibration file")  # fmt: skip
+    return {"unit": "m100", "calibration": None,
+            "problem": f"reads -100 to 100 and has {why}, so its pose is not drawn"}  # fmt: skip
+
+
 # -- what the web view needs -----------------------------------------------------------------------
 def driving_servos(model: RobotModel) -> dict[str, int]:
     """For each joint, the visual servo geom that turns it: the STS3215 bolted in the parent body
@@ -474,7 +502,7 @@ WRIST_CAMERA = {
     "fovy_deg": 85.0,
     "mount": "From the upstream CAD (SO-ARM100 PR #176). "
     "That your mount matches it is not checked.",
-    "fov": "Estimated by eye in phi (group/sim/twin_scene.py:50), not measured.",
+    "fov": "Estimated by eye, not measured.",  # phi group/sim/twin_scene.py:50
 }
 # Front and top cameras: the user places them. These starting poses are phi's by-eye estimates for
 # its own rig (group/sim/twin_scene.py:44-46), in the MJCF world frame of one arm.

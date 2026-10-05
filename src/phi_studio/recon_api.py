@@ -44,6 +44,7 @@ import numpy as np
 from aiohttp import web
 
 from phi_studio import depth_model, recon, robot_model
+from phi_studio.errors import Refusal
 
 if TYPE_CHECKING:
     from phi_studio.server import Client, Studio
@@ -56,6 +57,7 @@ LIVE_FRESH_S = 2.0
 # WHY 2 kept: while keep-updating replaces a cloud, the page may still be fetching the last one.
 CLOUDS_PER_CAMERA = 2
 TOKEN_HEADER = "X-Phi-Token"
+DEGREES = robot_model.arm_units(True, None)  # what an arm robot-config.yaml does not name reads
 NO_LIVE = "No camera is streaming. Start teleop or camera align to capture live."
 
 _states: weakref.WeakKeyDictionary[Studio, Recon] = weakref.WeakKeyDictionary()
@@ -63,10 +65,6 @@ _states: weakref.WeakKeyDictionary[Studio, Recon] = weakref.WeakKeyDictionary()
 
 def state_of(studio: Studio) -> Recon:
     return _states[studio]
-
-
-class Refused(ValueError):
-    """A capture that cannot give a cloud, with a message the page shows as is."""
 
 
 @dataclass
@@ -107,15 +105,15 @@ def dataset_frame(root: str, episode: int, frame: int, key: str) -> Frame:
         want = str(Path(root).expanduser().resolve())
         ds = next((d for d in cr.discover() if str(Path(d.root).resolve()) == want), None)
         if ds is None:
-            raise Refused(f"No LeRobot dataset at {root}.")
+            raise Refusal(f"No LeRobot dataset at {root}.")
         if not 0 <= episode < ds.episodes:
-            raise Refused(f"Episode {episode} is out of range: this dataset has episodes "
+            raise Refusal(f"Episode {episode} is out of range: this dataset has episodes "
                           f"0 to {ds.episodes - 1}.")  # fmt: skip
         if key not in ds.cameras:
-            raise Refused(f"This dataset has no camera {key}. It has {', '.join(ds.cameras)}.")
+            raise Refusal(f"This dataset has no camera {key}. It has {', '.join(ds.cameras)}.")
         lds = _lerobot_dataset(ds.repo_id, ds.root, episode)
         if not 0 <= frame < len(lds):
-            raise Refused(f"Frame {frame} is out of range: episode {episode} has frames 0 to "
+            raise Refusal(f"Frame {frame} is out of range: episode {episode} has frames 0 to "
                           f"{len(lds) - 1}.")  # fmt: skip
         item = lds[frame]
         img = item[key]  # (3, H, W) float in 0..1
@@ -141,7 +139,7 @@ def live_frame(studio: Studio, key: str) -> Frame:
     msg = studio.latest_frame.get(key)
     arrived = studio.frame_clock.get(key, (None, None))[0]
     if msg is None or arrived is None or time.monotonic() - arrived > LIVE_FRESH_S:
-        raise Refused(NO_LIVE)
+        raise Refusal(NO_LIVE)
     rgb = np.asarray(Image.open(io.BytesIO(msg["jpeg"])).convert("RGB"), dtype=np.uint8)
     arms = (studio.telemetry or {}).get("arms") or {}
     readings = {name: dict(a.get("pos") or {}) for name, a in arms.items()}
@@ -152,16 +150,16 @@ def live_frame(studio: Studio, key: str) -> Frame:
 def _vec(v: Any, what: str) -> tuple[float, float, float]:
     if not (isinstance(v, list | tuple) and len(v) == 3
             and all(isinstance(x, int | float) and math.isfinite(x) for x in v)):  # fmt: skip
-        raise Refused(f"{what} must be three numbers.")
+        raise Refusal(f"{what} must be three numbers.")
     return float(v[0]), float(v[1]), float(v[2])
 
 
 def _pose(p: Any, name: str) -> dict[str, Any]:
     if not isinstance(p, dict):
-        raise Refused(f"Place the {name} camera in the 3D view first.")
+        raise Refusal(f"Place the {name} camera in the 3D view first.")
     fovy = p.get("fovy_deg")
     if not (isinstance(fovy, int | float) and 5 <= fovy <= 150):
-        raise Refused(f"The {name} camera's vertical field of view must be 5 to 150 degrees.")
+        raise Refusal(f"The {name} camera's vertical field of view must be 5 to 150 degrees.")
     return {"pos": _vec(p.get("pos"), "Position"), "target": _vec(p.get("target"), "Looks at"),
             "up": _vec(p.get("up"), "Up"), "fovy_deg": float(fovy),
             "placed": bool(p.get("placed"))}  # fmt: skip
@@ -280,35 +278,43 @@ class Recon:
             frame = self._frame(r)
             t_frame = time.perf_counter()
             out = self._cloud(job.camera, r, frame)
-        except (Refused, depth_model.DepthUnavailable) as e:
-            return {**base_msg, "kind": "refused", "message": str(e),
-                    "model_missing": isinstance(e, depth_model.DepthUnavailable)}  # fmt: skip
-        except recon.ScaleRefused as e:
+        except recon.ScaleRefused as e:  # a Refusal too: caught first for its fit numbers
             fit = e.fit.numbers() if e.fit is not None else None
             return {**base_msg, "kind": "refused", "message": str(e), "fit": fit}
+        except Refusal as e:  # DepthUnavailable is one: the page then offers the download
+            return {**base_msg, "kind": "refused", "message": str(e),
+                    "model_missing": isinstance(e, depth_model.DepthUnavailable)}  # fmt: skip
         except ValueError as e:  # AlignError and other plain problems with the request
             return {**base_msg, "kind": "refused", "message": str(e)}
         out.setdefault("ms", {})["frame"] = round((t_frame - t0) * 1000)
         out["ms"]["total"] = round((time.perf_counter() - t0) * 1000)
         return {**base_msg, **out}
 
+    def _units(self) -> dict[str, Any]:
+        """robot-config.yaml's units per arm; {} when this Studio has no file roots (tests)."""
+        if getattr(self.studio, "files", None) is None:
+            return {}
+        from phi_studio import scene_api
+
+        return scene_api.rig_units(self.studio)
+
     def _frame(self, r: dict[str, Any]) -> Frame:
         if r.get("source") == "dataset":
             root, episode, frame = r.get("root"), r.get("episode"), r.get("frame")
             key = r.get("key")
             if not isinstance(root, str) or not root:
-                raise Refused("Pick a dataset.")
+                raise Refusal("Pick a dataset.")
             if not (isinstance(episode, int) and isinstance(frame, int)):
-                raise Refused("Episode and frame must be whole numbers.")
+                raise Refusal("Episode and frame must be whole numbers.")
             if not isinstance(key, str):
-                raise Refused("Pick a camera of the dataset.")
+                raise Refusal("Pick a camera of the dataset.")
             return dataset_frame(root, episode, frame, key)
         if r.get("source") == "live":
             key = r.get("key")
             if not isinstance(key, str):
-                raise Refused("Pick a camera.")
+                raise Refusal("Pick a camera.")
             return live_frame(self.studio, key)
-        raise Refused("Pick where the picture comes from: a dataset frame or live.")
+        raise Refusal("Pick where the picture comes from: a dataset frame or live.")
 
     def _cloud(self, camera: str, r: dict[str, Any], frame: Frame) -> dict[str, Any]:
         model = robot_model.load()
@@ -324,18 +330,31 @@ class Recon:
             arms = [{"name": "dataset", "base": host["base"] if host else (0.0, 0.0, 0.0)}]
         elif not arms:
             arms = [{"name": n, "base": (0.0, 0.0, 0.0)} for n in list(frame.readings)[:1]]
+        # Each arm's units from robot-config.yaml, as the 3D view reads them (scene_api.rig_units,
+        # web/src/lib/sceneCore.ts readArm). ASSUMED: a dataset frame was recorded in the units of
+        # the follower that shows it; nothing in a LeRobot dataset says which mode it used.
+        rig = self._units()
+        units: dict[str, dict[str, Any]] = {}
+        for a in arms:
+            who = drawn_on if a["name"] == "dataset" else a["name"]
+            units[a["name"]] = (rig.get(who) if who else None) or DEGREES
         angles: dict[str, dict[str, float]] = {}
         for a in arms:
             reads = frame.readings.get(a["name"])
-            if reads and all(j in reads for j in robot_model.JOINTS):
-                angles[a["name"]] = robot_model.lerobot_to_mjcf(model, reads)
+            u = units[a["name"]]
+            if u["problem"] is None and reads and all(j in reads for j in robot_model.JOINTS):
+                angles[a["name"]] = robot_model.lerobot_to_mjcf(
+                    model, reads, units=u["unit"], calibration=u["calibration"])
 
         estimate: dict[str, Any]
         if _is_wrist(camera):
             wrist_arm = r.get("wrist_arm") if frame.source["kind"] == "live" else "dataset"
             arm = next((a for a in arms if a["name"] == wrist_arm), arms[0] if arms else None)
+            if arm is not None and units[arm["name"]]["problem"]:
+                raise Refusal(f"The wrist camera cannot be placed: its arm "
+                              f"{units[arm['name']]['problem']}.")  # fmt: skip
             if arm is None or arm["name"] not in angles:
-                raise Refused("The wrist camera rides on the arm, and there is no joint reading "
+                raise Refusal("The wrist camera rides on the arm, and there is no joint reading "
                               "for that arm to place it.")  # fmt: skip
             c2w = recon.wrist_camera_pose(model, angles[arm["name"]], arm["base"])
             fovy = float(robot_model.WRIST_CAMERA["fovy_deg"])  # type: ignore[arg-type]
@@ -375,9 +394,10 @@ class Recon:
         blob = recon.pack(cloud)
         cid = secrets.token_urlsafe(12)
         pose = None
-        if drawn_on is not None and "dataset" in angles:
+        if drawn_on is not None and "dataset" in frame.readings:
             # The raw readings, as telemetry sends them: the page converts both the same way.
-            pose = {"arm": drawn_on, "pos": frame.readings["dataset"],
+            # The units too, so the page draws it, or refuses to, exactly as the boxes were made.
+            pose = {"arm": drawn_on, "pos": frame.readings["dataset"], "units": units["dataset"],
                     "label": f"pose from episode {frame.source['episode']}, "
                              f"frame {frame.source['frame']}"}  # fmt: skip
         return {"kind": "cloud", "id": cid, "url": f"/api/recon/cloud/{cid}", "bytes": len(blob),
@@ -417,7 +437,7 @@ class Recon:
 
     def close(self) -> None:
         self.closed = True
-        self.download.cancel()
+        self.download.close()
         for t in (self.pump, self.keep_task):
             if t is not None:
                 t.cancel()
@@ -436,7 +456,10 @@ def _scene_camera(r: dict[str, Any]) -> str:
 def register(studio: Studio) -> None:
     st = Recon(studio)
     _states[studio] = st
-    studio.shutdown_hooks.append(st.close)
+    async def close() -> None:
+        st.close()
+
+    studio.on_close.append(close)
 
     async def status(client: Client, msg: dict[str, Any]) -> None:
         client.push(st.status())
