@@ -1,0 +1,80 @@
+/* ---- Train: tokens only, so dark (the default) and light both work ---- */
+.train-where { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: 14px var(--space-4); }
+.train-seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: var(--radius-lg); background: var(--bg-sunken); border: 1px solid var(--border-subtle); flex: none; }
+.train-seg-btn {
+  height: var(--control-h-sm); padding: 0 14px; border: 0; border-radius: var(--radius-md); background: transparent;
+  color: var(--text-secondary); font: 500 var(--text-sm)/1 var(--font-sans); cursor: pointer;
+}
+.train-seg-btn:hover { color: var(--text-primary); }
+.train-seg-btn.is-on { background: var(--bg-raised); color: var(--text-primary); box-shadow: 0 0 0 1px var(--border-strong); }
+.train-seg-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+
+.train-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.train-wide { grid-column: 1 / -1; }
+.train-form .field.train-wide { gap: var(--space-3); }
+@container content (max-width: 720px) { .train-form { grid-template-columns: minmax(0, 1fr); } }
+.train-gap { margin-top: var(--space-4); }
+.train-kv { margin-top: 0; }
+.train-names { margin: var(--space-2) 0 var(--space-3); padding-left: var(--space-5); display: grid; gap: 2px; color: var(--text-primary); }
+.train .dialog-text p + p, .dialog-text .train-names + p { margin-top: var(--space-2); }
+.train-script { display: grid; gap: var(--space-3); }
+.train-script .cmd-block pre { max-height: 420px; }
+
+.train-notice-body { display: grid; gap: 2px; min-width: 0; }
+.train-io { margin-top: var(--space-2); font-size: var(--text-sm); }
+.train-io > summary { cursor: pointer; color: var(--text-tertiary); width: fit-content; }
+.train-io > summary:hover { color: var(--text-secondary); }
+.train-io[open] > summary { margin-bottom: var(--space-2); }
+.train-pre {
+  margin: 0 0 var(--space-2); padding: 8px 10px; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--bg-sunken); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg);
+  font: 400 var(--text-xs)/1.25rem var(--font-mono); color: var(--text-primary);
+}
+.train-tail { max-height: 320px; white-space: pre; overflow-wrap: normal; }
+
+.train-check-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.check-list.is-running { opacity: 0.75; }
+
+.train-settings { max-height: calc(100vh - 48px); overflow-y: auto; }
+.train-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); margin-bottom: var(--space-5); }
+@media (max-width: 640px) { .train-settings-grid { grid-template-columns: minmax(0, 1fr); } }
+.train-env { min-height: 180px; }
+
+.train-runs .ellipsis { max-width: 260px; }
+.train-run { cursor: pointer; }
+.train-run:hover > td { background: var(--bg-hover); }
+.train-run:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.train-run.is-selected > td { background: var(--bg-selected); }
+
+.train-detail-actions { display: flex; align-items: center; gap: var(--space-2); }
+.train-detail-foot { margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--border-subtle); display: grid; gap: var(--space-3); }
+.train-where-to { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.4375rem; overflow-wrap: anywhere; }
+.train-detail-foot .form-actions { flex-wrap: wrap; }
+
+/* charts: one measure each, one y axis; the line wears the accent, text wears text tokens */
+.train-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); margin-top: var(--space-4); }
+@container content (max-width: 900px) { .train-charts { grid-template-columns: minmax(0, 1fr); } }
+.train-chart { margin: 0; min-width: 0; }
+.train-chart-title { font-size: var(--text-sm); font-weight: 500; color: var(--text-secondary); margin-bottom: var(--space-1); }
+.train-chart-box { position: relative; min-width: 0; }
+.train-chart-box svg { display: block; overflow: visible; }
+.chart-grid { stroke: var(--border-subtle); stroke-width: 1; }
+.chart-axis { stroke: var(--border-strong); stroke-width: 1; }
+.chart-tick { fill: var(--text-tertiary); font: 400 var(--text-2xs) var(--font-sans); font-variant-numeric: tabular-nums; }
+.chart-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart-dot { fill: var(--accent); stroke: var(--bg-panel); stroke-width: 2; }
+.chart-cross { stroke: var(--text-tertiary); stroke-width: 1; stroke-dasharray: 3 3; }
+.chart-hit { fill: transparent; cursor: crosshair; }
+.chart-tip {
+  position: absolute; pointer-events: none; min-width: 120px; padding: 6px 10px; border-radius: var(--radius-lg);
+  background: var(--bg-raised); box-shadow: var(--shadow-float); font-size: var(--text-xs); line-height: 1.25rem; color: var(--text-secondary);
+}
+.chart-tip-value { color: var(--text-primary); font-weight: 600; }
+
+@container content (max-width: 640px) {
+  .train-where { flex-direction: column; align-items: stretch; }
+  .train-seg { align-self: flex-start; }
+}
+
+/* base.css has no disabled look for .btn-danger, so a disabled Cancel stayed solid red. Same look as .btn-primary:disabled. */
+.train-detail .btn-danger:disabled { background: var(--bg-active); color: var(--text-disabled); border-color: transparent; }
