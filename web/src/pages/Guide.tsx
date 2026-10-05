@@ -248,7 +248,7 @@ function Pages() {
 }
 
 const STATES: [string, string, string][] = [
-  ["Offline", "No rig session", "Connect"],
+  ["Rig not connected", "No rig session", "Connect"],
   ["Connecting", "Reading each arm", "Wait"],
   ["Confirm arms", "Arms read, not yet confirmed", "Check each arm, then confirm"],
   ["Torque off", "Confirmed, followers limp", "Enable torque"],

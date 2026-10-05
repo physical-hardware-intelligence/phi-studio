@@ -50,7 +50,7 @@ log = logging.getLogger(__name__)
 Handler = Callable[["Client", dict[str, Any]], Awaitable[None]]
 # Modules that add commands to Studio, each with register(studio). A missing one is skipped, so a
 # feature can land on its own.
-FEATURES = ("setup_api", "hub_api", "train_api", "scene_api", "data_api")
+FEATURES = ("setup_api", "hub_api", "train_api", "scene_api", "recon_api", "data_api")
 
 COMMANDS = {"heartbeat", "connect", "identify", "confirm", "arm", "start", "stop", "resume",
             "release", "clear", "disconnect", "inject",
@@ -153,6 +153,9 @@ class Studio:
         # interval between frames, for the checks. Written by the reader thread as whole tuples.
         self.cameras: dict[str, dict[str, Any]] = {}
         self.frame_clock: dict[str, tuple[float, float | None]] = {}
+        # The newest frame message per camera (JPEG and size), for features that look at what the
+        # cameras already stream (recon_api's live capture). Written by the reader thread.
+        self.latest_frame: dict[str, dict[str, Any]] = {}
         self.checks: dict[str, Any] | None = None  # the newest check run, for the assistant
         self.code_root = code_root or CODE_ROOT
         self.rig_dir = rig_dir  # the phi checkout: data_api also looks for datasets in its data/
@@ -216,6 +219,7 @@ class Studio:
         elif kind == "worker_exit":
             self._note("error", msg.get("message", ""), None)
         elif kind == "frame":
+            self.latest_frame[msg["key"]] = msg
             self._frame(msg["key"])
         elif kind == "camera":
             self.cameras[msg["key"]] = {"online": msg.get("online"), "message": msg.get("message")}

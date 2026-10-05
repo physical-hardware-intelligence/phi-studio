@@ -1,0 +1,1033 @@
+{
+ "model": "so101_new_calib_camera",
+ "source": {
+  "repo": "https://github.com/TheRobotStudio/SO-ARM100",
+  "path": "Simulation/SO101/so101_new_calib_camera.xml",
+  "commit": "5f6d2b876a53a4872e405b991dd925556c9e38a4",
+  "generator": "onshape-to-robot, from the official SO-101 Onshape CAD",
+  "license": "Apache-2.0"
+ },
+ "conventions": {
+  "length": "m",
+  "angle": "rad",
+  "quat": "w x y z",
+  "up": "+z",
+  "forward": "+x"
+ },
+ "bodies": [
+  {
+   "name": "base",
+   "parent": null,
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "quat": [
+    1.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "joints": []
+  },
+  {
+   "name": "shoulder",
+   "parent": "base",
+   "pos": [
+    0.0388353,
+    -8.97657e-09,
+    0.0624
+   ],
+   "quat": [
+    3.56167e-16,
+    1.22818e-15,
+    -1.0,
+    -4.14635e-16
+   ],
+   "joints": [
+    "shoulder_pan"
+   ]
+  },
+  {
+   "name": "upper_arm",
+   "parent": "shoulder",
+   "pos": [
+    -0.0303992,
+    -0.0182778,
+    -0.0542
+   ],
+   "quat": [
+    0.5,
+    -0.5,
+    -0.5,
+    -0.5
+   ],
+   "joints": [
+    "shoulder_lift"
+   ]
+  },
+  {
+   "name": "lower_arm",
+   "parent": "upper_arm",
+   "pos": [
+    -0.11257,
+    -0.028,
+    1.73763e-16
+   ],
+   "quat": [
+    0.7071067811865475,
+    -5.986128147598917e-17,
+    -2.5805092014641316e-17,
+    0.7071067811865475
+   ],
+   "joints": [
+    "elbow_flex"
+   ]
+  },
+  {
+   "name": "wrist",
+   "parent": "lower_arm",
+   "pos": [
+    -0.1349,
+    0.0052,
+    3.62355e-17
+   ],
+   "quat": [
+    0.7071067811865475,
+    9.587217033245734e-16,
+    -7.513127675070513e-16,
+    -0.7071067811865475
+   ],
+   "joints": [
+    "wrist_flex"
+   ]
+  },
+  {
+   "name": "gripper",
+   "parent": "wrist",
+   "pos": [
+    5.55112e-17,
+    -0.0611,
+    0.0181
+   ],
+   "quat": [
+    0.017209108230571014,
+    -0.017209108230571014,
+    0.7068973380865913,
+    0.7068973380865913
+   ],
+   "joints": [
+    "wrist_roll"
+   ]
+  },
+  {
+   "name": "wrist_camera_mount",
+   "parent": "gripper",
+   "pos": [
+    -0.015,
+    0.024,
+    -0.0315
+   ],
+   "quat": [
+    0.49979812266828816,
+    -0.5001999599912929,
+    0.49980179734237956,
+    -0.5001999599912929
+   ],
+   "joints": []
+  },
+  {
+   "name": "wrist_camera",
+   "parent": "wrist_camera_mount",
+   "pos": [
+    -0.04941,
+    -0.03813,
+    0.0175
+   ],
+   "quat": [
+    0.37978693649389456,
+    -0.5964584309361936,
+    -0.37978833153177,
+    -0.596456240026065
+   ],
+   "joints": []
+  },
+  {
+   "name": "moving_jaw_so101_v1",
+   "parent": "gripper",
+   "pos": [
+    0.0202,
+    0.0188,
+    -0.0234
+   ],
+   "quat": [
+    0.7071067811865471,
+    0.7071067811865471,
+    -1.8536194263994097e-08,
+    1.8536194263994097e-08
+   ],
+   "joints": [
+    "gripper"
+   ]
+  }
+ ],
+ "joints": {
+  "shoulder_pan": {
+   "body": "shoulder",
+   "type": "hinge",
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "range": [
+    -1.9198621771937616,
+    1.9198621771937634
+   ]
+  },
+  "shoulder_lift": {
+   "body": "upper_arm",
+   "type": "hinge",
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "range": [
+    -1.7453292519943224,
+    1.7453292519943366
+   ]
+  },
+  "elbow_flex": {
+   "body": "lower_arm",
+   "type": "hinge",
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "range": [
+    -1.69,
+    1.69
+   ]
+  },
+  "wrist_flex": {
+   "body": "wrist",
+   "type": "hinge",
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "range": [
+    -1.6580628494556928,
+    1.6580627293335335
+   ]
+  },
+  "wrist_roll": {
+   "body": "gripper",
+   "type": "hinge",
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "range": [
+    -2.7438472969992493,
+    2.841206309382605
+   ]
+  },
+  "gripper": {
+   "body": "moving_jaw_so101_v1",
+   "type": "hinge",
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "range": [
+    -0.17453297762778586,
+    1.7453291995659765
+   ]
+  }
+ },
+ "geoms": [
+  {
+   "index": 0,
+   "body": "base",
+   "mesh": "base_motor_holder_so101_v1",
+   "pos": [
+    -0.00636471,
+    -9.94414e-05,
+    -0.0024
+   ],
+   "quat": [
+    0.5,
+    0.5,
+    0.5,
+    0.5
+   ],
+   "rgba": [
+    1.0,
+    0.82,
+    0.12,
+    1.0
+   ],
+   "material": "base_motor_holder_so101_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 1,
+   "body": "base",
+   "mesh": "base_so101_v2",
+   "pos": [
+    -0.00636471,
+    -8.97657e-09,
+    -0.0024
+   ],
+   "quat": [
+    0.5,
+    0.5,
+    0.5,
+    0.5
+   ],
+   "rgba": [
+    1.0,
+    0.82,
+    0.12,
+    1.0
+   ],
+   "material": "base_so101_v2_material",
+   "role": "visual"
+  },
+  {
+   "index": 2,
+   "body": "base",
+   "mesh": "sts3215_03a_v1",
+   "pos": [
+    0.0263353,
+    -8.97657e-09,
+    0.0437
+   ],
+   "quat": [
+    1.0,
+    -2.85511e-16,
+    -9.64433e-17,
+    6.12908e-16
+   ],
+   "rgba": [
+    0.1,
+    0.1,
+    0.1,
+    1.0
+   ],
+   "material": "sts3215_03a_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 3,
+   "body": "base",
+   "mesh": "waveshare_mounting_plate_so101_v2",
+   "pos": [
+    -0.0309827,
+    -0.000199441,
+    0.0474
+   ],
+   "quat": [
+    0.5,
+    0.5,
+    0.5,
+    0.5
+   ],
+   "rgba": [
+    1.0,
+    0.82,
+    0.12,
+    1.0
+   ],
+   "material": "waveshare_mounting_plate_so101_v2_material",
+   "role": "visual"
+  },
+  {
+   "index": 4,
+   "body": "shoulder",
+   "mesh": "sts3215_03a_v1",
+   "pos": [
+    -0.0303992,
+    0.000422241,
+    -0.0417
+   ],
+   "quat": [
+    0.5,
+    0.5,
+    0.5,
+    -0.5
+   ],
+   "rgba": [
+    0.1,
+    0.1,
+    0.1,
+    1.0
+   ],
+   "material": "sts3215_03a_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 6,
+   "body": "shoulder",
+   "mesh": "motor_holder_so101_base_v1",
+   "pos": [
+    -0.0675992,
+    -0.000177759,
+    0.0158499
+   ],
+   "quat": [
+    0.5,
+    0.5,
+    -0.5,
+    0.5
+   ],
+   "rgba": [
+    1.0,
+    0.82,
+    0.12,
+    1.0
+   ],
+   "material": "motor_holder_so101_base_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 8,
+   "body": "shoulder",
+   "mesh": "rotation_pitch_so101_v1",
+   "pos": [
+    0.0122008,
+    2.22413e-05,
+    0.0464
+   ],
+   "quat": [
+    0.7071067811865475,
+    -0.7071067811865475,
+    -0.0,
+    8.316297426530474e-34
+   ],
+   "rgba": [
+    1.0,
+    0.82,
+    0.12,
+    1.0
+   ],
+   "material": "rotation_pitch_so101_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 10,
+   "body": "upper_arm",
+   "mesh": "sts3215_03a_v1",
+   "pos": [
+    -0.11257,
+    -0.0155,
+    0.0187
+   ],
+   "quat": [
+    4.563078587960112e-16,
+    -0.7071067811865475,
+    0.7071067811865475,
+    -1.3738295748698775e-16
+   ],
+   "rgba": [
+    0.1,
+    0.1,
+    0.1,
+    1.0
+   ],
+   "material": "sts3215_03a_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 12,
+   "body": "upper_arm",
+   "mesh": "upper_arm_so101_v1",
+   "pos": [
+    -0.065085,
+    0.012,
+    0.0182
+   ],
+   "quat": [
+    0.0,
+    1.0,
+    0.0,
+    0.0
+   ],
+   "rgba": [
+    1.0,
+    0.82,
+    0.12,
+    1.0
+   ],
+   "material": "upper_arm_so101_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 14,
+   "body": "lower_arm",
+   "mesh": "under_arm_so101_v1",
+   "pos": [
+    -0.0648499,
+    -0.032,
+    0.0182
+   ],
+   "quat": [
+    0.0,
+    1.0,
+    0.0,
+    0.0
+   ],
+   "rgba": [
+    1.0,
+    0.82,
+    0.12,
+    1.0
+   ],
+   "material": "under_arm_so101_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 16,
+   "body": "lower_arm",
+   "mesh": "motor_holder_so101_wrist_v1",
+   "pos": [
+    -0.0648499,
+    -0.032,
+    0.018
+   ],
+   "quat": [
+    3.92687e-16,
+    -1.0,
+    -1.9186e-15,
+    -6.38378e-16
+   ],
+   "rgba": [
+    1.0,
+    0.82,
+    0.12,
+    1.0
+   ],
+   "material": "motor_holder_so101_wrist_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 18,
+   "body": "lower_arm",
+   "mesh": "sts3215_03a_v1",
+   "pos": [
+    -0.1224,
+    0.0052,
+    0.0187
+   ],
+   "quat": [
+    7.21645e-16,
+    1.56949e-15,
+    1.0,
+    -3.33067e-16
+   ],
+   "rgba": [
+    0.1,
+    0.1,
+    0.1,
+    1.0
+   ],
+   "material": "sts3215_03a_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 20,
+   "body": "wrist",
+   "mesh": "sts3215_03a_no_horn_v1",
+   "pos": [
+    8.32667e-17,
+    -0.0424,
+    0.0306
+   ],
+   "quat": [
+    0.5,
+    0.5,
+    0.5,
+    -0.5
+   ],
+   "rgba": [
+    0.1,
+    0.1,
+    0.1,
+    1.0
+   ],
+   "material": "sts3215_03a_no_horn_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 22,
+   "body": "wrist",
+   "mesh": "wrist_roll_pitch_so101_v2",
+   "pos": [
+    0.0,
+    -0.028,
+    0.0181
+   ],
+   "quat": [
+    0.5,
+    -0.5,
+    -0.5,
+    -0.5
+   ],
+   "rgba": [
+    1.0,
+    0.82,
+    0.12,
+    1.0
+   ],
+   "material": "wrist_roll_pitch_so101_v2_material",
+   "role": "visual"
+  },
+  {
+   "index": 24,
+   "body": "gripper",
+   "mesh": "sts3215_03a_v1",
+   "pos": [
+    0.0077,
+    0.0001,
+    -0.0234
+   ],
+   "quat": [
+    0.7071067811865475,
+    -0.7071067811865475,
+    1.660149486268481e-15,
+    6.450938003763994e-15
+   ],
+   "rgba": [
+    0.1,
+    0.1,
+    0.1,
+    1.0
+   ],
+   "material": "sts3215_03a_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 26,
+   "body": "gripper",
+   "mesh": "wrist_roll_follower_so101_v1",
+   "pos": [
+    8.32667e-17,
+    -0.000218214,
+    0.000949706
+   ],
+   "quat": [
+    0.0,
+    1.0,
+    0.0,
+    0.0
+   ],
+   "rgba": [
+    1.0,
+    0.82,
+    0.12,
+    1.0
+   ],
+   "material": "wrist_roll_follower_so101_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 28,
+   "body": "wrist_camera_mount",
+   "mesh": "wrist_camera_mount_so101_v1",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "quat": [
+    1.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rgba": [
+    1.0,
+    0.82,
+    0.12,
+    1.0
+   ],
+   "material": "wrist_camera_mount_so101_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 30,
+   "body": "wrist_camera",
+   "mesh": "wrist_camera_so101_v1",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "quat": [
+    1.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rgba": [
+    0.1,
+    0.1,
+    0.1,
+    1.0
+   ],
+   "material": "wrist_camera_so101_v1_material",
+   "role": "visual"
+  },
+  {
+   "index": 32,
+   "body": "moving_jaw_so101_v1",
+   "mesh": "moving_jaw_so101_v1",
+   "pos": [
+    -5.55112e-17,
+    -5.55112e-17,
+    0.0189
+   ],
+   "quat": [
+    1.0,
+    -0.0,
+    3.00524e-16,
+    -2.00834e-17
+   ],
+   "rgba": [
+    1.0,
+    0.82,
+    0.12,
+    1.0
+   ],
+   "material": "moving_jaw_so101_v1_material",
+   "role": "visual"
+  }
+ ],
+ "sites": {
+  "baseframe": {
+   "body": "base",
+   "pos": [
+    8.67362e-19,
+    9.55596e-18,
+    3.46945e-18
+   ],
+   "quat": [
+    1.0,
+    -8.17396e-19,
+    3.78392e-17,
+    2.22045e-16
+   ]
+  },
+  "gripperframe": {
+   "body": "gripper",
+   "pos": [
+    -0.0079,
+    -0.000218121,
+    -0.0981274
+   ],
+   "quat": [
+    0.7071067811865475,
+    -0.0,
+    0.7071067811865475,
+    -2.377879264167753e-17
+   ]
+  }
+ },
+ "cameras": {},
+ "meshes": {
+  "base_motor_holder_so101_v1": {
+   "url": "/api/scene/mesh/base_motor_holder_so101_v1?v=8cd2f241037ea377",
+   "bytes": 1877084,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  "base_so101_v2": {
+   "url": "/api/scene/mesh/base_so101_v2?v=bb12b7026575e1f7",
+   "bytes": 471584,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  "motor_holder_so101_base_v1": {
+   "url": "/api/scene/mesh/motor_holder_so101_base_v1?v=31242ae6fb59d8b1",
+   "bytes": 1129384,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  "motor_holder_so101_wrist_v1": {
+   "url": "/api/scene/mesh/motor_holder_so101_wrist_v1?v=887f92e6013cb64e",
+   "bytes": 1052184,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  "moving_jaw_so101_v1": {
+   "url": "/api/scene/mesh/moving_jaw_so101_v1?v=785a9dded2f474bc",
+   "bytes": 1413584,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  "rotation_pitch_so101_v1": {
+   "url": "/api/scene/mesh/rotation_pitch_so101_v1?v=9be900cc2a2bf718",
+   "bytes": 883684,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  "sts3215_03a_no_horn_v1": {
+   "url": "/api/scene/mesh/sts3215_03a_no_horn_v1?v=75ef3781b752e406",
+   "bytes": 865884,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  "sts3215_03a_v1": {
+   "url": "/api/scene/mesh/sts3215_03a_v1?v=a37c871fb502483a",
+   "bytes": 954084,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  "under_arm_so101_v1": {
+   "url": "/api/scene/mesh/under_arm_so101_v1?v=d01d1f2de365651d",
+   "bytes": 1975884,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  "upper_arm_so101_v1": {
+   "url": "/api/scene/mesh/upper_arm_so101_v1?v=475056e03a17e719",
+   "bytes": 1303484,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  "waveshare_mounting_plate_so101_v2": {
+   "url": "/api/scene/mesh/waveshare_mounting_plate_so101_v2?v=e197e24005a07d01",
+   "bytes": 62784,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  "wrist_camera_mount_so101_v1": {
+   "url": "/api/scene/mesh/wrist_camera_mount_so101_v1?v=e17a626158951ac8",
+   "bytes": 173884,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ]
+  },
+  "wrist_camera_so101_v1": {
+   "url": "/api/scene/mesh/wrist_camera_so101_v1?v=1147857bb136876c",
+   "bytes": 128934,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  "wrist_roll_follower_so101_v1": {
+   "url": "/api/scene/mesh/wrist_roll_follower_so101_v1?v=4b17b410a12d64ec",
+   "bytes": 1439884,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  "wrist_roll_pitch_so101_v2": {
+   "url": "/api/scene/mesh/wrist_roll_pitch_so101_v2?v=6c7ec5525b4d8b9e",
+   "bytes": 2699784,
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  }
+ },
+ "joint_order": [
+  "shoulder_pan",
+  "shoulder_lift",
+  "elbow_flex",
+  "wrist_flex",
+  "wrist_roll",
+  "gripper"
+ ],
+ "mapping": {
+  "shoulder_pan": {
+   "unit": "degrees",
+   "scale": 0.017453292519943295,
+   "offset": 0.0,
+   "status": "assumed: not checked on a physical arm",
+   "source": "The same mapping phi's simulation uses."
+  },
+  "shoulder_lift": {
+   "unit": "degrees",
+   "scale": 0.017453292519943295,
+   "offset": 0.0,
+   "status": "assumed: not checked on a physical arm",
+   "source": "The same mapping phi's simulation uses."
+  },
+  "elbow_flex": {
+   "unit": "degrees",
+   "scale": 0.017453292519943295,
+   "offset": 0.0,
+   "status": "assumed: not checked on a physical arm",
+   "source": "The same mapping phi's simulation uses."
+  },
+  "wrist_flex": {
+   "unit": "degrees",
+   "scale": 0.017453292519943295,
+   "offset": 0.0,
+   "status": "assumed: not checked on a physical arm",
+   "source": "The same mapping phi's simulation uses."
+  },
+  "wrist_roll": {
+   "unit": "degrees",
+   "scale": 0.017453292519943295,
+   "offset": 0.0,
+   "status": "assumed: not checked on a physical arm",
+   "source": "The same mapping phi's simulation uses."
+  },
+  "gripper": {
+   "unit": "0..100",
+   "scale": 0.019198621771937624,
+   "offset": -0.17453297762778586,
+   "status": "assumed: not checked on a physical arm",
+   "source": "The same mapping phi's simulation uses, a placeholder there too."
+  }
+ },
+ "drives": {
+  "shoulder_pan": 2,
+  "shoulder_lift": 4,
+  "elbow_flex": 10,
+  "wrist_flex": 18,
+  "wrist_roll": 20,
+  "gripper": 24
+ },
+ "tool_site": "gripperframe",
+ "wrist_camera": {
+  "key": "wrist",
+  "body": "wrist_camera",
+  "pos": [
+   0.0,
+   0.0,
+   0.0263
+  ],
+  "quat": [
+   0.0,
+   0.0,
+   1.0,
+   0.0
+  ],
+  "fovy_deg": 85.0,
+  "mount": "From the upstream CAD (SO-ARM100 PR #176). That your mount matches it is not checked.",
+  "fov": "Estimated by eye, not measured."
+ },
+ "wrist_camera_bodies": [
+  "wrist_camera_mount",
+  "wrist_camera"
+ ],
+ "camera_defaults": {
+  "front": {
+   "pos": [
+    1.05,
+    0.04,
+    0.33
+   ],
+   "target": [
+    0.15,
+    0.0,
+    0.06
+   ],
+   "up": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "fovy_deg": 36.0
+  },
+  "top": {
+   "pos": [
+    0.23,
+    -0.02,
+    0.78
+   ],
+   "target": [
+    0.23,
+    -0.02,
+    0.0
+   ],
+   "up": [
+    0.0,
+    -1.0,
+    0.0
+   ],
+   "fovy_deg": 45.0
+  }
+ },
+ "pair_spacing_m": 0.4
+}

@@ -125,8 +125,8 @@ function Step({ id, lr, status }: { id: StepId; lr: LeRobotView; status: Record<
     align: <AlignStep lr={lr} />,
     record: <RecordStep lr={lr} />,
     dataset: <DatasetStep lr={lr} />,
-    train: <LinkStep route="train" text="Train a policy on your dataset. The Train page sends the job to Northeastern's cluster and follows it there." button="Open Train" />,
-    policy: <LinkStep route="models" text="Bring in a trained policy: type its Hugging Face repo id or search the Hub on the Models page, which checks that it fits this rig before it downloads. Then run it on the Run policy page." button="Open Models" also={{ route: "policy", button: "Open Run policy" }} />,
+    train: <LinkStep route="train" text="Train a policy on your dataset, on Northeastern's Explorer cluster or on this Mac. The Train page checks the cluster first, submits the job, charts the loss as it trains, and copies the checkpoints back." button="Open Train" />,
+    policy: <LinkStep route="models" text="Bring in a trained policy: type its Hugging Face repo id or search the Hub on the Models page. It reads the model's config first to check that its cameras and joints fit this rig, then downloads it and builds the command to run it on the arms." button="Open Models" also={{ route: "policy", button: "Open Run policy" }} />,
     evaluate: <LinkStep route="evaluate" text="Score a policy over many tries of one task. The Evaluate page records each try as a success or a failure and reports the success rate with a 95% interval, so two policies can be compared fairly." button="Open Evaluate" />,
   };
   return (

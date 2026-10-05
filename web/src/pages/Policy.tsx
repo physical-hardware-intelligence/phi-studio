@@ -1,10 +1,10 @@
 import { useState, type ReactNode } from "react";
 import { ActionBar } from "../components/ActionBar";
-import { Cameras } from "../components/Cameras";
 import { MockPanel } from "../components/MockPanel";
 import { Notices } from "../components/Notices";
 import { JOINTS, useStudio, type PolicyInfo } from "../lib/studio";
 import { label } from "../lib/labels";
+import { ViewSwitch } from "../scene/ViewSwitch";
 
 const LIMIT = { min: 1, max: 600 }; // seconds; the worker refuses anything else (worker.py POLICY_LIMIT_S)
 
@@ -40,7 +40,7 @@ export function Policy() {
       <Notices />
       <div className="work-grid">
         <div className="col">
-          <Cameras />
+          <ViewSwitch page="policy" />
           <ActionVsState />
         </div>
         <div className="col rail">
