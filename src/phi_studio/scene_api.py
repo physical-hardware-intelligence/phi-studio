@@ -7,9 +7,9 @@ No token: the model and meshes are public CAD (Apache-2.0, see NOTICE) and these
 nothing. The Host check stays, as on every Studio route, so a DNS-rebinding page cannot read them
 through a name that resolves to 127.0.0.1. Origin is not checked: a same-origin GET carries none.
 
-Not here yet, by design: point clouds from the cameras' depth (environment reconstruction) and
-the real-arm backend. A future depth feature can add its own route beside these and draw into the
-same three.js scene (web/src/scene/engine.ts), which is already in the robot's base frame.
+Point clouds from the cameras' depth (environment reconstruction) live in recon_api.py, with their
+own token-checked route, and draw into the same three.js scene through web/src/scene/pointcloud.ts.
+Not here yet: the real-arm backend.
 """
 
 from __future__ import annotations
