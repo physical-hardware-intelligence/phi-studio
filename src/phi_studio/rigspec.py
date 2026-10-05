@@ -191,8 +191,9 @@ def step_limit_issue(v: Any) -> str | None:
         return None
     if isinstance(v, dict):
         if set(v) != set(JOINTS):
+            # robots/utils.py:99-100 raises on any other set of keys
             return (f"lists {', '.join(map(str, v)) or 'no joints'}; LeRobot needs exactly the six "
-                    f"motors or it raises on every action (robots/utils.py:99-100)")  # fmt: skip
+                    "motors or it stops with an error on every move")  # fmt: skip
         vals = list(v.values())
     elif isinstance(v, bool) or not isinstance(v, (int, float)):
         return "is not a number or a per-joint mapping"
@@ -271,12 +272,11 @@ def parse(text: str) -> RigSpec:
                     # WHY leaders are always degrees and take no options: 0.6.0's bi_so_leader
                     # builds each arm from id, calibration_dir and port (bi_so_leader.py:42-52).
                     if "use_degrees" in sub:
-                        problems.append(f"{where}.use_degrees is ignored: bi_so_leader always "
-                                        "reads degrees (bi_so_leader.py:42-52).")  # fmt: skip
-                    if "cameras" in sub:
+                        problems.append(f"{where}.use_degrees is ignored: LeRobot's bimanual "
+                                        "leader always reads degrees.")  # fmt: skip
+                    if "cameras" in sub:  # config_so_leader.py:24-27 has no cameras field
                         problems.append(f"{where}.cameras: a leader has no cameras in "
-                                        "LeRobot (config_so_leader.py:24-27); put them under "
-                                        "robot.")  # fmt: skip
+                                        "LeRobot; put them under robot.")  # fmt: skip
                     opts: tuple[tuple[str, Any], ...] = ()
                     deg = True
                 else:
@@ -305,9 +305,9 @@ def parse(text: str) -> RigSpec:
                 use_degrees=_scalar(f.get("use_degrees")) is not False,
                 max_relative_target=dict(opts).get("max_relative_target"), options=opts,
             ))  # fmt: skip
-            if role == "leader" and "cameras" in f:
-                problems.append("teleop.cameras: a leader has no cameras in LeRobot "
-                                "(config_so_leader.py:24-27); put them under robot.")  # fmt: skip
+            if role == "leader" and "cameras" in f:  # config_so_leader.py:24-27
+                problems.append("teleop.cameras: a leader has no cameras in LeRobot; put them "
+                                "under robot.")  # fmt: skip
         if role == "follower":
             add_cameras(f"{section}.cameras", f.get("cameras"), None)
         if rid is None:
@@ -320,8 +320,9 @@ def parse(text: str) -> RigSpec:
     top = {c.key for c in cams if c.side is None}
     clash = sorted(top & {c.key for c in cams if c.side})
     if clash:
+        # bi_so_follower.py:46-52 refuses a name used in both places
         problems.append(f"Camera names {', '.join(clash)} are used both at the top and on an arm; "
-                        "bi_so_follower refuses that (bi_so_follower.py:46-52).")  # fmt: skip
+                        "LeRobot's bimanual follower refuses that.")  # fmt: skip
     sides = {a.side for a in arms}
     if None in sides and len(sides) > 1:
         problems.append(
@@ -378,52 +379,237 @@ def _usable(cam: CameraSpec) -> bool:
     return cam.source is not None
 
 
-def _cmd(id_: str, title: str, why: str, tool: str, args: Sequence[str] = ()) -> dict[str, str]:
-    return {"id": id_, "title": title, "why": why,
+def _cmd(step: str, id_: str, title: str, why: str, tool: str,
+         args: Sequence[str] = ()) -> dict[str, str]:  # fmt: skip
+    return {"step": step, "id": id_, "title": title, "why": why,
             "cmd": " ".join([tool, *(shlex.quote(a) for a in args)])}  # fmt: skip
+
+
+# The setup steps a command belongs to, in the order of LeRobot's SO-101 and imitation-learning docs
+# (huggingface.co/docs/lerobot/v0.6.0/so101 and /il_robots). Studio's own steps (camera align,
+# train, models, evaluate) sit between and after these; the web app owns that full list.
+STEPS = ("ports", "motors", "calibrate", "teleop", "cameras", "record", "dataset")
 
 
 def lerobot_commands(spec: RigSpec) -> list[dict[str, str]]:
     robots = [a for a in spec.arms if a.section == "robot"]
     teleops = [a for a in spec.arms if a.section == "teleop"]
-    out = [_cmd("find_port", "Find each arm's port",
-                "Unplug one arm when it asks; the port that disappears is that arm's.",
+    robot_args = _device_args("robot", robots, spec.robot) if robots else []
+    teleop_args = _device_args("teleop", teleops, spec.teleop) if teleops else []
+    cams = _cameras_args(spec)
+    out = [_cmd("ports", "find_port", "Find each arm's port with LeRobot's tool",
+                "It asks you to unplug one arm, and the port that disappears is that arm's. "
+                "Studio's port finder above does the same for every arm and saves the result.",
                 "lerobot-find-port")]  # fmt: skip
     for a in robots + teleops:
         dev = "robot" if a.section == "robot" else "teleop"
-        why = "Once per new arm: connect one motor at a time when asked (ids 1 to 6)."
+        why = ("Once per new arm, before it is assembled: connect one motor at a time when it "
+               "asks, gripper first.")  # fmt: skip
         if a.side:
-            why += " lerobot-setup-motors refuses bimanual types, so each arm runs as a single arm."
+            # lerobot_setup_motors.py:55-66 lists single-arm types only
+            why += " LeRobot cannot do this for a bimanual type, so each arm runs on its own."
         args = [f"--{dev}.type={a.single_type}", f"--{dev}.port={a.port or '<port>'}"]
         title = f"Set motor ids, {a.key.replace('_', ' ')}"
-        out.append(_cmd(f"setup_motors_{a.key}", title, why, "lerobot-setup-motors", args))
+        out.append(_cmd("motors", f"setup_motors_{a.key}", title, why, "lerobot-setup-motors",
+                        args))  # fmt: skip
     for dev, arms, sec in (("robot", robots, spec.robot), ("teleop", teleops, spec.teleop)):
         if arms:
             noun = ("follower" if dev == "robot" else "leader") + ("s" if len(arms) > 1 else "")
             files = ", ".join(f"{a.lerobot_id}.json" for a in arms if a.lerobot_id)
-            out.append(_cmd(f"calibrate_{dev}", f"Calibrate the {noun}", f"Writes {files}.",
+            why = f"Writes {files}."
+            # so_follower.py:115-143: Enter keeps an existing file, c redoes it; wrist roll is
+            # not swept. bimanual.py:52-54: one run does left, then right.
+            why += (" Put every joint in the middle of its range and press Enter, then move each "
+                    "joint end to end except wrist roll, and press Enter again. If a file exists, "
+                    "Enter keeps it and c redoes it.")  # fmt: skip
+            if len(arms) > 1:
+                why += " It does the left arm, then the right."
+            out.append(_cmd("calibrate", f"calibrate_{dev}", f"Calibrate the {noun}", why,
                             "lerobot-calibrate", _device_args(dev, arms, sec)))  # fmt: skip
     if robots and teleops:
-        args = (
-            _device_args("robot", robots, spec.robot)
-            + _cameras_args(spec)
-            + _device_args("teleop", teleops, spec.teleop)
-        )
-        out.append(_cmd("teleoperate", "Teleoperate",
-                        "LeRobot's default rate is 60 fps (lerobot_teleoperate.py:140).",
-                        "lerobot-teleoperate", [*args, "--display_data=true"]))  # fmt: skip
-        rec = [*args, "--dataset.repo_id=<hf_user>/<dataset>", "--dataset.single_task=<task>",
-               "--dataset.num_episodes=10", "--display_data=true"]  # fmt: skip
+        # lerobot_teleoperate.py:140: 60 fps by default
+        out.append(_cmd("teleop", "teleoperate", "Teleoperate",
+                        "Move the leader and the follower copies it, 60 times a second. Stop or "
+                        "Ctrl-C ends it.",
+                        "lerobot-teleoperate", [*robot_args, *teleop_args]))  # fmt: skip
+    # lerobot_find_cameras.py:292-311: saves frames to outputs/captured_images over 6 s
+    out.append(_cmd("cameras", "find_cameras", "List cameras with LeRobot's tool",
+                    "Saves a picture from every camera it finds to outputs/captured_images. "
+                    "Studio's camera finder above shows the same pictures and saves the numbers.",
+                    "lerobot-find-cameras", ["opencv"]))  # fmt: skip
+    if robots and teleops and cams:
+        out.append(_cmd("cameras", "teleoperate_cameras", "Teleoperate with the cameras",
+                        "Check that every view shows the whole workspace.",
+                        "lerobot-teleoperate",
+                        [*robot_args, *cams, *teleop_args, "--display_data=true"]))  # fmt: skip
+    out.append(_cmd("record", "hf_login", "Sign in to Hugging Face",
+                    "Once per Mac. It asks for a token from huggingface.co/settings/tokens. The "
+                    "shell hides what you type, and Studio does not save or log it.",
+                    "hf", ["auth", "login"]))  # fmt: skip
+    if robots and teleops:
+        rec = [*robot_args, *cams, *teleop_args, "--dataset.repo_id=<hf_user>/<dataset>",
+               "--dataset.single_task=<task>", "--dataset.num_episodes=10",
+               "--dataset.streaming_encoding=true", "--dataset.encoder_threads=2",
+               "--display_data=true"]  # fmt: skip
         # WHY: a camera left out of --robot.cameras is a dataset with no frames from it, so the
         # command that writes the dataset says so, not only the Dataset keys panel.
         left_out = [c.feature for c in spec.cameras if not _usable(c)]
         gap = (f" It leaves out {', '.join(left_out)}: no usable device in robot-config.yaml, "
                "so the dataset gets no frames from " + ("it." if len(left_out) == 1 else "them.")
                if left_out else "")  # fmt: skip
-        # keyboard_input.py:160-170; push_to_hub defaults to true (configs/dataset.py:43)
-        out.append(_cmd("record", "Record a dataset",
-                        "Right arrow ends an episode early, left arrow records it again, Esc "
-                        "stops. It uploads to the Hub at the end unless "
+        # keyboard_input.py:160-170 keys; lerobot_record.py:431-438 refuses eval_ and stamps the
+        # name (configs/dataset.py stamp_repo_id); push_to_hub defaults to true (dataset.py:43).
+        # Esc sets stop_recording, so the loop saves the episode in progress; Ctrl-C raises out of
+        # the loop, and the finally block (lerobot_record.py:517-538) finalizes and uploads only
+        # the episodes already saved. Studio's Stop, and Esc in Studio, send Ctrl-C (terminal.ts).
+        out.append(_cmd("record", "record", "Record a dataset",
+                        "LeRobot's keys: right arrow ends an episode early, left arrow records "
+                        "it again, Esc stops and keeps the episode in progress. Studio's Stop, "
+                        "and Esc in this window, send Ctrl-C instead: saved episodes are kept "
+                        "and uploaded, the one in progress is dropped. LeRobot adds the date "
+                        "and time to the name, like "
+                        "_20261004_153000, so later steps need that full name. Names starting "
+                        "with eval_ are refused. It uploads to the Hub at the end unless you add "
                         "--dataset.push_to_hub=false." + gap,
                         "lerobot-record", rec))  # fmt: skip
+    # lerobot_dataset_viz.py:305-427 (argparse); lerobot_replay.py:81-99
+    out.append(_cmd("dataset", "visualize", "Look through an episode",
+                    "Opens the episode in the Rerun viewer: every camera and joint over time.",
+                    "lerobot-dataset-viz",
+                    ["--repo-id", "<hf_user>/<recorded>", "--episode-index", "0"]))  # fmt: skip
+    if robots:
+        out.append(_cmd("dataset", "replay", "Replay an episode on the follower",
+                        "The follower repeats episode 0 on its own, with no leader. Clear the "
+                        "table first and keep a hand near its power.",
+                        "lerobot-replay",
+                        [*robot_args, "--dataset.repo_id=<hf_user>/<recorded>",
+                         "--dataset.episode=0"]))  # fmt: skip
     return out
+
+
+# -- lerobot-rollout -----------------------------------------------------------------------------
+
+# lerobot-rollout's strategies (rollout/configs.py:53-189) in the order the Models page offers
+# them. Every one but base writes a dataset and refuses to start without --dataset.repo_id
+# (configs.py:263-273); base refuses one (configs.py:275-278).
+ROLLOUT_STRATEGIES = ("base", "sentry", "highlight", "episodic", "dagger")
+ROLLOUT_RECORDS = frozenset({"sentry", "highlight", "episodic", "dagger"})
+# A rollout dataset's name must start with this (rollout/context.py:354-359). lerobot-record
+# refuses names that start with eval_ (lerobot_record.py:431-437), so neither tool takes eval_.
+ROLLOUT_PREFIX = "rollout_"
+# sentry and dagger push every upload_every_n_episodes episodes whatever --dataset.push_to_hub says
+# (strategies/sentry.py:153-154, 205-229; dagger.py:450-451, 701-733), so with upload off Studio
+# sets the count past any real session. [JUDGEMENT] a billion episodes never comes.
+ROLLOUT_NO_UPLOAD = 1_000_000_000
+_IMAGES = "observation.images."
+
+
+def _num(v: float) -> str:
+    return str(int(v)) if float(v).is_integer() else str(v)
+
+
+def rollout_command(
+    spec: RigSpec,
+    policy_path: str,
+    task: str,
+    duration_s: float = 60,
+    strategy: str = "base",
+    dataset_repo_id: str | None = None,
+    rename_map: dict[str, str] | None = None,
+    episodes: int = 10,
+    upload: bool = False,
+) -> str:
+    """lerobot-rollout for this rig and one policy. Raises Refusal (a ValueError), in plain words,
+    for anything lerobot-rollout would refuse at start-up.
+
+    policy_path: a local snapshot folder or a Hub repo id; LeRobot reads config.json and
+    model.safetensors from a folder without the network (configs/policies.py:185-187,
+    policies/pretrained.py:195-198).
+    duration_s: --duration, after which base, sentry, highlight and dagger stop
+    (strategies/base.py:58). episodic ignores it and records `episodes` episodes of duration_s each
+    (strategies/episodic.py:98-101), so it becomes --dataset.episode_time_s.
+    rename_map: {rig camera key: model camera key}, the shape LeRobot's own hint prints
+    (rollout/context.py:324-325). Empty means none.
+    upload: False adds --dataset.push_to_hub=false, and for sentry and dagger an
+    upload_every_n_episodes no session reaches, because their background push ignores push_to_hub
+    (see ROLLOUT_NO_UPLOAD). Highlight's h key and dagger's Enter key still upload on demand
+    (strategies/highlight.py:160-163; dagger.py:553-557), so the page says so.
+    Every recording adds --dataset.private=true. WHY: LeRobot's default is None
+    (configs/dataset.py:45), which create_repo turns into a public repo on a personal account
+    (datasets/lerobot_dataset.py:587-591; hf_api.py:4536), and footage of the room should never
+    become public by accident."""
+    from phi_studio.errors import Refusal  # WHY here: this file's imports are shared
+
+    if strategy not in ROLLOUT_STRATEGIES:
+        raise Refusal(f"Unknown strategy {strategy!r}; lerobot-rollout takes "
+                      f"{', '.join(ROLLOUT_STRATEGIES)}.")  # fmt: skip
+    robots = [a for a in spec.arms if a.section == "robot"]
+    teleops = [a for a in spec.arms if a.section == "teleop"]
+    if not robots:
+        raise Refusal("robot-config.yaml has no follower arm, so there is nothing to run.")
+    if not str(policy_path or "").strip():
+        raise Refusal("Pick a downloaded model first.")
+    task = " ".join(str(task or "").split())
+    records = strategy in ROLLOUT_RECORDS
+    if records and not task:
+        raise Refusal("Write the task: a recording saves it with every episode.")
+    if not (isinstance(duration_s, (int, float)) and not isinstance(duration_s, bool)
+            and 1 <= duration_s <= 86400):  # fmt: skip
+        # WHY no 0: LeRobot reads --duration=0 as run forever (rollout/configs.py:224). NaN fails
+        # both comparisons, so it is refused too.
+        raise Refusal("Duration must be 1 second to 24 hours.")
+    args = [f"--strategy.type={strategy}", f"--policy.path={policy_path}"]
+    args += _device_args("robot", robots, spec.robot) + _cameras_args(spec)
+    if strategy == "dagger":
+        # DAgger hands the arm to the leader for corrections (rollout/configs.py:259-260).
+        if not teleops:
+            raise Refusal("Taking over needs a leader arm, and robot-config.yaml has none.")
+        args += _device_args("teleop", teleops, spec.teleop)
+    if task:
+        args.append(f"--task={task}")
+    if strategy != "episodic":
+        args.append(f"--duration={_num(duration_s)}")
+    repo = str(dataset_repo_id or "").strip()
+    if not records:
+        if repo:
+            raise Refusal("Just running a model records nothing, so it takes no dataset name. "
+                          "Pick a recording strategy to save a dataset.")  # fmt: skip
+    else:
+        owner, _, name = repo.partition("/")
+        if not owner or not name or "/" in name:
+            raise Refusal("Name the dataset as `owner/rollout_name`.")
+        if not name.startswith(ROLLOUT_PREFIX):
+            raise Refusal(f"lerobot-rollout only records into a dataset whose name starts "
+                          f"with `{ROLLOUT_PREFIX}`, for example `{owner}/{ROLLOUT_PREFIX}"
+                          "pick_cube`.")  # fmt: skip
+        counted = strategy in ("episodic", "dagger")  # sentry and highlight take no count
+        if counted and (not isinstance(episodes, int) or isinstance(episodes, bool)
+                        or episodes < 1):  # fmt: skip
+            raise Refusal("Record at least 1 episode.")
+        args += [f"--dataset.repo_id={repo}", f"--dataset.single_task={task}",
+                 "--dataset.private=true"]  # fmt: skip
+        if counted:
+            # DAgger takes its episode count from the dataset when not set (configs.py:311-317).
+            args.append(f"--dataset.num_episodes={episodes}")
+        if strategy == "episodic":
+            args.append(f"--dataset.episode_time_s={_num(duration_s)}")
+        if not upload:
+            args.append("--dataset.push_to_hub=false")
+            if strategy in ("sentry", "dagger"):
+                args.append(f"--strategy.upload_every_n_episodes={ROLLOUT_NO_UPLOAD}")
+    renames = {str(k): str(v) for k, v in (rename_map or {}).items() if k != v}
+    if renames:
+        rig = {c.feature for c in spec.cameras if _usable(c)}
+        for src, dst in renames.items():
+            if not src.startswith(_IMAGES) or not dst.startswith(_IMAGES):
+                raise Refusal(f"Camera keys start with `{_IMAGES}`: `{src}`, `{dst}`.")
+            if src not in rig:
+                raise Refusal(f"The rig has no camera `{src}` with a device to rename.")
+        if len(set(renames.values())) < len(renames):
+            raise Refusal("Two rig cameras are mapped to the same model camera.")
+        kept = rig - set(renames)
+        if clash := sorted(set(renames.values()) & kept):
+            raise Refusal(f"`{clash[0]}` is already one of the rig's cameras; renaming "
+                          "another camera to it would hide one of the two.")  # fmt: skip
+        args.append(f"--rename_map={json.dumps(renames, separators=(',', ':'))}")
+    return " ".join(["lerobot-rollout", *(shlex.quote(a) for a in args)])
