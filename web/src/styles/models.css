@@ -79,6 +79,8 @@
 .mdl-dataset .input { flex: 1; min-width: 120px; }
 .mdl-check { display: flex; align-items: flex-start; gap: var(--space-2); font-size: var(--text-sm); line-height: 1.4375rem; color: var(--text-secondary); margin-top: var(--space-1); cursor: pointer; }
 .mdl-check input { margin-top: 4px; accent-color: var(--accent); }
+.mdl-map-open { justify-self: start; }
+.mdl-pending { min-height: 2.5rem; }
 .mdl-cammap { display: grid; grid-template-columns: minmax(120px, max-content) minmax(0, 1fr); gap: var(--space-2) var(--space-4); align-items: center; margin-top: var(--space-1); }
 .mdl-safety {
   display: flex; align-items: flex-start; gap: var(--space-2); padding: 10px 12px; border-radius: var(--radius-lg);

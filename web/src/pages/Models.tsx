@@ -2,7 +2,7 @@ import { ArrowLeft, Download, ExternalLink, Heart, LogIn, Play, RefreshCw, Searc
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { CommandBlock } from "../components/CommandBlock";
 import {
-  asRepoId, fmtBytes, fmtCount, fmtDate, hub, imageSize, useHub,
+  asRepoId, downloadView, fmtBytes, fmtCount, fmtDate, hub, imageSize, useHub,
   type Detail, type LocalModel, type ModelInfo, type Progress as Job, type RigCamera, type SearchRow,
 } from "../lib/hub";
 import { useStudio } from "../lib/studio";
@@ -44,7 +44,8 @@ export function Models() {
         </div>
         <div className="col">
           {view?.kind === "hub" && <ModelDetail repoId={view.repoId} onRun={run} onClose={() => { setView(null); hub.closeDetail(); }} />}
-          {view?.kind === "run" && <RunOnArms repoId={view.repoId} revision={view.revision} onBack={() => open(view.repoId)} onClose={() => setView(null)} />}
+          {/* WHY key: a new model gets a fresh panel, so no mapping or command carries over */}
+          {view?.kind === "run" && <RunOnArms key={`${view.repoId}@${view.revision}`} repoId={view.repoId} revision={view.revision} onBack={() => open(view.repoId)} onClose={() => setView(null)} />}
           {!view && (
             <section className="panel">
               <p className="empty">Search for a policy, paste a Hugging Face link, or pick a model on this Mac.</p>
@@ -249,8 +250,11 @@ function FitList({ title, fit, rig }: { title: string; fit: { problems?: string[
 function DownloadBox({ info, here, older, onRun }: { info: ModelInfo; here?: LocalModel; older?: LocalModel; onRun: (m: { repo_id: string; revision: string }) => void }) {
   const job = useHub((s) => s.download);
   const control = useStudio((s) => s.control);
+  const view = downloadView(job, info.repo_id, info.revision);
   const mine = job && job.repo_id === info.repo_id && (job.revision === info.revision || job.revision === null);
   const busy = job && (job.state === "running" || job.state === "cancelling");
+  // a failed or cancelled try of this model: its message stays beside the button, to try again
+  const lastTry = mine && (job.state === "error" || job.state === "cancelled") ? job : null;
   if (here) {
     return (
       <div className="mdl-download">
@@ -270,10 +274,11 @@ function DownloadBox({ info, here, older, onRun }: { info: ModelInfo; here?: Loc
           <button className="mdl-link" onClick={() => onRun(older)}>Run that one</button>, or download this version.
         </p>
       )}
-      {mine && job ? <DownloadProgress job={job} /> : (
+      {view === "progress" && job ? <DownloadProgress job={job} /> : (
         <>
+          {lastTry?.message && <p className={lastTry.state === "error" ? "mdl-error" : "field-hint"}><Rich text={lastTry.message} /></p>}
           <button className="btn btn-primary" disabled={!!why || !!busy} title={why || undefined} onClick={() => hub.download(info.repo_id, info.revision)}>
-            <Download aria-hidden /> Download {fmtBytes(info.total_size)}
+            <Download aria-hidden /> {lastTry ? "Try the download again" : `Download ${fmtBytes(info.total_size)}`}
           </button>
           {why && <p className="field-hint">{why}</p>}
           <p className="field-hint">Into the Hugging Face cache, where LeRobot looks. Studio checks every file's size and checksum.</p>
@@ -364,7 +369,7 @@ function OnThisMac({ onRun, onOpen, selected }: { onRun: (m: LocalModel) => void
 const STRATEGIES: { id: string; label: string; what: string }[] = [
   { id: "base", label: "Just run it", what: "Runs the model for the time below and records nothing." },
   { id: "sentry", label: "Run and record everything", what: "Records the whole run into a dataset, saved in pieces as it goes." },
-  { id: "highlight", label: "Run, and save moments when I press s", what: "Keeps the last 10 seconds in memory. Press s to save them and keep recording, s again to stop. With upload on, h uploads." },
+  { id: "highlight", label: "Run, and save moments when I press s", what: "Keeps the last 10 seconds in memory. Press s to save them and keep recording, s again to stop." },
   { id: "episodic", label: "Record episodes, like Record a dataset", what: "One episode at a time, with a reset between. Right arrow ends an episode, left arrow redoes it, Esc stops. The arm returns to its start pose between episodes." },
   { id: "dagger", label: "Run, and let me correct it with the leader", what: "Space pauses the model. Tab starts a correction, where you drive the follower with your leader arm. Each correction is saved as an episode." },
 ];
@@ -396,11 +401,17 @@ function RunOnArms({ repoId, revision, onBack, onClose }: { repoId: string; revi
   const renameMap = useMemo(() => Object.fromEntries(Object.entries(cams).filter(([m, r]) => r && r !== m).map(([m, r]) => [r, m])), [cams]);
   const rigNames = new Set((rig?.cameras ?? []).map((c) => c.key));
   const needsMap = modelCams.some((k) => !rigNames.has(k)) || Object.keys(renameMap).length > 0;
+  const [mapOpen, setMapOpen] = useState(false); // the editor on request, when every name matches
+  // WHY: while a new command is on its way the last fit stays on screen, so the list does not flicker;
+  // the command itself does not, so Run can only type what the panel shows now.
+  const lastFit = useRef<{ problems: string[]; warnings: string[] } | null>(null);
+  if (reply) lastFit.current = reply;
   const owner = who ?? "<hf_user>";
   const dataset = records ? `${owner}/rollout_${form.dataset.trim()}` : null;
 
   useEffect(() => {
     if (!model?.has_weights) return;
+    hub.editingRollout(); // the old command goes now, not after the debounce
     const t = window.setTimeout(() => hub.buildRollout({
       repo_id: repoId, revision, task: form.task, duration_s: Number(form.duration), strategy: form.strategy,
       episodes: Math.round(Number(form.episodes)), dataset_repo_id: records && form.dataset.trim() ? dataset : null,
@@ -469,13 +480,20 @@ function RunOnArms({ repoId, revision, onBack, onClose }: { repoId: string; revi
             <span className="field-hint">lerobot-rollout only records into a name that starts with rollout_, and adds the date and time to it.</span>
             <label className="mdl-check">
               <input type="checkbox" checked={form.upload} onChange={(e) => set({ upload: e.target.checked })} />
-              Upload the dataset to Hugging Face as it records (public unless your account makes new repos private)
+              Upload the dataset to your Hugging Face account as it records. It goes up as a private dataset.
             </label>
+            {strategy.id === "highlight" && <span className="field-hint">Pressing h uploads what is saved so far, privately, even with this off.</span>}
+            {strategy.id === "dagger" && <span className="field-hint">Pressing Enter uploads what is saved so far, privately, even with this off.</span>}
           </div>
         )}
-        {needsMap && <CameraMap modelCams={model.cameras} rigCams={rig?.cameras ?? []} value={cams} onChange={setCams} />}
-        <FitList title="Fit with this rig" fit={reply ?? { problems: model.problems, warnings: model.warnings }} rig={rig} />
+        {needsMap || mapOpen
+          ? <CameraMap modelCams={model.cameras} rigCams={rig?.cameras ?? []} value={cams} onChange={setCams} namesDiffer={needsMap && !mapOpen} />
+          : modelCams.length > 0 && (
+            <button className="btn btn-ghost btn-sm mdl-map-open" onClick={() => setMapOpen(true)}>Change which camera feeds the model</button>
+          )}
+        <FitList title="Fit with this rig" fit={reply ?? lastFit.current ?? { problems: model.problems, warnings: model.warnings }} rig={rig} />
         {reply?.error && <p className="mdl-error"><Rich text={reply.error} /></p>}
+        {!reply && model.has_weights && <p className="field-hint mdl-pending">Building the command...</p>}
         {reply?.cmd && (
           <>
             <CommandBlock cmd={reply.cmd} run={(reply.problems ?? []).length === 0} />
@@ -488,14 +506,18 @@ function RunOnArms({ repoId, revision, onBack, onClose }: { repoId: string; revi
   );
 }
 
-function CameraMap({ modelCams, rigCams, value, onChange }: {
+function CameraMap({ modelCams, rigCams, value, onChange, namesDiffer }: {
   modelCams: Record<string, number[]>; rigCams: RigCamera[]; value: Record<string, string>; onChange: (v: Record<string, string>) => void;
+  namesDiffer: boolean;
 }) {
   const used = new Map(Object.entries(value).filter(([, r]) => r).map(([m, r]) => [r, m]));
   return (
     <div className="field">
       <span className="field-label">Cameras</span>
-      <span className="field-hint">The model's camera names differ from your rig's. Pick which rig camera feeds each one.</span>
+      <span className="field-hint">
+        {namesDiffer ? "The model's camera names differ from your rig's. Pick which rig camera feeds each one."
+          : "Each model camera reads the rig camera of the same name. Pick another to swap them."}
+      </span>
       <div className="mdl-cammap">
         {Object.entries(modelCams).map(([key, shape]) => (
           <Fragment key={key}>
