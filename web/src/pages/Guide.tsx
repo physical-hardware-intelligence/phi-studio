@@ -150,14 +150,16 @@ function Rig() {
             Two arms and three cameras are more than a laptop's own USB bus should power; a bus-powered hub can brown
             out mid-recording.
           </> },
-        { title: "Find each arm's port", to: "setup", open: "Commands", body: <>
-            Run <Id>lerobot-find-port</Id> and unplug one arm when it asks: the port that disappears is that arm's. Put
-            the ports in <Id>robot-config.yaml</Id>. A port name can change after a replug or reboot.
+        { title: "Find each arm's port", to: "setup", open: "Set up", body: <>
+            The Find ports step asks you to unplug each arm in turn and plug it back in: the port that goes away is that
+            arm's. When the last one is found it saves them all to <Id>robot-config.yaml</Id>, keeping your comments and
+            a backup. A port name can change after a replug or reboot; Studio remembers each board's USB serial and
+            offers the new name.
           </> },
         { title: "Set the motor ids", body: <>
             Once per new arm, with <Id>lerobot-setup-motors</Id>. Skip this for the assembled Kit Pro.
           </> },
-        { title: "Calibrate each arm", to: "setup", open: "Commands", body: <>
+        { title: "Calibrate each arm", to: "setup", open: "Set up", body: <>
             Run <Id>lerobot-calibrate</Id> for the followers, then the leaders. Studio's Calibrate page writes only the
             mock rig's files. When it asks for the middle of the range, put every joint mid-range, and Wrist Roll at the
             centre of the range you will use with the gripper level. Wrist Roll has no stops: you get 180° either way
@@ -167,9 +169,14 @@ function Rig() {
             Without <Id>max_relative_target</Id> LeRobot sends every goal to the follower as it is. Set one number, or
             all six joints by name, each above 0; the commands on the Set up page pass it on.
           </> },
-        { title: "Fill in the camera devices", to: "checks", open: "Checks", body: <>
-            Each camera in <Id>robot-config.yaml</Id> needs its device: <Id>index_or_path</Id> for an opencv camera,{" "}
-            <Id>serial_number_or_name</Id> for a RealSense. Checks flags any still set to TBD.
+        { title: "Find the cameras", to: "setup", open: "Set up", body: <>
+            The Cameras step shows a picture from every camera number. Say which picture is which camera and save: Studio
+            writes each <Id>index_or_path</Id> to <Id>robot-config.yaml</Id>. A RealSense needs its{" "}
+            <Id>serial_number_or_name</Id> typed in. Checks flags any camera still set to TBD.
+          </> },
+        { title: "Align the cameras each day", to: "setup", open: "Set up", body: <>
+            A policy only knows the camera views it was trained on. The Align cameras step compares each live camera
+            with a still frame of your dataset and says which way to move it until it lines up.
           </> },
       ]} />
     </Section>
@@ -193,6 +200,7 @@ const PAGE_HELP: { id: Route; title: string; what: string; how: ReactNode }[] = 
       step. It will not start while an arm holds torque, a cable is swapped, or the rig has a fault.
     </> },
   { id: "teleop", title: "Teleoperate", what: "Each follower follows its leader.", how: <>
+      <strong>Cameras</strong>, <strong>3D</strong> or <strong>Both</strong> picks what the page shows.{" "}
       <strong>Enable torque</strong>, then <strong>Start teleop</strong>: a 3 second countdown, which <Kbd>Esc</Kbd>{" "}
       cancels. A follower's goal is kept within 8° of where each joint is now (5 on the gripper's 0 to 100 scale); these
       limits are placeholders until tested on real arms. There is no time limit:
@@ -209,9 +217,30 @@ const PAGE_HELP: { id: Route; title: string; what: string; how: ReactNode }[] = 
       success rate comes with a 95% interval. Every judgement is saved at once, and an unfinished eval resumes the
       next time you start one.
     </> },
-  { id: "setup", title: "Set up", what: "Your rig as LeRobot reads robot-config.yaml.", how: <>
-      Each arm's type, port, calibration file, units and step limit; what LeRobot would refuse; the commands for this
-      rig in order, with a copy button; and the dataset keys a recording writes.
+  { id: "setup", title: "Set up", what: "Every step from a new rig to a recorded dataset, in order.", how: <>
+      Twelve steps, each marked done when Studio can tell: install, find ports, motor ids, calibrate, teleoperate,
+      cameras, align cameras, record, check the dataset, then links to Train, Models and Evaluate. Ports and cameras
+      are found and saved for you; the LeRobot commands for this rig sit under each step, with a Run button that
+      types them into the terminal panel.
+    </> },
+  { id: "scene", title: "3D view", what: "The arms as they move, drawn from the SO-101 CAD model.", how: <>
+      The follower is solid; the leader, or the policy's target during a run, is a ghost. A joint turns warm within 5%
+      of the model's range end and red past it. Place the front and top cameras with <strong>Move</strong>; the wrist
+      camera rides on its mount. Joint angles go through an assumed mapping not yet checked on a physical arm.{" "}
+      <strong>Workspace points</strong> turns a camera picture into a 3D point cloud in metres, scaled against the
+      table, and refuses when the fit is poor. It needs the depth model, downloaded once (99 MB).
+    </> },
+  { id: "train", title: "Train", what: "Train a LeRobot policy on Explorer or on this Mac.", how: <>
+      <strong>Check the cluster</strong> runs read-only checks first: ssh, partition, env, free submit slots, disk.{" "}
+      <strong>Submit</strong> sends the job as up to 8 chained parts, each resuming from the last checkpoint, and the
+      loss chart grows as it trains. <strong>Fetch newest checkpoint</strong> copies it back;{" "}
+      <strong>Cancel</strong> stops only this run's parts. <strong>Run on this Mac</strong> trains in the terminal
+      panel, fine for a short test. Studio cannot answer Duo or a password: ssh must log in with a key.
+    </> },
+  { id: "models", title: "Models", what: "Find a trained policy on the Hugging Face Hub and run it.", how: <>
+      Type a repo id or search. The detail reads the model's config to check its cameras and joints fit this rig before
+      anything downloads. <strong>Run on the arms</strong> builds the <Id>lerobot-rollout</Id> command; any recording
+      it makes uploads as a private dataset.
     </> },
   { id: "files", title: "Files", what: "Read-only view of the files that matter when something breaks.", how: <>
       Serial ports with the arm on each, the rig notes, the calibration files, search, and a viewer. Files that may

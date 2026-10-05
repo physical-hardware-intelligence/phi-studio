@@ -49,15 +49,15 @@ recordings appear under **Datasets**.
 
 | | Page | What it does |
 |---|---|---|
-| **Rig** | Set up | Port finder, camera finder and live camera alignment, with every LeRobot command pre-filled |
+| **Rig** | Set up | Twelve steps from a new rig to a recorded dataset: finds each arm's port by unplugging it and each camera by its picture, aligns cameras live, saves to `robot-config.yaml` |
 | | Calibrate | Each arm's homing and ranges, reviewed before saving |
 | | Teleoperate | Torque, Stop, cameras and joints for each pair |
-| | 3D view | The arms live in 3D, cameras placed in the scene, depth point clouds of the workspace |
+| | 3D view | The SO-101 CAD driven by live joint readings (also on Teleoperate and Run policy), cameras placed in the scene, and workspace points: a metric point cloud from one camera picture |
 | **Data** | Datasets | Every LeRobot dataset on this Mac (v3.0 or v2.1, single or bimanual), each with a health bar |
 | | Episode inspector | Cameras, a 3D twin (measured arm, commanded ghost, tool path), a timeline and per-joint signals on one playhead |
 | | Issues | Notes, issues and excluded episodes across datasets, shared live between windows |
-| **Policies** | Train | On this Mac or on a SLURM cluster, with loss curves |
-| | Models | Find a policy on Hugging Face, check it fits your rig, download it |
+| **Policies** | Train | On Explorer over ssh and SLURM (chained parts that resume from checkpoints, live loss chart, checkpoint fetch), or on this Mac |
+| | Models | Find a policy on Hugging Face, check it fits your rig, download it, get its `lerobot-rollout` command |
 | | Run policy · Evaluate | Run a policy, judge each episode, get the success rate with a 95% interval |
 
 **Inspector keys:** `Space` play · `←` `→` one frame · `Shift` + arrow one second · `[` `]` episode · `N` note ·
@@ -87,6 +87,9 @@ Mark an episode **bad** and it drops out of the `--dataset.episodes=[…]` list 
 | Simulated rig | Every page runs on it |
 | Real arms | Through LeRobot's own commands, which a Run button types into Studio's terminal panel. Studio's own real-arm control is next |
 | Datasets, inspector, analysis, notes | Work on real datasets today |
+| 3D view | The joint mapping is not yet checked on a physical arm |
+| Cluster training | Checks and the job script are built; a real submit has not been run yet |
+| Workspace points | Needs a one-time 99 MB model download (Depth Anything V2 Small). Accuracy depends on the camera pose you set, which is not measured |
 
 ## Coming next
 
@@ -112,9 +115,12 @@ npm --prefix web run typecheck && npm --prefix web test && npm --prefix web run 
 ```
 
 - `src/phi_studio/`: the server (aiohttp), the robot worker and rig contracts (`worker.py`, `rig.py`, `session.py`),
-  setup and cameras, the Hub client, training, the 3D model (`robot_model.py`), and the data layer (`datasets.py`,
-  `analysis.py`, `kinematics.py`, `notes.py`, `data_api.py`).
+  the LeRobot command builder and config writer (`rigspec.py`, `configedit.py`), Set up and cameras (`setup_api.py`,
+  `cameras.py`, `align.py`), the Hub (`hub.py`, `hub_api.py`), training (`train.py`, `hpc.py`, `train_api.py`), the
+  3D model (`robot_model.py`, `scene_api.py`), workspace points (`recon.py`, `depth_model.py`, `recon_api.py`), the
+  data layer (`datasets.py`, `analysis.py`, `kinematics.py`, `notes.py`, `data_api.py`) and the terminal.
 - `web/`: the React app. `npm run build` writes it into `src/phi_studio/static/`, which the server serves.
+  `web/tests/` holds Node tests for page logic that runs without a browser (`npm test`).
 - `tests/`: unit and end-to-end tests on the simulated rig. Tests that need LeRobot, OpenCV or the Hub skip without
   them.
 - `scripts/build_so101_model.py`: rebuilds the SO-101 model bundle from TheRobotStudio's MJCF.

@@ -53,6 +53,7 @@ a:hover { text-decoration: underline; }
 .btn-primary:disabled { background: var(--bg-active); color: var(--text-disabled); border-color: transparent; }
 .btn-danger { background: var(--action-danger-bg); color: var(--action-danger-fg); border-color: transparent; }
 .btn-danger:hover:not(:disabled) { background: var(--action-danger-hover); }
+.btn-danger:disabled { background: var(--bg-active); color: var(--text-disabled); border-color: transparent; }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--text-secondary); box-shadow: none; }
 .btn-ghost:hover:not(:disabled) { color: var(--text-primary); }
 .btn-sm { height: var(--control-h-sm); padding: 0 10px; font-size: var(--text-sm); border-radius: var(--radius-md); gap: 6px; }
