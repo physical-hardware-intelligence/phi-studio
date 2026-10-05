@@ -212,3 +212,122 @@ def test_hardware_reads_the_config_onboarding_wrote(tmp_path, monkeypatch) -> No
     (rig / "robot-config.yaml").write_text("robot: {}\n")  # a rig folder's copy comes first
     assert cli.main(argv) == 0
     assert seen["spec"] == {"kind": "lerobot", "config": str(rig.resolve() / "robot-config.yaml")}
+
+
+# -- switching rigs without a restart ------------------------------------------------------------
+def _studio(tmp_path, pairs: int = 1):
+    import aiohttp
+    from aiohttp.test_utils import TestServer
+    from test_server import free_port
+
+    from phi_studio.server import Studio
+
+    port = free_port()
+    studio = Studio({"kind": "mock", "pairs": pairs, "cameras": []}, port, token="t0k",
+                    data_dir=tmp_path / "data")  # fmt: skip
+    return studio, TestServer(studio.app(), host="127.0.0.1", port=port), aiohttp.ClientSession()
+
+
+def test_switching_to_simulated_arms_restarts_the_worker_for_the_rigs_layout(tmp_path) -> None:
+    import asyncio
+
+    from test_server import until, ws
+
+    async def go() -> None:
+        studio, server, session = _studio(tmp_path)
+        await server.start_server()
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            first = await until(a, lambda d: d["type"] == "rig")
+            assert len(first["arms"]) == 2
+            O.write(tmp_path / "data" / "robot-config.yaml", O.check_answers(bi_answers()),
+                    tmp_path / "b")  # fmt: skip
+            await a.send_str('{"cmd": "rig_use", "hardware": false}')
+            hello = await until(a, lambda d: d["type"] == "hello", timeout=15)
+            assert hello["mock"] is True
+            rig = await until(a, lambda d: d["type"] == "rig" and len(d["arms"]) == 4, timeout=15)
+            assert {x["name"] for x in rig["arms"]} >= {"left_follower", "right_leader"}
+            assert not [m for m in studio.log if "robot worker stopped" in m["text"]]
+        finally:
+            await session.close()
+            await server.close()
+            studio.stop_worker()
+
+    asyncio.run(go())
+
+
+def test_no_switch_while_an_arm_may_hold_torque_and_never_without_ports(tmp_path) -> None:
+    import asyncio
+    import json
+
+    from test_server import until, ws
+
+    async def go() -> None:
+        studio, server, session = _studio(tmp_path)
+        await server.start_server()
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            await a.send_str(json.dumps({"cmd": "rig_use", "hardware": True}))
+            err = await until(a, lambda d: d["type"] == "error")
+            assert "no robot-config.yaml" in err["message"]
+            ans = bi_answers()
+            ans["ports"].pop("left_leader")
+            O.write(tmp_path / "data" / "robot-config.yaml", O.check_answers(ans), tmp_path / "b")
+            await a.send_str(json.dumps({"cmd": "rig_use", "hardware": True}))
+            err = await until(a, lambda d: d["type"] == "error")
+            assert "needs a port" in err["message"] and "left_leader" in err["message"]
+            for cmd in ("connect", "confirm", "arm"):
+                await a.send_str(json.dumps({"cmd": cmd}))
+            await until(a, lambda d: d["type"] == "state" and d["state"] == "ARMED", timeout=10)
+            await a.send_str(json.dumps({"cmd": "rig_use", "hardware": False}))
+            err = await until(a, lambda d: d["type"] == "error")
+            assert "holding torque" in err["message"]
+        finally:
+            await session.close()
+            await server.close()
+            studio.stop_worker()
+
+    asyncio.run(go())
+
+
+def test_switching_to_real_arms_starts_the_hardware_worker_even_with_nothing_plugged_in(
+    tmp_path,
+) -> None:
+    """The whole --hardware start in the worker process: robot-config.yaml -> FeetechArms over
+    LeRobot's bus. The ports do not exist here, so every arm is unreachable, and the rig must come
+    up anyway, say it is real, and fail Connect with a reason, not crash."""
+    import asyncio
+    import json
+
+    import pytest
+    from test_server import until, ws
+
+    pytest.importorskip("lerobot")
+
+    async def go() -> None:
+        studio, server, session = _studio(tmp_path)
+        await server.start_server()
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            O.write(tmp_path / "data" / "robot-config.yaml", O.check_answers(bi_answers()),
+                    tmp_path / "b")  # fmt: skip
+            await a.send_str(json.dumps({"cmd": "rig_use", "hardware": True}))
+            hello = await until(a, lambda d: d["type"] == "hello", timeout=20)
+            assert hello["mock"] is False
+            rig = await until(a, lambda d: d["type"] == "rig", timeout=20)
+            assert rig["mock"] is False and len(rig["arms"]) == 4
+            await a.send_str(json.dumps({"cmd": "connect"}))
+            got = await until(a, lambda d: d["type"] in ("error", "state")
+                              and (d["type"] == "error" or d["state"] == "FAULT"),
+                              timeout=20)  # fmt: skip
+            text = got.get("message") or got.get("fault") or ""
+            assert "usbmodem" in text or "not answering" in text or "port" in text.lower(), got
+        finally:
+            await session.close()
+            await server.close()
+            studio.stop_worker()
+
+    asyncio.run(go())

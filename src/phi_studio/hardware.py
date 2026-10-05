@@ -26,6 +26,7 @@ Status: unit-tested against a fake bus; not yet run on a physical arm (first rig
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -84,6 +85,23 @@ def default_bus(port: str, calibration: Calibration | None) -> Any:
     )
 
 
+def explain(e: BaseException, arm: str, port: str) -> str:
+    """LeRobot's connect errors in Studio's words. Its text sends people to lerobot-find-port and
+    prints model tables; here: which arm, which port, and the one thing to check."""
+    text = str(e)
+    if "motor check failed" in text:
+        missing = re.findall(r"^\s*-\s*(\d+)\s*\(expected model", text, re.M)
+        if len(missing) >= len(MOTOR_IDS):
+            return f"{arm}: no servo answers on {port}. Is the arm's power on?"
+        if missing:
+            return (f"{arm}: servo {', '.join(missing)} of {len(MOTOR_IDS)} does not answer on "
+                    f"{port}. Check the cable into it, and its power.")  # fmt: skip
+        return f"{arm}: a servo on {port} is not the model an SO-101 uses."
+    if isinstance(e, ConnectionError) or "Could not connect" in text or "open port" in text:
+        return f"{arm}: nothing answers on {port}. Is it plugged in? Rig setup finds its port."
+    return f"{arm} on {port}: {text.strip()}"
+
+
 @dataclass
 class FeetechArm:
     """One arm on one USB serial bus. Only the worker's bus thread calls it."""
@@ -109,11 +127,13 @@ class FeetechArm:
         bus = self.bus_factory(self.port, self.calibration)
         try:
             bus.connect(handshake=True)
-        except BaseException:
+        except BaseException as e:
             try:
                 bus.disconnect(disable_torque=False)
             except Exception:
                 pass
+            if isinstance(e, (OSError, RuntimeError)):
+                raise type(e)(explain(e, self.name, self.port)) from e
             raise
         self._bus = bus
         self.configured = False

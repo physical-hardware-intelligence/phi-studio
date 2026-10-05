@@ -4,6 +4,7 @@ import { ActionBar } from "../components/ActionBar";
 import { Boundary } from "../components/Boundary";
 import { ArmsGlyph } from "../components/data/bits";
 import { Notices } from "../components/Notices";
+import { RigSwitch } from "../components/RigSwitch";
 import { advance, portKey, type Wizard } from "../lib/portfinder";
 import { SLOTS, refreshRig, shortPort, slotLabel, slug, useRig, type Layout, type RigStatus } from "../lib/rig";
 import { go, studio, useStudio } from "../lib/studio";
@@ -220,7 +221,7 @@ function CalibrationStep({ d, set, rig, onBack, onNext }: { d: Draft; set: (d: D
       </div>
       <Foot onBack={onBack} onNext={save} next="Save rig" busy={busy} disabled={!control}
         extra={<>
-          <button className="btn" disabled title="Needs real-arm control"><Wand2 aria-hidden />Auto-calibrate</button>
+          <button className="btn" onClick={() => go("calibrate")} title="Every arm finds its own end stops"><Wand2 aria-hidden />Auto-calibrate</button>
           <button className="btn btn-ghost" onClick={() => go("calibrate")}>By hand</button>
         </>} />
       {!control && <p className="faint t-sm">Take control (top right) to save.</p>}
@@ -313,6 +314,7 @@ function CamerasStep({ d, rig, onBack, onNext }: { d: Draft; rig: RigStatus; onB
 
 function ReadyStep({ d, rig }: { d: Draft; rig: RigStatus }) {
   const cal = rig.arms.filter((a) => a.calibrated).length;
+  const mock = useStudio((s) => s.mock);
   return (
     <div className="onb-ready">
       <span className="onb-ready-mark"><Check aria-hidden /></span>
@@ -324,7 +326,8 @@ function ReadyStep({ d, rig }: { d: Draft; rig: RigStatus }) {
       </div>
       <div className="row-gap">
         <button className="btn" onClick={() => go("overview")}>Home</button>
-        <button className="btn btn-primary" onClick={() => go("teleop")}>Teleoperate<ArrowRight aria-hidden /></button>
+        {mock && <RigSwitch primary />}
+        <button className={`btn ${mock ? "" : "btn-primary"}`} onClick={() => go("teleop")}>Teleoperate<ArrowRight aria-hidden /></button>
       </div>
     </div>
   );

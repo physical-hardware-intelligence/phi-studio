@@ -2,6 +2,7 @@ import { ArrowRight, Camera, Check, ChevronRight, CircleAlert, Pencil, Plug, The
 import { ArmsGlyph, HealthBar } from "../components/data/bits";
 import { Notices } from "../components/Notices";
 import { PhiMark } from "../components/PhiMark";
+import { RigSwitch } from "../components/RigSwitch";
 import { StatePill } from "../components/StatePill";
 import { fmtAgo, fmtDuration, useNotes, useResource, type DatasetSummary } from "../lib/data";
 import { SLOTS, shortPort, slotLabel, useRig, type Layout } from "../lib/rig";
@@ -107,6 +108,7 @@ function RigCard() {
           )) : <span className="faint t-sm"><Camera aria-hidden className="ico-inline" />No cameras yet</span>}
         </span>
         <span className="grow" />
+        <RigSwitch />
         <button className="btn btn-ghost btn-sm" onClick={() => go("onboard")}><Pencil aria-hidden />Edit rig</button>
       </div>
       {!!rig.problems.length && <div className="rig-problems">{rig.problems.slice(0, 3).map((p, i) => <div key={i} className="hrow"><CircleAlert aria-hidden className="sev sev-warn" /><span>{p}</span></div>)}</div>}

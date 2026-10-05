@@ -192,15 +192,17 @@ class Studio:
         self.proc = ctx.Process(target=run_worker, args=(child, self.spec), daemon=True)
         self.proc.start()
         child.close()  # WHY: otherwise recv() never sees EOF when the worker dies
-        threading.Thread(target=self._pump, daemon=True).start()
+        threading.Thread(target=self._pump, args=(self.conn, self.proc), daemon=True).start()
 
-    def _pump(self) -> None:
+    def _pump(self, conn: Any, proc: Any) -> None:
         """Worker -> windows. Runs in a thread because Pipe.recv blocks."""
         while True:
             try:
-                msg = self.conn.recv()
+                msg = conn.recv()
             except (EOFError, OSError):
-                code = self.proc.exitcode if self.proc else None
+                if conn is not self.conn:  # a worker Studio retired for another rig: no alarm
+                    return
+                code = proc.exitcode if proc else None
                 msg = {"type": "worker_exit", "code": code,
                        "message": "The robot worker stopped. Restart Studio."}  # fmt: skip
                 self._dispatch(msg)
@@ -264,6 +266,42 @@ class Studio:
                 self.conn.send(msg)
             except (BrokenPipeError, OSError):
                 pass
+
+    def switch_rig(self, spec: dict[str, Any]) -> None:
+        """Retire the arm worker and start one for another rig: the simulated arms, or the real
+        ones in robot-config.yaml. Blocks while the old process exits, so call it off the loop.
+        The caller checks that no arm holds torque. Every window then gets a fresh hello, as
+        after a restart, so nothing of the old rig stays on screen."""
+        conn, proc = self.conn, self.proc
+        self.conn = self.proc = None  # first: the old pump then sees its pipe close and stays quiet
+        if conn is not None:
+            conn.close()  # the worker reads EOF and exits (run_worker)
+        if proc is not None:
+            proc.join(3)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(1)
+        for kind in ("rig", "state", "identity", "worker_exit"):
+            self.last.pop(kind, None)
+        self.telemetry = self.run = None
+        self.cameras.clear()
+        self.frame_clock.clear()
+        self.latest_frame.clear()
+        data = self.spec.get("data_dir")
+        self.spec = {**spec, "data_dir": data} if data else dict(spec)
+        self.start_worker()
+        if self.loop is not None:
+            self.loop.call_soon_threadsafe(self._hello_all)
+
+    def _hello_all(self) -> None:
+        """A hello as on connect, then what a new window gets replayed: a new worker's first
+        messages may have overtaken this, and a hello clears them on the page."""
+        for c in list(self.clients):
+            c.push({"type": "hello", "control": self.controller is c, "client": c.id,
+                    "mock": self.spec.get("kind", "mock") == "mock"})  # fmt: skip
+            for kind in REPLAYED:
+                if kind in self.last:
+                    c.push(self.last[kind])
 
     def stop_worker(self) -> None:
         if self.conn is not None:

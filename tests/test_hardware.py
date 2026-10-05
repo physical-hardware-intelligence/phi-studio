@@ -416,3 +416,26 @@ def test_homing_some_joints_keeps_the_others_calibration() -> None:
     bare = arm(cal=None)
     with pytest.raises(RuntimeError, match="home every joint"):
         bare.set_half_turn_homings(["gripper"])
+
+
+def test_connect_errors_name_the_arm_the_port_and_what_to_check() -> None:
+    port_gone = ConnectionError("\nCould not connect on port '/dev/x'. Make sure you are using "
+                                "the correct port.\nTry running `lerobot-find-port`\n")
+    assert H.explain(port_gone, "left_follower", "/dev/x") == (
+        "left_follower: nothing answers on /dev/x. Is it plugged in? Rig setup finds its port.")
+    table = "\n".join(f"  - {i} (expected model: 777)" for i in range(1, 7))
+    unpowered = RuntimeError(f"FeetechMotorsBus motor check failed on port '/dev/x':\n"
+                             f"\nMissing motor IDs:\n{table}\n")
+    assert "power" in H.explain(unpowered, "leader", "/dev/x")
+    one = RuntimeError("FeetechMotorsBus motor check failed on port '/dev/x':\n\nMissing motor "
+                       "IDs:\n  - 4 (expected model: 777)\n")
+    assert "servo 4 of 6" in H.explain(one, "leader", "/dev/x")
+
+
+def test_a_failed_connect_raises_studios_words_and_keeps_lerobots_as_the_cause() -> None:
+    FakeBus.fail_connect = 1
+    a = H.FeetechArm("left_follower", "follower", "/dev/x", "f", dict(CAL),
+                     bus_factory=lambda p, c: FakeBus(p, None))  # fmt: skip
+    with pytest.raises(ConnectionError, match="nothing answers on /dev/x") as got:
+        a.connect()
+    assert isinstance(got.value.__cause__, ConnectionError)

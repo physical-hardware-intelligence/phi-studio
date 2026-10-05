@@ -43,6 +43,8 @@ NAME_MAX = 60
 # moves at most ~3 deg a frame (p99 on our recordings), so the clip only bites on a jump, which is
 # its job.
 STEP_LIMIT = 8.0
+# Session states in which an arm may hold torque: no switching rigs then (rig_use).
+HOLDING_STATES = ("ARMED", "MOVING", "STOPPED", "FAULT", "CALIBRATING")
 SLOTS = {
     "single": ("leader", "follower"),
     "bimanual": ("left_leader", "left_follower", "right_leader", "right_follower"),
@@ -411,8 +413,43 @@ class OnboardAPI:
         except Exception:  # the write stands; those pages re-read on their own
             pass
 
+    async def rig_use(self, client: Client, msg: dict[str, Any]) -> None:
+        """Switch between the simulated arms and the real ones in robot-config.yaml without a
+        restart. Refused while any arm may hold torque; a connected rig is disconnected first."""
+        hardware = msg.get("hardware") is True
+        st = (self.studio.last.get("state") or {}).get("state", "DISCONNECTED")
+        if st in HOLDING_STATES:
+            raise Refusal("An arm may be holding torque.", "Release torque, then disconnect.")
+        if hardware:
+            path = config_target(self.studio)
+            if not path.is_file():
+                raise Refusal("There is no robot-config.yaml yet.", "Set up the rig first.")
+            spec = rigspec.parse(path.read_text())
+            missing = [a.key for a in spec.arms if not a.port]
+            if not spec.arms or missing:
+                raise Refusal(f"Every arm needs a port in {path.name}"
+                              + (f": {', '.join(missing)} has none." if missing else "."),
+                              "Edit the rig.")  # fmt: skip
+            new: dict[str, Any] = {"kind": "lerobot", "config": str(path)}
+        else:
+            layout = (await asyncio.to_thread(status, self.studio)).get("layout")
+            new = {"kind": "mock", "pairs": 2 if layout == "bimanual" else 1}
+        if st != "DISCONNECTED":
+            self.studio.to_worker({"cmd": "disconnect"})
+            for _ in range(40):  # the worker answers within a tick or two
+                await asyncio.sleep(0.05)
+                if (self.studio.last.get("state") or {}).get("state") == "DISCONNECTED":
+                    break
+            else:
+                raise Refusal("The rig did not disconnect.", "Disconnect it, then switch.")
+        await asyncio.to_thread(self.studio.switch_rig, new)
+        self.studio._note("state", "Using the real arms" if hardware else "Using simulated arms")
+        st2 = await asyncio.to_thread(status, self.studio)
+        self.studio._fanout({"type": "rig_status", **st2})
+
 
 def register(studio: Studio) -> None:
     api = OnboardAPI(studio)
     studio.handle("rig_status", api.rig_status, control=False)
     studio.handle("rig_write", api.rig_write, control=True)
+    studio.handle("rig_use", api.rig_use, control=True)
