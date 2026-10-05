@@ -350,7 +350,7 @@ class RigWorker:
         nums: dict[str, float] = {}
         for k, (lo, hi) in REC_LIMITS.items():
             v = msg.get(k)
-            if not is_finite_number(v) or not lo <= v <= hi:
+            if not isinstance(v, int | float) or not is_finite_number(v) or not lo <= v <= hi:
                 self.error(f"{k.replace('_', ' ')} must be between {lo:g} and {hi:g}.")
                 return
             nums[k] = float(v)
@@ -372,7 +372,7 @@ class RigWorker:
         if resume and not (root / "meta" / "info.json").is_file():
             self.error(f"There is no dataset {repo} to add to.")
             return
-        shapes = {}
+        shapes: dict[str, tuple[int, ...]] = {}
         for cam in self.rig.cameras:
             try:
                 img = cam.read_latest()[0]
