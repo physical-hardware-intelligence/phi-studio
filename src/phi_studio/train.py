@@ -15,6 +15,7 @@ Sources, LeRobot 0.6.0 (site-packages/lerobot):
 
 from __future__ import annotations
 
+import codecs
 import json
 import math
 import os
@@ -23,14 +24,16 @@ import shlex
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 # -- limits the cluster sets -----------------------------------------------------------------------
 # Read 2026-10-04 with `scontrol show partition gpu` and `sacctmgr show qos gpu`.
-MAX_PART_S = 8 * 3600  # the gpu partition's MaxTime=08:00:00
+MAX_PART_S = 8 * 3600  # the gpu partition's MaxTime=08:00:00, the default part time
 MAX_PARTS = 8  # the gpu QoS allows 8 submitted jobs per user (MaxSubmitPU)
+MIN_PART_S = 600  # shorter parts spend most of their time loading the dataset and the model
 
 # The policy types LeRobot 0.6.0 registers (PreTrainedConfig.get_known_choices() after
 # `import lerobot.policies`). Studio asks the installed LeRobot first; this list is the fallback
@@ -79,6 +82,15 @@ ENV_LINE = re.compile(
     r"|source [A-Za-z0-9_./$+-]+"
     rf"|export( [A-Za-z_][A-Za-z0-9_]*={_VALUE})+)\Z"
 )
+
+
+# Env names that look like a secret. WHY refuse them: the setup is written into a job script on the
+# cluster's shared file system and shown on this page. A name ending in _PATH or _FILE points at a
+# file the cluster's own login wrote (HF_TOKEN_PATH), which is the right place for a token.
+_SECRET_NAME = re.compile(r"(?i)(TOKEN|KEY|SECRET|PASSWORD)")
+_SECRET_OK = re.compile(r"(?i)_(PATH|FILE)\Z")
+TOKEN_ADVICE = ("Tokens belong in the cluster's own login, never in Studio: run huggingface-cli "
+                "login or wandb login once on the cluster, and the job finds them there.")
 
 
 class FormError(ValueError):
@@ -137,41 +149,78 @@ class Settings:
 
     def validate(self) -> Settings:
         e: dict[str, str] = {}
-        if not isinstance(self.host, str) or not HOST.match(self.host):
+        # WHY check types first: settings come from a window and from a file a person can edit,
+        # and str(5) would pass a pattern while the 5 itself reached the script.
+        for f in fields(self):
+            if f.name != "cpus" and not isinstance(getattr(self, f.name), str):
+                e[f.name] = "Must be text."
+        if isinstance(self.cpus, bool) or not isinstance(self.cpus, (int, str)):
+            e["cpus"] = "A whole number from 1 to 128."
+        if e:
+            raise FormError(e)
+        if not HOST.match(self.host):
             e["host"] = ("An ssh host alias: letters, digits, dot, dash and underscore, "
                          "starting with a letter or digit.")  # fmt: skip
         rb = self.remote_base
-        if rb and (not isinstance(rb, str) or not REMOTE_PATH.match(rb) or ".." in rb):
+        if rb and (not REMOTE_PATH.match(rb) or ".." in rb):
             e["remote_base"] = "An absolute folder with at least two parts, such as /scratch/you/x."
-        lines = [ln.strip() for ln in str(self.env).splitlines() if ln.strip()]
+        lines = [ln.strip() for ln in self.env.splitlines() if ln.strip()]
         bad = [ln for ln in lines if not ENV_LINE.match(ln)]
+        secret = [n for ln in lines if ln.startswith("export ")
+                  for n in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)=", ln)
+                  if _SECRET_NAME.search(n) and not _SECRET_OK.search(n)]  # fmt: skip
         if bad:
             e["env"] = (f"Studio does not allow this line: {bad[0][:80]}. Use module load, "
                         "source activate, source <file> or export NAME=value.")  # fmt: skip
+        elif secret:
+            e["env"] = f"Remove {secret[0]}. {TOKEN_ADVICE}"
         elif not any(ln.split()[0] in ("source", "conda", "module") for ln in lines):
             e["env"] = "Add the line that activates the env, such as source activate lerobot-gpu."
-        for key, pat in (("partition", PARTITION), ("test_partition", PARTITION)):
-            v = getattr(self, key)
-            if v and not pat.match(str(v)) or (key == "partition" and not v):
-                e[key] = "A partition name, such as gpu."
-        if not GRES.match(str(self.gres)):
+        if not PARTITION.match(self.partition):
+            e["partition"] = "A partition name, such as gpu."
+        if self.test_partition and not PARTITION.match(self.test_partition):
+            e["test_partition"] = "A partition name, such as gpu-short, or leave empty."
+        if not GRES.match(self.gres):
             e["gres"] = "Such as gpu:1 or gpu:h200:1."
-        if not NODELIST.match(str(self.exclude)):
+        if not NODELIST.match(self.exclude):
             e["exclude"] = "Node names separated by commas, such as d1025,c2204."
         try:
-            t = _hms(str(self.time))
-            if not 600 <= t <= MAX_PART_S:
-                e["time"] = "Between 00:10:00 and 08:00:00, the gpu partition's limit."
+            if _hms(self.time) < MIN_PART_S:
+                e["time"] = ("At least 00:10:00. The longest a part may run is the partition's own "
+                             "limit, which Check the cluster reads and Submit checks again.")
         except ValueError:
             e["time"] = "Hours, minutes and seconds, such as 08:00:00."
         if _int(self.cpus, 1, 128) is None:
             e["cpus"] = "A whole number from 1 to 128."
-        if not MEM.match(str(self.mem)):
+        if not MEM.match(self.mem):
             e["mem"] = "Such as 64G or 32000M."
+        if self.remote_user and not USER.match(self.remote_user):
+            e["remote_user"] = "Run Check the cluster again to learn your user name."
         if e:
             raise FormError(e)
         self.cpus = int(self.cpus)
         return self
+
+    @classmethod
+    def salvage(cls, raw: Any) -> tuple[Settings, list[str]]:
+        """Settings from a stored file: the fields that pass, with every other one back at its
+        default. Returns the names put back, so the window can say which."""
+        d = raw if isinstance(raw, dict) else {}
+        known = {f.name for f in fields(cls)}
+        s = cls.from_dict(d)
+        dropped: list[str] = []
+        for _ in range(len(known)):  # each round puts back at least one field
+            try:
+                return s.validate(), sorted(dropped)
+            except FormError as e:
+                bad = [k for k in e.errors if k in known]
+                if not bad:
+                    break
+                for k in bad:
+                    setattr(s, k, getattr(cls(), k))
+                    if k in d:
+                        dropped.append(k)
+        return cls().validate(), sorted(k for k in d if k in known)
 
     def base(self) -> str:
         """The run folder's parent on the cluster."""
@@ -340,7 +389,6 @@ def sbatch_script(job: Job, s: Settings, run_dir: str) -> str:
     flags = train_args(job, device="cuda", output_dir=out, cluster=True, workers=int(s.cpus))
     n = job.parts
     q = shlex.quote
-    later = " ".join(q(part_name(job.run_id, k)) for k in range(2, n + 1))
     lines = [
         "#!/bin/bash",
         f"# Phi Studio run {job.run_id}: {job.policy_label} on {job.dataset}, {job.steps} steps,",
@@ -366,6 +414,7 @@ def sbatch_script(job: Job, s: Settings, run_dir: str) -> str:
         "",
         f'echo "phi-studio: part ${{PHI_PART:-1}} of {n}, job $SLURM_JOB_ID on $(hostname),'
         ' $(date)"',
+        'START_LAST=$(readlink "$OUT/checkpoints/last" 2>/dev/null || echo none)',
         'if [ -d "$FINAL" ]; then',
         f'  echo "phi-studio: training already reached step {job.steps}; nothing left to do"',
         "  exit 0",
@@ -389,11 +438,21 @@ def sbatch_script(job: Job, s: Settings, run_dir: str) -> str:
     ]
     if n > 1:
         lines += [
-            "# WHY: later parts wait with afterany, so each would queue for a GPU only to exit.",
-            'if [ "$RC" = 0 ] && [ -d "$FINAL" ]; then',
-            f"  for name in {later}; do",
-            '    scancel --user="$USER" --name="$name" --state=PENDING',
+            "# Later parts wait with afterany, so each starts whatever this part did. Cancel",
+            "# the ones still waiting, by their exact names, when they have nothing to do:",
+            "# training is finished, or this part saved no checkpoint, so the next repeats it.",
+            "cancel_later() {",
+            f"  for ((k = ${{PHI_PART:-1}} + 1; k <= {n}; k++)); do",
+            f'    scancel --user="$USER" --name={q(job.run_id)}-p"$k" --state=PENDING',
             "  done",
+            "}",
+            'END_LAST=$(readlink "$OUT/checkpoints/last" 2>/dev/null || echo none)',
+            'if [ "$RC" = 0 ] && [ -d "$FINAL" ]; then',
+            "  cancel_later",
+            'elif [ "$END_LAST" = "$START_LAST" ]; then',
+            f'  echo "{STALLED} (still at ${{START_LAST}}), so the next part would repeat it.'
+            ' Cancelling the parts still waiting."',
+            "  cancel_later",
             "fi",
         ]
     lines.append("exit $RC")
@@ -562,8 +621,17 @@ _PAIR = re.compile(r"([A-Za-z_/]+):(-?\d+(?:\.\d+)?(?:e[-+]?\d+)?)")
 _CKPT = re.compile(r"Checkpoint policy after step (\d+)")
 _ANCHOR = re.compile(r"phi-studio: (?:resuming from|starting at) step (\d+)")
 _TOTAL = re.compile(r"cfg\.steps=(\d+)")
+STALLED = "phi-studio: this part saved no new checkpoint"
 _UNITS = {"": 1, "K": 10**3, "M": 10**6, "B": 10**9, "T": 10**12, "Q": 10**15}
 MAX_POINTS = 4000
+# WHY a cap: a progress bar that never prints a newline (tqdm on a dead terminal) would otherwise
+# grow the unfinished line, and the copy made on every read, without bound. A metrics line is under
+# 400 characters; keeping the last 64 KiB keeps any line LeRobot writes whole.
+MAX_PARTIAL_LINE = 64 * 1024
+
+
+def _utf8() -> codecs.IncrementalDecoder:
+    return codecs.getincrementaldecoder("utf-8")(errors="replace")
 
 
 def _stamp(s: str) -> float:
@@ -585,14 +653,32 @@ class LogState:
     seg: int = 0  # one per start or resume, so the rate never spans a gap between parts
     points: list[dict[str, Any]] = field(default_factory=list)
     tail: deque[str] = field(default_factory=lambda: deque(maxlen=200))
-    rest: str = ""  # an unfinished last line
+    rest: str = ""  # an unfinished last line, at most MAX_PARTIAL_LINE characters
     ended: str | None = None  # "End of training" or the job script's exit line
+    stalled: str | None = None  # the job script's line for a part that saved no checkpoint
+    decoder: codecs.IncrementalDecoder = field(default_factory=_utf8, repr=False)
+
+    def feed_bytes(self, data: bytes) -> None:
+        """Bytes as read. WHY a decoder that carries state: a read can end inside a character."""
+        self.feed(self.decoder.decode(data))
+
+    def end_part(self) -> None:
+        """A part's log has ended. Its unfinished last line goes to the log view but not the chart:
+        a job killed mid-write leaves a cut line, and "loss:0.0" from "loss:0.023" is not data."""
+        tail = (self.rest + self.decoder.decode(b"", final=True)).strip()
+        if tail:
+            self.tail.append(tail[-600:])
+        self.rest = ""
+        self.decoder = _utf8()
 
     def feed(self, text: str) -> None:
-        text = self.rest + text
         cut = max(text.rfind("\n"), text.rfind("\r"))
-        self.rest = text[cut + 1 :] if cut >= 0 else text
-        for ln in re.split(r"[\r\n]", text[: cut + 1] if cut >= 0 else ""):
+        if cut < 0:
+            self.rest = (self.rest + text)[-MAX_PARTIAL_LINE:]
+            return
+        whole = self.rest + text[: cut + 1]
+        self.rest = text[cut + 1 :][-MAX_PARTIAL_LINE:]
+        for ln in re.split(r"[\r\n]", whole):
             if ln.strip():
                 self.line(ln)
 
@@ -600,7 +686,12 @@ class LogState:
         if not ln.startswith("Training:") or "INFO" in ln:  # drop bare progress-bar redraws
             self.tail.append(ln[-600:])
         if m := _ANCHOR.search(ln):
+            # A new part: the last part's end and stall no longer describe the run.
             self.exact, self.seg = int(m[1]), self.seg + 1
+            self.ended = self.stalled = None
+            return
+        if STALLED in ln:
+            self.stalled = ln.strip()[-300:]
             return
         if m := _CKPT.search(ln):
             self.exact = int(m[1])
@@ -651,7 +742,7 @@ class LogState:
         eta = left / rate if rate and rate > 0 else None
         return {"step": step, "total": self.total, "rate": rate,
                 "eta_s": None if eta is None or not math.isfinite(eta) else round(eta),
-                "ended": self.ended}  # fmt: skip
+                "ended": self.ended, "stalled": self.stalled}  # fmt: skip
 
     def view(self) -> dict[str, Any]:
         pts = [{k: p[k] for k in ("step", "sure", "loss", "lr") if k in p} for p in self.points]
@@ -693,11 +784,12 @@ class Store:
         self.models_dir = data_dir / "models"
 
     def settings(self) -> Settings:
-        raw = read_json(self.settings_path, {})
-        try:
-            return Settings.from_dict(raw if isinstance(raw, dict) else {}).validate()
-        except (FormError, TypeError):
-            return Settings()
+        return self.settings_report()[0]
+
+    def settings_report(self) -> tuple[Settings, list[str]]:
+        """The stored settings, with any field that fails its check back at its default, and the
+        names of those fields."""
+        return Settings.salvage(read_json(self.settings_path, {}))
 
     def save_settings(self, s: Settings) -> None:
         write_json(self.settings_path, asdict(s))
@@ -720,6 +812,18 @@ class Store:
             else:
                 runs[i] = run
             write_json(self.jobs_path, {"runs": runs})
+
+    def mutate(self, run_id: str, fn: Callable[[dict[str, Any]], Any]) -> dict[str, Any] | None:
+        """Read one run, change it with fn and write it back, all under the lock. WHY: a change
+        made from a copy read earlier would put back parts a submit saved in between."""
+        with self.lock:
+            runs = self.runs()
+            run = next((r for r in runs if r["id"] == run_id), None)
+            if run is None:
+                return None
+            fn(run)
+            write_json(self.jobs_path, {"runs": runs})
+            return run
 
     def update_jobs(self, states: dict[str, dict[str, str]]) -> list[dict[str, Any]]:
         """Merge fresh job states into the runs on disk, read again under the lock, so a run

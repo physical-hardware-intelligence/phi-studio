@@ -9,8 +9,8 @@ import { Notices } from "../components/Notices";
 import { useStudio } from "../lib/studio";
 import { shortCommand, useTerminal } from "../lib/terminal";
 import {
-  bytes, duration, stateWords, train, useTrain,
-  type CheckRow, type CheckStatus, type JobForm, type Point, type Run, type TrainSettings,
+  bytes, duration, settingName, stateWords, train, useTrain,
+  type CheckRow, type CheckStatus, type Fit, type JobForm, type Point, type Run, type TrainNotice, type TrainSettings,
 } from "../lib/train";
 import "../styles/train.css";
 
@@ -19,6 +19,7 @@ const ENDED = new Set(["COMPLETED", "FAILED", "TIMEOUT", "CANCELLED", "OUT_OF_ME
   "BOOT_FAIL", "DEADLINE", "NOT SUBMITTED", "STOPPED"]);
 // sacct can say "CANCELLED by 1234"; every other state is one word or one of Studio's own two-word states.
 const ended = (state: string) => ENDED.has(state.startsWith("CANCELLED") ? "CANCELLED" : state);
+const seconds = (t: string) => { const [h, m, x] = t.split(":").map(Number); return h * 3600 + m * 60 + x; };
 
 // Train a LeRobot policy on this Mac (in Studio's terminal) or on the cluster (SLURM over ssh).
 export function Train() {
@@ -50,6 +51,8 @@ export function Train() {
     <div className="page train">
       <Notices />
       <TrainNoticeBox />
+      <BackgroundBox />
+      <DroppedBox />
       <section className="panel train-where">
         <div>
           <h2 className="panel-title">Where to train</h2>
@@ -87,7 +90,30 @@ export function Train() {
 // -- notices from train commands -----------------------------------------------------------------------
 function TrainNoticeBox() {
   const n = useTrain((s) => s.notice);
-  if (!n) return null;
+  return n ? <NoticeView n={n} onDismiss={() => train.dismiss()} /> : null;
+}
+
+// A failed poll or refresh, apart from the notice above, so it never hides an sbatch failure.
+function BackgroundBox() {
+  const n = useTrain((s) => s.background);
+  return n ? <NoticeView n={n} onDismiss={() => train.dismissBackground()} /> : null;
+}
+
+function DroppedBox() {
+  const dropped = useTrain((s) => s.settingsDropped);
+  const [hidden, setHidden] = useState("");
+  const key = dropped.join(",");
+  if (!dropped.length || hidden === key) return null;
+  return (
+    <NoticeView onDismiss={() => setHidden(key)} n={{
+      id: 0, tone: "warn",
+      message: `Studio put ${dropped.length === 1 ? "this saved setting" : "these saved settings"} back to the default, because the saved value did not pass its check: ${dropped.map(settingName).join(", ")}.`,
+      fix: "Open Settings, check the values, and save.",
+    }} />
+  );
+}
+
+function NoticeView({ n, onDismiss }: { n: TrainNotice; onDismiss: () => void }) {
   const Icon = n.tone === "ok" ? CircleCheck : n.tone === "warn" ? TriangleAlert : CircleX;
   return (
     <div className={`notice tone-${n.tone === "ok" ? "ok" : n.tone}`} role={n.tone === "danger" ? "alert" : "status"}>
@@ -98,7 +124,7 @@ function TrainNoticeBox() {
         {(n.cmd || n.output) && <CommandOutput cmd={n.cmd ?? null} output={n.output ?? ""} />}
       </div>
       <div className="notice-actions">
-        <button className="btn btn-ghost btn-sm btn-icon" aria-label="Dismiss" onClick={() => train.dismiss()}><X aria-hidden /></button>
+        <button className="btn btn-ghost btn-sm btn-icon" aria-label="Dismiss" onClick={onDismiss}><X aria-hidden /></button>
       </div>
     </div>
   );
@@ -120,6 +146,7 @@ function JobPanel() {
   const policies = useTrain((s) => s.policies);
   const datasets = useTrain((s) => s.datasets);
   const errors = useTrain((s) => s.preview?.errors ?? NO_ERRORS);
+  const partTime = useTrain((s) => s.settings?.time ?? "08:00:00");
   const link = useStudio((s) => s.link);
   const set = (patch: Partial<JobForm>) => train.setForm(patch);
 
@@ -178,7 +205,7 @@ function JobPanel() {
           </Field>
           {f.where === "cluster" && (
             <Field label="Parts" error={errors.parts}
-              hint={`Each part is one job of up to 8 hours. A longer run needs more parts, each resuming the last. Up to ${MAX_PARTS}.`}>
+              hint={`Each part is one job of up to ${partTime}, the time per part in the settings. A longer run needs more parts, each resuming the last. Up to ${MAX_PARTS}.`}>
               <input className="input num" type="number" min={1} max={MAX_PARTS} value={f.parts} onChange={(e) => set({ parts: num(e.target.value) })} />
             </Field>
           )}
@@ -264,7 +291,7 @@ function PlanPanel() {
   const p = useTrain((s) => s.preview);
   const settings = useTrain((s) => s.settings);
   const limits = useTrain((s) => s.check.limits ?? null);
-  const submitting = useTrain((s) => s.submitting);
+  const submitting = useTrain((s) => s.submitting || (!!s.preview?.run_id && s.busy.submit.includes(s.preview.run_id)));
   const starting = useTrain((s) => s.starting);
   const control = useStudio((s) => s.control);
   const link = useStudio((s) => s.link);
@@ -273,12 +300,16 @@ function PlanPanel() {
 
   const plan = p?.ok ? p.plan : undefined;
   const cap = limits?.max_submit ?? MAX_PARTS;
+  // The partition limit the last check read, if it read this partition.
+  const maxTime = limits?.max_time && limits.partition === settings?.partition ? limits.max_time : null;
+  const tooLong = !!(maxTime && settings && /^\d+:\d\d:\d\d$/.test(maxTime) && seconds(settings.time) > seconds(maxTime));
   const why = link !== "open" ? "Studio is not connected."
     : !control ? "Take control to start training from this window."
     : !f.dataset || !f.name ? "Fill in the dataset and the run name."
     : !p?.ok ? "Fix the fields marked in red first."
     : f.where === "mac" ? (busy ? `The terminal is still running ${busy}.` : starting ? "Starting." : "")
     : !settings?.remote_user ? "Run Check the cluster first, so Studio knows your user name."
+    : tooLong ? `Partition ${settings?.partition} allows at most ${maxTime} per part, and the settings ask for ${settings?.time}. Lower the time per part in Settings.`
     : limits?.free != null && limits.free < f.parts
       ? `The last check found ${limits.free} free submit slot${limits.free === 1 ? "" : "s"} of ${cap}; this run needs ${f.parts}. Studio does not submit past your limit. Check again when jobs finish.`
     : submitting ? "Submitting." : "";
@@ -300,6 +331,7 @@ function PlanPanel() {
             {limits?.free != null && <><dt>Free at the last check</dt><dd className="num">{limits.free}</dd></>}
           </dl>
         )}
+        {f.where === "cluster" && plan?.fit && <FitNote fit={plan.fit} saveFreq={f.save_freq} />}
         {f.where === "cluster" && plan && plan.parts > 1 && (
           <p className="field-hint train-gap">
             Each part is its own job and counts toward your limit. A part waits for the one before it to end, then
@@ -350,6 +382,37 @@ function PlanPanel() {
         </Dialog.Portal>
       </Dialog.Root>
     </section>
+  );
+}
+
+/** Whether one checkpoint fits in one part. WHY it matters: a part that ends before its first checkpoint
+ * saves nothing, and the next part would start from the same place. */
+function FitNote({ fit, saveFreq }: { fit: Fit; saveFreq: number }) {
+  if (fit.rate === null) {
+    return (
+      <p className="field-hint train-gap">
+        Studio has not measured a step rate for this policy and batch size on the cluster yet, so it cannot tell
+        whether one checkpoint ({saveFreq.toLocaleString()} steps) fits in one part. If a part saves no
+        checkpoint, the job script cancels the parts still waiting and the log says why.
+      </p>
+    );
+  }
+  const rate = `${fit.rate.toFixed(2)} steps/s, measured on ${fit.from_run}`;
+  if (fit.fits) {
+    return <p className="field-hint train-gap">Estimate at {rate}: one checkpoint every {duration(fit.save_s)}, well inside a part of {duration(fit.part_s)}.</p>;
+  }
+  return (
+    <div className="notice tone-warn train-gap" role="status">
+      <TriangleAlert className="notice-icon" aria-hidden />
+      <div className="train-notice-body">
+        <div className="notice-title">One checkpoint may not fit in one part.</div>
+        <div className="notice-fix">
+          Estimate at {rate}: {saveFreq.toLocaleString()} steps take about {duration(fit.save_s)}, and a part is
+          {" "}{duration(fit.part_s)}, some of it spent loading. A part that saves no checkpoint makes no progress.
+          Save a checkpoint more often, or use a longer part. This is an estimate from one earlier run.
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -420,7 +483,7 @@ const SETTING_FIELDS: Array<{ key: keyof TrainSettings; label: string; hint: str
   { key: "partition", label: "Partition", hint: "Where jobs run." },
   { key: "test_partition", label: "Test partition", hint: "Used to test the script when the partition above refuses even a test because you are at your submit limit." },
   { key: "gres", label: "GPUs", hint: "Such as gpu:1. Explorer's notes advise not pinning a GPU type." },
-  { key: "time", label: "Time per part", hint: "Up to 08:00:00, the gpu partition's limit." },
+  { key: "time", label: "Time per part", hint: "At least 00:10:00, and no more than the partition's own limit, which Check the cluster reads and Submit checks again." },
   { key: "cpus", label: "CPUs", hint: "Also the number of data loader workers." },
   { key: "mem", label: "Memory", hint: "Such as 64G." },
   { key: "exclude", label: "Nodes to avoid", hint: "Comma separated. The default skips the 16 GB GPU and the slow hosts.", wide: true },
@@ -522,7 +585,11 @@ function RunDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const log = useTrain((s) => s.logs[id] ?? null);
   const control = useStudio((s) => s.control);
   const link = useStudio((s) => s.link);
+  const changing = useTrain((s) => (s.busy.submit.includes(id) ? "Submitting." : s.busy.resubmit.includes(id) ? "Submitting the remaining parts."
+    : s.busy.find.includes(id) ? "Looking for its jobs." : s.busy.cancel.includes(id) ? "Cancelling." : ""));
+  const fetching = useTrain((s) => s.busy.fetch.includes(id));
   const [confirm, setConfirm] = useState(false);
+  const [finish, setFinish] = useState(false);
   const tailRef = useRef<HTMLPreElement>(null);
   const state = run?.state ?? "";
   // WHY poll a completed run until its log has ended: the last piece of the log is read after the job ends.
@@ -543,7 +610,9 @@ function RunDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const p = log ?? run.progress;
   const done = p ? Math.min(1, p.total ? p.step / p.total : 0) : 0;
   const liveParts = run.jobs.filter((j) => !ended(j.state));
-  const why = !control ? "Take control to act on this run." : "";
+  const why = !control ? "Take control to act on this run." : changing;
+  const remaining = run.error && run.remaining_from != null
+    ? Array.from({ length: run.parts_planned - run.remaining_from + 1 }, (_, i) => run.remaining_from! + i) : [];
   return (
     <section className="panel train-detail">
       <div className="panel-head">
@@ -595,13 +664,35 @@ function RunDetail({ id, onClose }: { id: string; onClose: () => void }) {
             </table>
           </div>
         )}
+        {p?.stalled && (
+          <div className="notice tone-warn train-gap" role="status">
+            <TriangleAlert className="notice-icon" aria-hidden />
+            <div className="train-notice-body">
+              <div className="notice-title">A part ended without saving a new checkpoint.</div>
+              <div className="notice-fix">
+                The next part would have started from the same place, so the job script cancelled the parts still
+                waiting. Save a checkpoint more often, or use a longer part, then submit again.
+              </div>
+            </div>
+          </div>
+        )}
         {run.error && (
           <div className="notice tone-danger train-gap">
             <CircleX className="notice-icon" aria-hidden />
             <div className="train-notice-body">
               <div className="notice-title">sbatch failed for part {run.error.part}. Studio did not retry.</div>
-              <div className="notice-fix">On Explorer a failed sbatch can still create the job, minutes later. Wait 3 minutes, then Look for it.</div>
+              <div className="notice-fix">
+                On Explorer a failed sbatch can still create the job, minutes later. Wait 3 minutes, then Look for it.
+                {remaining.length > 0 && " Then you can submit the parts this run is missing; Studio looks for them again first."}
+              </div>
               <CommandOutput cmd={run.error.cmd} output={run.error.output} />
+              {remaining.length > 0 && (
+                <div className="form-actions train-gap">
+                  <button className="btn btn-sm" disabled={!!why} onClick={() => setFinish(true)}>
+                    <Send aria-hidden /> Submit the remaining parts
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -626,7 +717,7 @@ function RunDetail({ id, onClose }: { id: string; onClose: () => void }) {
                 <button className="btn btn-sm" disabled={!!why || !run.remote_dir} onClick={() => train.find(run.id)}>
                   <Search aria-hidden /> Look for it
                 </button>
-                <button className="btn btn-sm" disabled={!!why || run.fetch?.state === "running" || !run.remote_dir} onClick={() => train.fetch(run.id)}>
+                <button className="btn btn-sm" disabled={!control || fetching || run.fetch?.state === "running" || !run.remote_dir} onClick={() => train.fetch(run.id)}>
                   <Download aria-hidden /> Fetch newest checkpoint
                 </button>
                 <button className="btn btn-danger btn-sm" disabled={!!why || liveParts.length === 0} onClick={() => setConfirm(true)}>
@@ -660,6 +751,29 @@ function RunDetail({ id, onClose }: { id: string; onClose: () => void }) {
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
+      <Dialog.Root open={finish} onOpenChange={setFinish}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog" aria-describedby="train-finish-desc">
+            <Dialog.Title className="dialog-title">Submit the remaining parts?</Dialog.Title>
+            <div id="train-finish-desc" className="dialog-text">
+              <p>
+                Studio first looks on {run.host} for jobs with this run's names, since the failed sbatch may have made one,
+                and records any it finds. Then it runs sbatch once for each part still missing, with the same script in
+                {" "}<span className="ident">{run.remote_dir}</span>, each after the one before it:
+              </p>
+              <ul className="train-names">{remaining.map((k) => <li key={k} className="ident">{run.id}-p{k}</li>)}</ul>
+              <p>Each part resumes from the newest checkpoint. If sbatch reports an error again, Studio stops and does not retry.</p>
+            </div>
+            <div className="dialog-buttons">
+              <Dialog.Close asChild><button className="btn" autoFocus>Back</button></Dialog.Close>
+              <button className="btn btn-primary" onClick={() => { train.resubmit(run.id); setFinish(false); }}>
+                <Send aria-hidden /> Submit {remaining.length} part{remaining.length > 1 ? "s" : ""}
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </section>
   );
 }
@@ -676,7 +790,7 @@ function FetchProgress({ run }: { run: Run }) {
         <span className="num">{f.state === "done" ? `Copied ${bytes(f.bytes)}` : f.state === "error" ? "The copy failed" : `Copying ${bytes(f.bytes)} of ${bytes(f.total)}`}</span>
         <span className="ident muted">{f.path}</span>
       </div>
-      {f.message && <p className="field-hint text-danger">{f.message}</p>}
+      {f.message && <p className={`field-hint ${f.state === "error" ? "text-danger" : ""}`}>{f.message}</p>}
     </div>
   );
 }

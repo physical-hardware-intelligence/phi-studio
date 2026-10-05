@@ -8,6 +8,7 @@ import asyncio
 import json
 import re
 import shlex
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,7 @@ TEST_OK = ("sbatch: Job 10813202 to start at 2026-10-04T19:02:30 using 16 proces
            "d1011 in partition gpu-short\n")
 # The commands Studio may run on the login node (no python, find, du or recursive grep).
 ALLOWED = {"squeue", "sacct", "sacctmgr", "scontrol", "sbatch", "scancel", "cat", "ls", "head",
-           "tail", "test", "mkdir", "df", "quota", "echo", "whoami"}  # fmt: skip
+           "tail", "test", "mkdir", "df", "quota", "echo", "whoami", "set"}  # fmt: skip
 
 
 ENV = f"/home/{USER}/.conda/envs/lerobot-gpu"
@@ -130,7 +131,7 @@ def cluster_rules(submitted: int = 0, sbatch: Reply | None = None,
         (r"^df -h", (1, "Filesystem Size Used Avail Use% Mounted on\nvast 1.5P 1.3P 194T 88% "
                         "/scratch\n", "quota: error while getting quota from vast1: Operation not "
                                       "permitted\n")),  # fmt: skip
-        (r"^mkdir -p -- \S+/logs && test ! -e", (0, "", "")),
+        (r"^set -o noclobber && mkdir -p -- \S+/logs && cat > ", (0, "", "")),
         (r"^sbatch --parsable", sbatch or sbatch_ids()),
     ]
 
@@ -165,7 +166,7 @@ def test_submit_chains_parts_with_afterany_and_records_every_id() -> None:
     ]
     assert [x["id"] for x in run["jobs"]] == ["10813301", "10813302", "10813303"]
     assert run["jobs"][1]["log"] == f"{run_dir}/logs/act-cubes-{STAMP}-p2-10813302.out"
-    write = [s for c, s in fake.calls if c.startswith("mkdir -p -- ") and "test ! -e" in c]
+    write = [s for c, s in fake.calls if c.startswith("set -o noclobber && mkdir -p -- ")]
     assert write == [train.sbatch_script(j, settings(), run_dir)]  # the script goes on stdin
     assert saved[-1]["jobs"] == run["jobs"] and run["error"] is None
     assert_login_node_safe(fake)
@@ -210,7 +211,9 @@ def test_an_sbatch_answer_that_is_not_a_job_id_counts_as_an_error() -> None:
 
 
 def test_an_existing_script_is_never_overwritten() -> None:
-    rules = [(r"^mkdir -p -- \S+/logs && test ! -e", (1, "", ""))] + cluster_rules()
+    # noclobber: the shell refuses `>` onto an existing file
+    rules = [(r"^set -o noclobber && mkdir", (1, "", "bash: job.sbatch: cannot overwrite existing "
+                                                     "file"))] + cluster_rules()  # fmt: skip
     fake = FakeSSH(rules)
     with pytest.raises(hpc.ClusterError, match="Nothing was submitted"):
         hpc.submit(hpc.Cluster(settings(), fake), settings(), job(), train.new_run(job()),
@@ -304,7 +307,8 @@ def test_find_adopts_only_this_runs_part_names() -> None:
     run["parts_planned"] = 3
     found, _ = hpc.find(hpc.Cluster(settings(), fake), run)
     assert [f["id"] for f in found] == ["10813301", "10813302"]
-    assert "-S now-2days" in fake.remote()[0]
+    day_before = time.strftime("%Y-%m-%d", time.localtime(run["created"] - 86400))
+    assert f"-S {day_before} " in fake.remote()[0]
     assert hpc.adopt(run, found) == 2 and hpc.adopt(run, found) == 0
     assert [(x["part"], x["id"]) for x in run["jobs"]] == [(1, "10813301"), (2, "10813302")]
     assert run["jobs"][0]["log"].endswith(f"/logs/act-cubes-{STAMP}-p1-10813301.out")
@@ -374,9 +378,11 @@ def test_rsync_copies_over_the_same_ssh_options(tmp_path) -> None:
     rc, _ = hpc.rsync("hpc", "/scratch/u/r/train/checkpoints/last/pretrained_model",
                       tmp_path / "m", 10, lambda n: None, popen)  # fmt: skip
     assert rc == 0
-    assert seen["argv"] == ["rsync", "-a", "--partial", "-e", "ssh " + " ".join(hpc.SSH_OPTS), "--",
+    assert seen["argv"] == ["rsync", "-a", "--partial", f"--timeout={hpc.RSYNC_IO_TIMEOUT_S}",
+                            "-e", "ssh " + " ".join(hpc.RSYNC_SSH), "--",
                             "hpc:/scratch/u/r/train/checkpoints/last/pretrained_model/",
                             f"{tmp_path / 'm'}/"]  # fmt: skip
+    assert " ".join(hpc.SSH_OPTS) in seen["argv"][5]
 
 
 # -- the window commands ---------------------------------------------------------------------------
@@ -403,7 +409,7 @@ def test_commands_that_change_anything_need_control(studio) -> None:
     assert control == {"train_init": False, "train_preview": False, "train_refresh": False,
                        "train_poll": False, "train_settings": True, "train_check": True,
                        "train_submit": True, "train_mac_start": True, "train_cancel": True,
-                       "train_find": True, "train_fetch": True}  # fmt: skip
+                       "train_find": True, "train_fetch": True, "train_resubmit": True}  # fmt: skip
     fake = FakeSSH(cluster_rules())
     studio.train.runner = fake  # type: ignore[attr-defined]
     a, b = Window(), Window()

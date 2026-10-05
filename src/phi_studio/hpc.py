@@ -24,7 +24,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from phi_studio.errors import Refusal
 from phi_studio.train import (
+    HOST,
     JOB_ID,
     MAX_PART_S,
     PARTITION,
@@ -41,6 +43,12 @@ from phi_studio.train import (
 )
 
 SSH_OPTS = ("-o", "ControlPath=none", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15")
+# WHY keepalives for rsync only: a copy can run for many minutes, and a network that drops without a
+# reset would leave ssh waiting forever. 15 s x 4 unanswered probes ends it after about a minute.
+RSYNC_SSH = (*SSH_OPTS, "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4")
+RSYNC_IO_TIMEOUT_S = 120  # rsync's own --timeout: no data either way for this long ends the copy
+RSYNC_STALL_S = 300.0  # no new bytes on disk for this long: Studio stops rsync itself
+RSYNC_CAP_S = 6 * 3600.0  # the longest any one fetch may run, whatever its progress
 MARK = "@@phi-studio@@"
 TERMINAL = {"COMPLETED", "FAILED", "TIMEOUT", "CANCELLED", "OUT_OF_MEMORY", "NODE_FAIL",
             "PREEMPTED", "BOOT_FAIL", "DEADLINE"}  # fmt: skip
@@ -52,9 +60,11 @@ Runner = Callable[[list[str], str | None, float], tuple[int, bytes, bytes]]
 
 
 def run_process(argv: list[str], stdin: str | None, timeout: float) -> tuple[int, bytes, bytes]:
+    # WHY DEVNULL with no input: ssh reads stdin, and Studio's own stdin is a terminal or nothing.
+    feed: dict[str, Any] = ({"input": stdin.encode()} if stdin is not None
+                            else {"stdin": subprocess.DEVNULL})  # fmt: skip
     try:
-        p = subprocess.run(argv, input=stdin.encode() if stdin is not None else None,
-                           capture_output=True, timeout=timeout)  # fmt: skip
+        p = subprocess.run(argv, capture_output=True, timeout=timeout, **feed)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired as e:
         return 124, e.stdout or b"", (e.stderr or b"") + f"\nNo answer in {timeout:.0f} s.".encode()
@@ -244,7 +254,8 @@ def run_checks(cluster: Cluster, s: Settings, job: Job | None, needs: dict[str, 
             emit(_row(id, title, "skip", "Needs ssh first."))
         return learnt
     emit(_row("ssh", "ssh reaches the cluster", "pass",
-              f"Connected to {s.host} with no password prompt (BatchMode).", r))  # fmt: skip
+              f"Connected to {s.host} with no password prompt. Studio cannot answer Duo or a "
+              "password, so it needs this key-based login that does not prompt.", r))  # fmt: skip
 
     r = cluster.ssh('whoami && echo "$HOME"')
     lines = r.out.split()
@@ -260,6 +271,7 @@ def run_checks(cluster: Cluster, s: Settings, job: Job | None, needs: dict[str, 
     max_s = slurm_seconds(info.get("MaxTime", "")) if info else None
     want = _hms(s.time)
     qos = info.get("QoS") if info and info.get("QoS") not in (None, "", "N/A") else None
+    learnt.update(partition=s.partition, max_time=info.get("MaxTime") if info else None)
     if not info:
         emit(_row("partition", f"Partition {s.partition}", "fail", "The partition was not found.",
                   r, "Fix the partition in the settings."))  # fmt: skip
@@ -427,29 +439,44 @@ class Submitted:
     message: str
 
 
+def check_room(cluster: Cluster, user: str, partition: str, part_time: str, parts: int) -> None:
+    """Refuse, in plain words, a submit the partition or the submit limit would refuse."""
+    info, r = partition_info(cluster, partition)
+    if not info:
+        raise ClusterError(f"Partition {partition} was not found, so nothing was submitted.", r,
+                           "Fix the partition in the settings, then run Check the cluster.")
+    cap = slurm_seconds(info.get("MaxTime", ""))
+    if cap is not None and _hms(part_time) > cap:
+        raise Refusal(f"Not submitted. Each part asks for {part_time}, but partition {partition} "
+                      f"allows at most {info['MaxTime']}.",
+                      f"Set the time per part to {info['MaxTime']} or less in the settings.")
+    qos = info.get("QoS") if info.get("QoS") not in (None, "", "N/A") else None
+    if not USER.match(user):
+        raise ClusterError("Run Check the cluster first, so Studio knows your user name.")
+    lim, r = read_limits(cluster, user, partition, qos)
+    if lim.free is None:
+        raise ClusterError("Studio could not read your submit limit, so it did not submit.", r)
+    if parts > lim.free:
+        raise ClusterError(
+            f"Not submitted. You have {lim.submitted} jobs submitted in {partition} and the "
+            f"limit is {lim.max_submit}, so {lim.free} more fit. This run needs {parts}.", r,
+            "Wait for some jobs to finish, or use fewer parts. Studio cancels nothing it did not "
+            "submit.")  # fmt: skip
+
+
 def submit(cluster: Cluster, s: Settings, job: Job, run: dict[str, Any],
            save: Callable[[dict[str, Any]], None]) -> Submitted:  # fmt: skip
-    """Check the limit, write the script, then sbatch each part, each after the last with
-    --dependency=afterany (a part that ends on its time limit counts as failed for afterok).
-    Stops at the first error and never retries."""
+    """Check the partition and the limit, write the script, then sbatch each part, each after the
+    last with --dependency=afterany (a part that ends on its time limit counts as failed for
+    afterok). Stops at the first error and never retries."""
     base = s.base()
     run_dir = f"{base}/runs/{job.run_id}"
     script = sbatch_script(job, s, run_dir)
-    info, _ = partition_info(cluster, s.partition)
-    qos = info.get("QoS") if info.get("QoS") not in (None, "", "N/A") else None
-    if not USER.match(s.remote_user):
-        raise ClusterError("Run Check the cluster first, so Studio knows your user name.")
-    lim, r = read_limits(cluster, s.remote_user, s.partition, qos)
-    if lim.free is None:
-        raise ClusterError("Studio could not read your submit limit, so it did not submit.", r)
-    if job.parts > lim.free:
-        raise ClusterError(
-            f"Not submitted. You have {lim.submitted} jobs submitted in {s.partition} and the "
-            f"limit is {lim.max_submit}, so {lim.free} more fit. This run needs {job.parts}.", r,
-            "Wait for some jobs to finish, or use fewer parts. Studio cancels nothing it did not "
-            "submit.")  # fmt: skip
+    check_room(cluster, s.remote_user, s.partition, s.time, job.parts)
     path = f"{run_dir}/job.sbatch"
-    r = cluster.ssh(f"mkdir -p -- {q(run_dir + '/logs')} && test ! -e {q(path)} && cat > {q(path)}",
+    # WHY noclobber: `>` then opens with O_EXCL, so two writers of one path cannot both succeed.
+    # A separate `test ! -e` first would leave a gap between the test and the write.
+    r = cluster.ssh(f"set -o noclobber && mkdir -p -- {q(run_dir + '/logs')} && cat > {q(path)}",
                     stdin=script)  # fmt: skip
     if not r.ok:
         raise ClusterError("Could not write the job script on the cluster. Nothing was submitted.",
@@ -457,9 +484,21 @@ def submit(cluster: Cluster, s: Settings, job: Job, run: dict[str, Any],
     run.update(remote_dir=run_dir, script_path=path, script=script, host=s.host,
                user=s.remote_user, partition=s.partition, part_time=s.time)  # fmt: skip
     save(run)
-    prev: str | None = None
-    for k in range(1, job.parts + 1):
-        name = part_name(job.run_id, k)
+    return sbatch_parts(cluster, run, 1, save)
+
+
+def sbatch_parts(cluster: Cluster, run: dict[str, Any], first_part: int,
+                 save: Callable[[dict[str, Any]], None]) -> Submitted:  # fmt: skip
+    """sbatch parts first_part..parts_planned of a run whose script is written, the first after
+    the run's newest recorded part. Stops at the first error and never retries."""
+    path, run_dir, total = run["script_path"], run["remote_dir"], int(run["parts_planned"])
+    if not REMOTE_PATH.match(path) or ".." in path:
+        raise ClusterError(f"Not a script path Studio wrote: {path}")
+    prev: str | None = run["jobs"][-1]["id"] if run.get("jobs") else None
+    sent: list[str] = []
+    run["error"] = None
+    for k in range(first_part, total + 1):
+        name = part_name(run["id"], k)
         dep = f" --dependency=afterany:{prev}" if prev else ""
         r = cluster.ssh(f"sbatch --parsable --job-name={q(name)} --export=ALL,PHI_PART={k}{dep} "
                         f"{q(path)}")  # fmt: skip
@@ -468,17 +507,29 @@ def submit(cluster: Cluster, s: Settings, job: Job, run: dict[str, Any],
             run["error"] = {"part": k, "cmd": r.cmd, "output": r.shown(),
                             "at": time.time()}  # fmt: skip
             save(run)
-            done = f"Parts 1 to {k - 1} are queued. " if k > 1 else ""
+            done = ("" if k == first_part else f"Part {first_part} is queued. "
+                    if k == first_part + 1 else f"Parts {first_part} to {k - 1} are queued. ")
             return Submitted(run, False,
-                             f"sbatch failed for part {k} of {job.parts}. {done}Studio did not "
+                             f"sbatch failed for part {k} of {total}. {done}Studio did not "
                              "retry: on this cluster a failed sbatch can still create the job, "
                              "minutes later. Wait 3 minutes, then use Look for it.")  # fmt: skip
         run["jobs"].append({"part": k, "id": jid, "name": name, "state": "PENDING",
                             "log": f"{run_dir}/logs/{name}-{jid}.out"})  # fmt: skip
         save(run)
+        sent.append(jid)
         prev = jid
-    return Submitted(run, True, f"Submitted {job.parts} part{'s' if job.parts > 1 else ''}: "
-                                f"{', '.join(j['id'] for j in run['jobs'])}.")  # fmt: skip
+    return Submitted(run, True, f"Submitted {len(sent)} part{'s' if len(sent) > 1 else ''}: "
+                                f"{', '.join(sent)}.")  # fmt: skip
+
+
+def missing_parts(run: dict[str, Any]) -> int | None:
+    """The first part a run never got, after a failed sbatch, or None when every part exists."""
+    have = {int(j["part"]) for j in run.get("jobs", [])}
+    total = int(run["parts_planned"])
+    first = next((k for k in range(1, total + 1) if k not in have), None)
+    if first is not None and any(k > first for k in have):
+        return None  # a gap in the middle: not a chain Studio can finish by adding parts
+    return first
 
 
 def _ids(run: dict[str, Any]) -> list[str]:
@@ -580,8 +631,12 @@ def find(cluster: Cluster, run: dict[str, Any]) -> tuple[list[dict[str, str]], R
     if not USER.match(user):
         raise ClusterError("This run has no cluster user recorded.")
     names = ",".join(part_name(run["id"], k) for k in range(1, int(run["parts_planned"]) + 1))
+    # WHY from the day before the run was made: sacct reads -S in the cluster's time zone, and a
+    # whole day of margin covers any zone; a fixed "now-2days" misses a run older than that.
+    made = float(run.get("created") or time.time())
+    since = time.strftime("%Y-%m-%d", time.localtime(made - 86400))
     r = cluster.ssh(f"squeue -h -u {q(user)} -n {q(names)} -o '%i|%j|%T'; echo {MARK}; "
-                    f"sacct -n -P -X -u {q(user)} -S now-2days --name={q(names)} "
+                    f"sacct -n -P -X -u {q(user)} -S {since} --name={q(names)} "
                     "-o JobIDRaw,JobName,State")  # fmt: skip
     if r.rc == 255:
         raise ClusterError("Could not reach the cluster.", r, ssh_fix(r))
@@ -652,14 +707,34 @@ def rsync(
     popen: Callable[..., Any] = subprocess.Popen,
 ) -> tuple[int, str]:
     """Copy a remote folder into `local`, reporting bytes on disk twice a second. WHY count the
-    disk, not rsync's output: macOS ships openrsync, whose progress lines differ from rsync 3."""
+    disk, not rsync's output: macOS ships openrsync, whose progress lines differ from rsync 3.
+    Always ends: rsync's own --timeout, ssh keepalives, and Studio stops it after RSYNC_STALL_S
+    with no new bytes or RSYNC_CAP_S in all."""
+    if not HOST.match(host):
+        return 2, f"Not an ssh host alias: {host}"
     local.mkdir(parents=True, exist_ok=True)
-    argv = ["rsync", "-a", "--partial", "-e", "ssh " + " ".join(SSH_OPTS), "--",
-            f"{host}:{remote}/", f"{local}/"]  # fmt: skip
-    p = popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    argv = ["rsync", "-a", "--partial", f"--timeout={RSYNC_IO_TIMEOUT_S}",
+            "-e", "ssh " + " ".join(RSYNC_SSH), "--", f"{host}:{remote}/", f"{local}/"]  # fmt: skip
+    p = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    start = moved = time.monotonic()
+    seen = -1
+    why = ""
     while p.poll() is None:
-        on_progress(min(total, local_bytes(local)) if total else local_bytes(local))
-        time.sleep(0.5)
+        n = local_bytes(local)
+        now = time.monotonic()
+        if n != seen:
+            seen, moved = n, now
+        on_progress(min(total, n) if total else n)
+        if now - moved > RSYNC_STALL_S:
+            why = f"Studio stopped rsync: no data arrived for {RSYNC_STALL_S:.0f} s."
+        elif now - start > RSYNC_CAP_S:
+            why = f"Studio stopped rsync after {RSYNC_CAP_S / 3600:.0f} hours."
+        if why:
+            p.kill()
+            break
+        time.sleep(min(0.5, RSYNC_STALL_S / 4))
     err = p.stderr.read().decode(errors="replace") if p.stderr else ""
     on_progress(local_bytes(local))
-    return int(p.returncode), err.strip()
+    if why:
+        return 124, f"{why} {err.strip()}".strip()
+    return int(p.returncode if p.returncode is not None else 1), err.strip()

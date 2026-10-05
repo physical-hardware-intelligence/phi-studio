@@ -128,7 +128,7 @@ def test_env_setup_takes_only_env_lines(line) -> None:
         ("remote_base", "/scratch/a b"),
         ("gres", "gpu:1\n#SBATCH --qos=high"),
         ("mem", "64G; reboot"),
-        ("time", "09:00:00"),
+        ("time", "00:09:59"),
         ("time", "8h"),
         ("partition", "gpu;id"),
         ("exclude", "d1025 && id"),
@@ -150,10 +150,12 @@ def test_a_trailing_newline_does_not_slip_past_a_pattern(field) -> None:
         Settings(**{field: good[field] + "\n"}).validate()
 
 
-def test_a_part_longer_than_the_partition_allows_is_refused() -> None:
+def test_a_part_shorter_than_ten_minutes_is_refused() -> None:
+    """The longest part is the partition's own limit, checked by the check and by submit
+    (tests/test_train_review.py); the settings refuse only a part too short to do anything."""
     with pytest.raises(FormError):
-        Settings(time="08:00:01").validate()
-    assert Settings(time="08:00:00").validate().time == "08:00:00"
+        Settings(time="00:09:59").validate()
+    assert Settings(time="08:00:01").validate().time == "08:00:01"
 
 
 # -- the script ------------------------------------------------------------------------------------
@@ -174,8 +176,8 @@ def test_chained_parts_share_one_script_and_cancel_the_rest_when_done() -> None:
     j = job(parts=3, steps=100_000, save_freq=10_000)
     text = script(j)
     assert "part ${PHI_PART:-1} of 3" in text
-    assert "for name in act-cubes-20261004-190000-p2 act-cubes-20261004-190000-p3; do" in text
-    assert '--state=PENDING' in text
+    assert "for ((k = ${PHI_PART:-1} + 1; k <= 3; k++)); do" in text
+    assert 'scancel --user="$USER" --name=act-cubes-20261004-190000-p"$k" --state=PENDING' in text
     p = train.plan(j, settings())
     assert p["total_hours"] == 24.0
     assert p["names"] == [f"act-cubes-{STAMP}-p{k}" for k in (1, 2, 3)]
