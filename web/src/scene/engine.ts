@@ -76,6 +76,8 @@ function loadMesh(url: string, toMm: number, onBytes: (n: number) => void): Prom
 const v3 = (a: Vec3) => new THREE.Vector3(a[0], a[1], a[2]);
 const quat = (q: [number, number, number, number]) => new THREE.Quaternion(...mjQuat(q)); // MuJoCo w,x,y,z
 const srgb = (c: Vec3) => new THREE.Color().setRGB(c[0], c[1], c[2], THREE.SRGBColorSpace);
+/** Drawn: three skips an object when it or any ancestor is hidden. */
+const shown = (o: THREE.Object3D): boolean => { for (let p: THREE.Object3D | null = o; p; p = p.parent) if (!p.visible) return false; return true; };
 
 interface JointNode { node: THREE.Object3D; axis: Vec3; pivot: Vec3 }
 
@@ -1191,7 +1193,7 @@ export class Engine {
       place(s.pill, p, what ? `${label(s.slot.name)}: ${what}` : label(s.slot.name), what ? "warn" : "neutral");
     }
     for (const c of this.cams.values()) {
-      if (!c.group.parent) { c.pill.hidden = true; continue; }
+      if (!c.group.parent || !shown(c.group)) { c.pill.hidden = true; continue; } // e.g. on an arm that is not drawn
       const top = new THREE.Vector3(0, c.depth * Math.tan(THREE.MathUtils.degToRad(c.fovy) / 2) * 1.5, -c.depth);
       c.group.localToWorld(top);
       place(c.pill, top, `${label(c.key)}${c.wrist ? " (CAD mount)" : " (placed by you)"}${this.camStatus(c, now)}`, c.key === this.editing ? "accent" : "neutral");
