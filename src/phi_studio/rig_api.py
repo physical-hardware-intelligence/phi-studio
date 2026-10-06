@@ -214,9 +214,18 @@ class RigApi:
         return {"arms": [{"key": a.key, "role": a.role, "side": a.side, "port": a.port}
                          for a in spec.arms], "ids": ids}  # fmt: skip
 
+    def _ours(self) -> set[int]:
+        """Studio's own pids: the server and its robot worker. WHY: the worker is a separate
+        process, and it must never be reported as a holder or offered to Stop."""
+        pid = getattr(getattr(self.studio, "proc", None), "pid", None)
+        return {os.getpid()} | ({pid} if isinstance(pid, int) else set())
+
+    def _holders(self, ports: list[str]) -> dict[str, list[detect.Holder]]:
+        return detect.port_holders(ports, me=self._ours())
+
     async def _scan(self) -> list[detect.Found]:
         ports = await asyncio.to_thread(detect.serial_ports)
-        found = await asyncio.to_thread(detect.scan, ports, self.cal_root)
+        found = await asyncio.to_thread(detect.scan, ports, self.cal_root, holders=self._holders)
         self.found = {f.port: f for f in found}
         return found
 
@@ -233,8 +242,8 @@ class RigApi:
             raise RigError("Which process? Scan again and use its Stop button.")
         async with self.lock:
             ports = [d for d, _ in await asyncio.to_thread(detect.serial_ports)]
-            held = await asyncio.to_thread(detect.port_holders, ports)
-            if not any(h.pid == pid for hs in held.values() for h in hs):
+            held = await asyncio.to_thread(self._holders, ports)
+            if pid in self._ours() or not any(h.pid == pid for hs in held.values() for h in hs):
                 # WHY re-check: the pid comes from the page and may be stale or reused; Studio
                 # stops only a process that holds an arm's port right now.
                 raise RigError(f"Process {pid} no longer holds an arm's port.", "Scan again.")

@@ -642,3 +642,11 @@ def test_studio_opens_in_chrome_when_chrome_is_installed(monkeypatch: Any, tmp_p
     monkeypatch.setattr("sys.platform", "darwin")
     server.open_in_chrome("http://127.0.0.1:1/#token=t")
     assert calls == [["open", "-a", str(app), "http://127.0.0.1:1/#token=t"]]
+
+
+def test_a_terminal_command_that_opens_a_port_is_recognised() -> None:
+    from phi_studio.server import _touches_arms
+
+    assert _touches_arms("lerobot-calibrate --robot.type=so101_follower --robot.port=/dev/tty.x")
+    assert _touches_arms("python health_check/roll_live.py /dev/cu.usbmodem1")
+    assert not _touches_arms("ls -la") and not _touches_arms("hf auth login")

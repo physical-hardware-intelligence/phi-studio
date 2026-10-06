@@ -869,6 +869,9 @@ class RigWorker:
         self.health.clear()  # a reading from a rig that is gone would stay on screen for good
         self.identity = []
         self.send({"type": "identity", "arms": []})  # so no window keeps showing a rig that is gone
+        release = getattr(self.rig, "release_ports", None)
+        if release is not None:  # real arms: free the ports while disconnected (hardware.py)
+            release()
         self.session.disconnected()
 
     def _cmd_inject(self, msg: dict[str, Any]) -> None:
@@ -1220,5 +1223,8 @@ def run_worker(conn: Any, spec: dict[str, Any]) -> None:
     finally:
         done.set()
         w.shutdown()
+        release = getattr(rig, "release_ports", None)
+        if release is not None:
+            release()
         for cam in rig.cameras:
             cam.close()

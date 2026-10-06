@@ -450,3 +450,30 @@ def test_position_reads_retry_a_lost_packet_before_the_bus_counts_as_down() -> N
     a.read_positions()
     a.read_raw_positions()
     assert bus.retries[-2:] == [H.READ_RETRIES, H.READ_RETRIES]
+
+
+def test_the_ports_are_closed_whenever_the_rig_is_disconnected(tmp_path) -> None:
+    """macOS serial ports are not exclusive: a port Studio kept open while disconnected was shared
+    with lerobot-calibrate in its own terminal, and both read garbage (2026-10-05)."""
+    from phi_studio.worker import RigWorker
+
+    root = tmp_path / "cal"
+    for d, name in (("robots/so_follower", "f"), ("teleoperators/so_leader", "l")):
+        (root / d).mkdir(parents=True)
+        (root / d / f"{name}.json").write_text(json.dumps({j: c._asdict() for j, c in CAL.items()}))
+    cfg = tmp_path / "robot-config.yaml"
+    cfg.write_text("robot: {type: so101_follower, id: f, port: /dev/a}\n"
+                   "teleop: {type: so101_leader, id: l, port: /dev/b}\n")  # fmt: skip
+    FakeBus.fail_connect = 0
+    FakeBus.instances.clear()
+    bus = lambda p, c: FakeBus(p, H.to_motor_calibration(c) if c else None)  # noqa: E731
+    rig = H.build_rig(cfg, bus_factory=bus, cal_root=root, cameras=False)
+    assert FakeBus.instances and not any(b.connected for b in FakeBus.instances)  # checked, closed
+    assert all(a._bus is None for a in rig.arms)
+    w = RigWorker(rig, lambda m: None, clock=lambda: 0.0)
+    w.handle({"cmd": "connect"})
+    assert all(a._bus is not None and a._bus.connected for a in rig.arms)  # Connect reopens
+    w.handle({"cmd": "disconnect"})
+    assert all(a._bus is None for a in rig.arms) and not any(b.connected for b in FakeBus.instances)
+    w.tick()  # a disconnected tick must not reopen them
+    assert all(a._bus is None for a in rig.arms)

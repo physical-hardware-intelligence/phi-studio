@@ -26,6 +26,7 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import re
 import secrets
 import socket
 import struct
@@ -54,6 +55,11 @@ FEATURES = (
     "setup_api", "hub_api", "train_api", "scene_api", "recon_api", "data_api", "onboard_api",
     "rig_api",
 )
+
+def _touches_arms(cmd: str) -> bool:
+    """A terminal command that opens a serial port: any LeRobot CLI or a /dev/tty|cu path."""
+    return "lerobot-" in cmd or bool(re.search(r"/dev/(tty|cu)\.", cmd))
+
 
 COMMANDS = {"heartbeat", "connect", "identify", "confirm", "arm", "start", "stop", "resume",
             "release", "clear", "disconnect", "inject",
@@ -532,6 +538,13 @@ class Studio:
                 refuse(f"The terminal is still running {busy['command'] or 'a command'}.",
                        "Wait for it to finish, or stop it with Ctrl-C.")  # fmt: skip
                 return
+            held = self._arms_held_by_worker()
+            if held and _touches_arms(cmd):
+                # WHY refuse: macOS serial ports are not exclusive; LeRobot and the worker would
+                # share the line and read each other's replies (2026-10-05).
+                refuse(f"Studio is connected to the arms ({held}), so it holds their ports.",
+                       "Disconnect first, then run it.")  # fmt: skip
+                return
             self._note("state", f"Ran in the terminal: {cmd[:200]}")
             term.write(cmd.encode() + b"\r")
 
@@ -574,10 +587,30 @@ class Studio:
         if cmd in EVAL_COMMANDS:
             self._eval(client, cmd, msg)
             return
+        if cmd == "connect" and self.spec.get("kind") == "lerobot":
+            asyncio.get_running_loop().create_task(self._connect_when_free(client, msg))
+            return
         if cmd == "start" and msg.get("activity") == "policy" and self._unjudged():
             # A new run replaces the last one, and the unjudged episode could never be judged.
             self._tell(client, "The last eval episode is not judged yet.",
                        "Judge it on the Evaluate page, or end the eval.")  # fmt: skip
+            return
+        self.to_worker({k: v for k, v in msg.items() if isinstance(k, str)})
+
+    def _arms_held_by_worker(self) -> str | None:
+        """The worker's state when it may hold real arms' ports, else None."""
+        if self.spec.get("kind") != "lerobot":
+            return None
+        state = (self.last.get("state") or {}).get("state")
+        return None if state in (None, "DISCONNECTED") else str(state).lower()
+
+    async def _connect_when_free(self, client: Client, msg: dict[str, Any]) -> None:
+        from phi_studio.setup_api import lerobot_busy
+
+        busy = await lerobot_busy(self)
+        if busy:
+            self._tell(client, f"The terminal is running {busy}, which holds the arms' ports.",
+                       "Let it finish, or stop it, then connect.", "connect")  # fmt: skip
             return
         self.to_worker({k: v for k, v in msg.items() if isinstance(k, str)})
 

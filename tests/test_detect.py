@@ -241,3 +241,12 @@ def test_a_motor_that_does_not_answer_is_named_and_never_powered() -> None:
     assert out[3].error == "does not answer" and not out[3].ok
     assert (4, "torque", 1) not in line.log
     assert [r.ok for r in out if r.id != 4] == [True] * 5
+
+
+def test_studio_and_its_worker_are_never_reported_as_holders(monkeypatch: Any) -> None:
+    from phi_studio import detect
+
+    monkeypatch.setattr(detect.os.path, "exists", lambda p: True)
+    run = lambda argv: LSOF if argv[0] == "lsof" else PS  # noqa: E731
+    held = detect.port_holders(["/dev/tty.usbmodemA", "/dev/tty.usbmodemB"], run=run, me={7, 4242})
+    assert set(held) == {"/dev/tty.usbmodemB"}

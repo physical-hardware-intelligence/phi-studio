@@ -320,6 +320,14 @@ class HardwareRig:
     spec: rigspec.RigSpec
     cal_root: Path
 
+    def release_ports(self) -> None:
+        """Close every arm's serial port; the next bus call reopens it (FeetechArm._ensure).
+        WHY: macOS serial ports are not exclusive, so a port Studio keeps open while
+        disconnected is shared with lerobot-calibrate or any script, and both read garbage
+        (2026-10-05). Torque is not touched: the worker releases it before calling this."""
+        for a in self.arms:
+            a.close()
+
     def calibration_files(self) -> dict[str, Calibration]:
         """Every calibration file under LeRobot's folder, by id: identity matches an arm's registers
         against all of them, so an arm on another arm's cable is caught (worker.py _identify)."""
@@ -364,6 +372,9 @@ def build_rig(
             RuntimeError,
         ) as e:  # an unplugged arm: the worker sees it as dead, replug works
             arm.last_error = str(e)
+        # WHY close again: the connect above only checks and configures; the worker starts
+        # disconnected, and Connect reopens the port.
+        arm.close()
         arms.append(arm)
     cams: list[Any] = []
     if cameras:

@@ -62,11 +62,12 @@ def _run(argv: list[str]) -> str:
 
 
 def port_holders(ports: Iterable[str], run: Callable[[list[str]], str] = _run,
-                 me: int | None = None) -> dict[str, list[Holder]]:
+                 me: int | Iterable[int] | None = None) -> dict[str, list[Holder]]:
     """Which other processes have each port open, as lsof sees it. Keys are /dev/tty.* names.
     WHY lsof: macOS serial ports are not opened exclusively, so a second opener is not refused;
-    it silently shares the line and corrupts replies."""
-    me = os.getpid() if me is None else me
+    it silently shares the line and corrupts replies. `me`: pids that are Studio itself (the
+    server and its robot worker), never reported."""
+    mine = {os.getpid()} if me is None else ({me} if isinstance(me, int) else set(me))
     want: dict[str, str] = {}
     for p in ports:
         tty = p.replace("/dev/cu.", "/dev/tty.")
@@ -80,7 +81,7 @@ def port_holders(ports: Iterable[str], run: Callable[[list[str]], str] = _run,
     for line in run(["lsof", "-F", "pn", *want]).splitlines():
         if line.startswith("p"):
             pid = int(line[1:])
-        elif line.startswith("n") and pid is not None and line[1:] in want and pid != me:
+        elif line.startswith("n") and pid is not None and line[1:] in want and pid not in mine:
             pids.setdefault(pid, set()).add(want[line[1:]])
     if not pids:
         return {}
