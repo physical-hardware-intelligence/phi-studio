@@ -53,6 +53,14 @@ function Setup({ last }: { last: RecView | null }) {
   const [f, setF] = useState(memory);
   const set = (p: Partial<typeof memory>) => { Object.assign(memory, p); setF({ ...memory }); };
   const existing = (value?.datasets ?? []).map((d) => d.repo_id).filter((r) => r.includes("/"));
+  const lr = useStudio((s) => s.files.index?.lerobot ?? null);
+  const mock = useStudio((s) => s.mock);
+  const link = useStudio((s) => s.link);
+  useEffect(() => { if (link === "open") studio.loadFiles(); }, [link]);
+  // WHY the Hugging Face user: a dataset under someone else's owner cannot be uploaded later.
+  useEffect(() => { if (lr?.hf_user && memory.name === "phi/") set({ name: `${lr.hf_user}/` }); }, [lr?.hf_user]);
+  // Cameras robot-config.yaml names with no device: the worker opens none of them, so none is recorded.
+  const leftOut = mock ? [] : (lr?.cameras ?? []).filter((c) => c.source == null).map((c) => c.feature.replace("observation.images.", ""));
   const append = existing.includes(f.name.trim());
   const teleop = st?.state === "MOVING" && st.activity === "teleop";
   const nameOk = /^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/.test(f.name.trim());
@@ -86,6 +94,12 @@ function Setup({ last }: { last: RecView | null }) {
         <Num label="Length" unit="s" value={f.episode_s} min={1} max={600} onChange={(v) => set({ episode_s: v })} />
         <Num label="Reset" unit="s" value={f.reset_s} min={0} max={300} onChange={(v) => set({ reset_s: v })} />
       </div>
+      {leftOut.length > 0 && (
+        <p className="warn-text t-sm">
+          <CircleAlert aria-hidden className="ico-inline" />Not recorded: {leftOut.join(", ")}. robot-config.yaml gives{" "}
+          {leftOut.length === 1 ? "it" : "them"} no device. <a className="link-btn" href="#/setup">Find cameras on Setup</a>
+        </p>
+      )}
       <div className="form-actions">
         {why && <span className="field-hint">{why}</span>}
         <button className="btn btn-primary rec-go" disabled={why !== null} onClick={start}><Circle aria-hidden className="rec-dot" />Record</button>
