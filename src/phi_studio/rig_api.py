@@ -5,6 +5,9 @@ which, and write that into robot-config.yaml and the calibration folder.
                                to calibration files (detect.scan); pushes rig_scan
     cmd rig_motion  (control)  watch every healthy arm for MOTION_S while a person moves one by
                                hand; pushes rig_motion with ticks moved per port
+    cmd rig_check   (control)  POWERED: hold each motor of one arm still with torque on, one at a
+                               time, polling the whole bus (detect.check_arm); pushes rig_check
+                               per motor, then with done
     cmd rig_stop    (control)  stop a process that holds an arm's port (SIGTERM, then SIGKILL),
                                only when a fresh lsof still shows it holding one; rescans
     cmd rig_apply   (control)  rescan, check the chosen roles and sides, write any missing
@@ -35,6 +38,7 @@ if TYPE_CHECKING:
     from phi_studio.server import Client, Studio
 
 MOTION_S = 3.0
+CHECK_S = 3.0  # per motor: tonight's faulty motor broke the bus within 1.7 s
 DEFAULT_IDS = {"follower": "phi_follower", "leader": "phi_leader"}
 
 
@@ -241,6 +245,35 @@ class RigApi:
         client.push({"type": "rig_scan", "arms": [f.public() for f in found],
                      "config": self._config_view(), "at": time.time()})  # fmt: skip
 
+    async def check(self, client: Client, msg: dict[str, Any]) -> None:
+        port = msg.get("port")
+        async with self.lock:
+            await self._may_open_ports()
+            f = self.found.get(port) if isinstance(port, str) else None
+            if f is None:
+                raise RigError("Scan for arms first, then check one of them.")
+            if f.problem:
+                raise RigError(f"Fix this arm first: {f.problem}")
+            loop = asyncio.get_running_loop()
+            push = client.push
+
+            def each(r: detect.MotorCheck) -> None:
+                loop.call_soon_threadsafe(push, {"type": "rig_check", "port": port,
+                                                 "motor": r.public(), "done": False})  # fmt: skip
+
+            push({"type": "rig_check", "port": port, "motor": None, "done": False,
+                  "seconds": CHECK_S})  # fmt: skip
+            try:
+                out = await asyncio.to_thread(detect.check_arm, f.port, CHECK_S, on_motor=each)
+            except OSError as e:
+                push({"type": "rig_check", "port": port, "done": True, "motors": []})
+                raise RigError(f"Could not check {port}: {e}") from e
+        bad = [r.id for r in out if not r.ok]
+        self.studio._note("state", f"Motor check {port}: " + (
+            f"motor {', '.join(map(str, bad))} failed" if bad else "all six fine"))
+        client.push({"type": "rig_check", "port": port, "done": True,
+                     "motors": [r.public() for r in out]})  # fmt: skip
+
     async def motion(self, client: Client, msg: dict[str, Any]) -> None:
         async with self.lock:
             await self._may_open_ports()
@@ -346,4 +379,5 @@ def register(studio: Studio) -> None:
     studio.handle("rig_scan", api.scan, control=True)
     studio.handle("rig_motion", api.motion, control=True)
     studio.handle("rig_stop", api.stop_holder, control=True)
+    studio.handle("rig_check", api.check, control=True)
     studio.handle("rig_apply", api.apply, control=True)

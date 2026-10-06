@@ -176,3 +176,68 @@ def test_a_held_port_is_reported_and_never_pinged(tmp_path: Path) -> None:
     assert problem and "roll_live.py (process 4242, paused)" in problem
     assert by["/dev/tty.a"].public()["held_by"][0]["paused"] is True
     assert by["/dev/tty.b"].problem is None
+
+
+class FakeLine:
+    """A bus where motor `bad` garbles every packet while it holds torque (2026-10-05)."""
+
+    def __init__(self, bad: int | None = None, mute: int | None = None) -> None:
+        self.bad, self.mute = bad, mute
+        self.torque = {i: 0 for i in range(1, 7)}
+        self.goals: dict[int, int] = {}
+        self.log: list[tuple[int, str, int]] = []
+        self.closed = False
+
+    def read(self, mid: int, name: str) -> int | None:
+        if mid == self.mute:
+            return None
+        return {"pos": 2000 + mid, "volt": 118, "current": 3, "temp": 35, "status": 0}[name]
+
+    def write(self, mid: int, name: str, value: int) -> bool:
+        self.log.append((mid, name, value))
+        if name == "torque":
+            self.torque[mid] = value
+        if name == "goal":
+            self.goals[mid] = value
+        return mid != self.mute
+
+    def sync_ok(self) -> bool:
+        return not (self.bad and self.torque[self.bad])
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def run_check(line: FakeLine) -> list[Any]:
+    from phi_studio.detect import check_arm
+
+    t = [0.0]
+
+    def sleep(dt: float) -> None:
+        t[0] += dt
+
+    seen: list[int] = []
+    out = check_arm("/dev/tty.x", 1.0, line_factory=lambda p: line, clock=lambda: t[0],
+                    sleep=sleep, on_motor=lambda r: seen.append(r.id))  # fmt: skip
+    assert seen == [1, 2, 3, 4, 5, 6]
+    return out
+
+
+def test_motor_check_finds_the_one_motor_that_breaks_the_bus_under_torque() -> None:
+    line = FakeLine(bad=2)
+    out = run_check(line)
+    assert [r.ok for r in out] == [True, False, True, True, True, True]
+    assert out[1].bus_errors == out[1].polls > 0 and out[1].first_error_s == 0.0
+    assert out[0].min_volt == 11.8 and out[0].max_current == 3
+    assert all(line.goals[i] == 2000 + i for i in range(1, 7))  # each held where it was
+    goal_then_torque = [(m, n) for m, n, v in line.log if n in ("goal", "torque") and v != 0]
+    assert goal_then_torque[:2] == [(1, "goal"), (1, "torque")]
+    assert all(v == 0 for v in line.torque.values()) and line.closed
+
+
+def test_a_motor_that_does_not_answer_is_named_and_never_powered() -> None:
+    line = FakeLine(mute=4)
+    out = run_check(line)
+    assert out[3].error == "does not answer" and not out[3].ok
+    assert (4, "torque", 1) not in line.log
+    assert [r.ok for r in out if r.id != 4] == [True] * 5

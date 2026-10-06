@@ -293,3 +293,130 @@ def watch_motion(
     finally:
         for b in buses.values():
             _close(b)
+
+
+# -- motor check: the one powered test here ----------------------------------------------------
+# WHY this exists: on 2026-10-05 one follower motor (shoulder_lift) corrupted every packet on its
+# bus whenever it drove current, so teleop died on its first read while every read-only check
+# passed. Powering one motor at a time, holding still, and polling the whole bus finds it.
+
+ADDR = {"goal": 42, "torque": 40, "pos": 56, "load": 60, "volt": 62, "temp": 63, "status": 65,
+        "current": 69}  # fmt: skip  (STS3215, LeRobot tables.py STS_SMS_SERIES_CONTROL_TABLE)
+WIDTH = {"goal": 2, "torque": 1, "pos": 2, "load": 2, "volt": 1, "temp": 1, "status": 1,
+         "current": 2}  # fmt: skip
+
+
+@dataclass
+class MotorCheck:
+    """One motor powered and holding still for a few seconds."""
+
+    id: int
+    polls: int = 0
+    bus_errors: int = 0  # whole-bus sync reads that failed while this motor held torque
+    first_error_s: float | None = None
+    min_volt: float | None = None
+    max_current: int | None = None
+    temp: int | None = None
+    status: int | None = None  # the motor's own error flags, 0 when fine
+    error: str | None = None  # could not power it at all
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None and self.bus_errors == 0 and not self.status
+
+    def public(self) -> dict[str, Any]:
+        return {"id": self.id, "ok": self.ok, "polls": self.polls, "bus_errors": self.bus_errors,
+                "first_error_s": self.first_error_s, "min_volt": self.min_volt,
+                "max_current": self.max_current, "temp": self.temp, "status": self.status,
+                "error": self.error}  # fmt: skip
+
+
+class Line:
+    """The few Feetech bus calls the motor check needs, over scservo_sdk."""
+
+    def __init__(self, port: str) -> None:
+        import scservo_sdk as scs
+
+        self.scs = scs
+        self.ph, self.pk = scs.PortHandler(port), scs.PacketHandler(0)
+        if not self.ph.openPort():
+            raise OSError(f"could not open {port}")
+        self.ph.setBaudRate(BAUD)
+        self.group = scs.GroupSyncRead(self.ph, self.pk, ADDR["pos"], 2)
+        for i in ARM_IDS:
+            self.group.addParam(i)
+
+    def read(self, mid: int, name: str) -> int | None:
+        fn = self.pk.read2ByteTxRx if WIDTH[name] == 2 else self.pk.read1ByteTxRx
+        v, comm, _ = fn(self.ph, mid, ADDR[name])
+        return int(v) if comm == self.scs.COMM_SUCCESS else None
+
+    def write(self, mid: int, name: str, value: int) -> bool:
+        fn = self.pk.write2ByteTxRx if WIDTH[name] == 2 else self.pk.write1ByteTxRx
+        comm, _ = fn(self.ph, mid, ADDR[name], value)
+        return bool(comm == self.scs.COMM_SUCCESS)
+
+    def sync_ok(self) -> bool:
+        return bool(self.group.txRxPacket() == self.scs.COMM_SUCCESS)
+
+    def close(self) -> None:
+        self.ph.closePort()
+
+
+def check_motor(line: Any, mid: int, seconds: float = 3.0, *,
+                clock: Callable[[], float] = time.monotonic,
+                sleep: Callable[[float], None] = time.sleep) -> MotorCheck:
+    """Hold motor `mid` where it is with torque on for `seconds`; poll it and the whole bus."""
+    r = MotorCheck(mid)
+    try:
+        pos = line.read(mid, "pos")
+        if pos is None:
+            r.error = "does not answer"
+            return r
+        # WHY goal first: the motor holds where it already is, so nothing moves
+        if not (line.write(mid, "goal", pos) and line.write(mid, "torque", 1)):
+            r.error = "would not take torque"
+            return r
+        t0 = clock()
+        while clock() - t0 < seconds:
+            r.polls += 1
+            if not line.sync_ok():
+                r.bus_errors += 1
+                if r.first_error_s is None:
+                    r.first_error_s = round(clock() - t0, 2)
+            v, cur, temp, st = (line.read(mid, k) for k in ("volt", "current", "temp", "status"))
+            if v is not None:
+                r.min_volt = v / 10 if r.min_volt is None else min(r.min_volt, v / 10)
+            if cur is not None:
+                r.max_current = cur if r.max_current is None else max(r.max_current, cur)
+            if temp is not None:
+                r.temp = temp
+            if st:
+                r.status = st
+            sleep(0.1)
+        return r
+    finally:
+        for _ in range(3):  # WHY 3 tries: the bus may be what is failing
+            if line.write(mid, "torque", 0):
+                break
+
+
+def check_arm(port: str, seconds: float = 3.0, *, line_factory: Callable[[str], Any] = Line,
+              on_motor: Callable[[MotorCheck], None] | None = None,
+              **kw: Any) -> list[MotorCheck]:
+    """Every motor of one arm, one at a time. Torque is off on all six before and after."""
+    line = line_factory(port)
+    try:
+        for i in ARM_IDS:
+            line.write(i, "torque", 0)
+        out = []
+        for i in ARM_IDS:
+            r = check_motor(line, i, seconds, **kw)
+            out.append(r)
+            if on_motor:
+                on_motor(r)
+        return out
+    finally:
+        for i in ARM_IDS:
+            line.write(i, "torque", 0)
+        line.close()
