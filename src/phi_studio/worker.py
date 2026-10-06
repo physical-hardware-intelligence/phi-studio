@@ -930,7 +930,17 @@ class RigWorker:
         for a in self.arms:
             regs = a.read_calibration()
             self.torque[a.name] = a.read_torque()  # the servo's word, not what Studio last sent
-            best = match_fingerprint(regs, self.calibrations)[0] if self.calibrations else None
+            cals = dict(self.calibrations)
+            own = getattr(a, "calibration", None)
+            if own is not None:
+                # WHY: files are keyed by name alone, so a leader's phi_bi_left.json hid the
+                # follower's phi_bi_left.json; the arm's own file comes from its own folder.
+                cals[a.calibration_id] = own
+            ranked = match_fingerprint(regs, cals) if cals else []
+            # WHY prefer its own among exact matches: phi_follower.json can be a copy of
+            # phi_bi_left.json, and a tie must not read as swapped cables.
+            best = next((m for m in ranked if m.distance.exact and m.name == a.calibration_id),
+                        ranked[0] if ranked else None)  # fmt: skip
             exact = bool(best and best.distance.exact)
             out.append({
                 "name": a.name, "role": a.role,

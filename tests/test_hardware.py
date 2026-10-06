@@ -535,3 +535,28 @@ def test_identify_reads_a_file_written_after_studio_started(tmp_path: Any) -> No
     assert arm.calibration == CAL and arm._bus.calibration == H.to_motor_calibration(CAL)
     w.tick()
     assert set(arm.read_positions()) == set(JOINTS)
+
+
+def test_an_arm_is_matched_to_its_own_file_when_another_role_shares_its_name(tmp_path: Any) -> None:
+    """This Mac on 2026-10-05: robots/so_follower/phi_bi_left.json and
+    teleoperators/so_leader/phi_bi_left.json both exist, and calibration files are keyed by name
+    alone, so the leader's file hid the follower's. The follower then matched its copy
+    phi_follower.json and Identify called its cables swapped."""
+    from phi_studio.worker import RigWorker
+
+    root = tmp_path / "cal"
+    other = {j: c._replace(homing_offset=c.homing_offset + 300) for j, c in CAL.items()}
+    for rel, c in (("robots/so_follower/f", CAL), ("robots/so_follower/copy_of_f", CAL),
+                   ("teleoperators/so_leader/f", other), ("teleoperators/so_leader/l", other)):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / f"{rel}.json").write_text(_dump(c))
+    cfg = tmp_path / "robot-config.yaml"
+    cfg.write_text("robot: {type: so101_follower, id: f, port: /dev/a}\n"
+                   "teleop: {type: so101_leader, id: l, port: /dev/b}\n")  # fmt: skip
+    FakeBus.fail_connect = 0
+    bus = lambda p, c: FakeBus(p, H.to_motor_calibration(c) if c else None)  # noqa: E731
+    w = RigWorker(H.build_rig(cfg, bus_factory=bus, cal_root=root, cameras=False), lambda m: None,
+                  clock=lambda: 0.0)  # fmt: skip
+    w.handle({"cmd": "connect"})
+    fol = next(a for a in w.identity if a["role"] == "follower")
+    assert fol["match"] == "f" and fol["ok"], fol
