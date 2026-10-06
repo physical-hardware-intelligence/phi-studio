@@ -80,6 +80,8 @@ def test_scan_reports_clashes_missing_ids_and_which_file_each_arm_holds(tmp_path
     assert set(by) == {"/dev/tty.f", "/dev/tty.l", "/dev/tty.bad"}  # nothing on .none: not an arm
     f, ld, bad = by["/dev/tty.f"], by["/dev/tty.l"], by["/dev/tty.bad"]
     assert f.role == "follower" and f.match and f.match.endswith("yash_follower")
+    assert f.matches == ["robots/so_follower/yash_follower"]
+    assert ld.matches[0].endswith("phi_leader")
     assert ld.role == "leader" and f.torque is False
     assert bad.problem and "id 6" in bad.problem and "1 does not" not in bad.problem
     assert bad.registers is None
@@ -91,6 +93,7 @@ def test_an_arm_whose_registers_match_no_file_has_no_role(tmp_path: Path) -> Non
     f = scan([("/dev/tty.x", "S")], tmp_path, ping=lambda p, ids: ([1, 2, 3, 4, 5, 6], []),
              bus_factory=lambda p, c: FakeBus(p, cal(1)))[0]  # fmt: skip
     assert f.role is None and f.match_deg and f.match_deg > 0 and f.problem is None
+    assert f.matches == []
 
 
 def test_a_missing_id_and_an_unopenable_port_are_named(tmp_path: Path) -> None:

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +45,9 @@ class Found:
     torque: bool | None = None
     match: str | None = None  # nearest calibration file, as kind/folder/id
     match_deg: float | None = None
+    # WHY every exact match, not just the nearest: one arm's registers can match several files
+    # (phi_bi_left.json links to phi_follower.json), and only a _left/_right name tells the side.
+    matches: list[str] = field(default_factory=list)
     error: str | None = None
 
     @property
@@ -77,7 +80,7 @@ class Found:
     def public(self) -> dict[str, Any]:
         return {"port": self.port, "serial": self.serial, "ids": self.ids,
                 "clashes": self.clashes, "torque": self.torque, "match": self.match,
-                "match_deg": self.match_deg, "role": self.role,
+                "match_deg": self.match_deg, "matches": self.matches, "role": self.role,
                 "problem": self.problem}  # fmt: skip
 
 
@@ -161,8 +164,9 @@ def scan(
             finally:
                 _close(bus)
             if f.registers and library:
-                best = match_fingerprint(f.registers, library)[0]
-                f.match, f.match_deg = best.name, round(best.distance.max_deg, 2)
+                ranked = match_fingerprint(f.registers, library)
+                f.match, f.match_deg = ranked[0].name, round(ranked[0].distance.max_deg, 2)
+                f.matches = [m.name for m in ranked if m.distance.max_deg == 0.0]
         if ok or clash or f.error:
             out.append(f)
     return out

@@ -627,3 +627,18 @@ def test_every_worker_command_reaches_the_worker() -> None:
 
     handlers = {n.removeprefix("_cmd_") for n in dir(RigWorker) if n.startswith("_cmd_")}
     assert handlers <= COMMANDS, sorted(handlers - COMMANDS)
+
+
+def test_studio_opens_in_chrome_when_chrome_is_installed(monkeypatch: Any, tmp_path: Any) -> None:
+    import subprocess
+
+    from phi_studio import server
+
+    calls: list[list[str]] = []
+    app = tmp_path / "Google Chrome.app"
+    app.mkdir()
+    monkeypatch.setattr(server, "CHROME_APP", app)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv: calls.append(argv))
+    monkeypatch.setattr("sys.platform", "darwin")
+    server.open_in_chrome("http://127.0.0.1:1/#token=t")
+    assert calls == [["open", "-a", str(app), "http://127.0.0.1:1/#token=t"]]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 STUDIO_DATA = Path.home() / ".cache" / "phi" / "studio"
@@ -32,10 +32,12 @@ def parser() -> argparse.ArgumentParser:
         "SO-101 arms in a local web app.",
     )
     rig = p.add_mutually_exclusive_group()
-    rig.add_argument("--mock", dest="mock", action="store_true", default=True,
-                     help="A simulated rig (the default).")  # fmt: skip
-    rig.add_argument("--hardware", dest="mock", action="store_false",
-                     help="Real arms, from the robot-config.yaml onboarding wrote.")  # fmt: skip
+    rig.add_argument("--mock", dest="rig", action="store_const", const="mock",
+                     help="A simulated rig, even with arms plugged in.")  # fmt: skip
+    rig.add_argument("--hardware", dest="rig", action="store_const", const="hardware",
+                     help="Real arms, from the robot-config.yaml onboarding wrote. Default: real "
+                     "arms when an SO-101 driver board is plugged in and robot-config.yaml "
+                     "exists, else the mock.")  # fmt: skip
     p.add_argument("--pairs", type=int, choices=(1, 2), default=1,
                    help="Leader and follower pairs: 1, or 2 for bimanual.")  # fmt: skip
     p.add_argument("--port", type=int, default=8765, help="Local port. Studio binds 127.0.0.1.")
@@ -50,20 +52,50 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+# WHY by USB vendor: SO-101 driver boards use WCH's CH343 or CH340 USB serial chips (vendor 0x1A86).
+# Listing ports opens none of them.
+BOARD_VENDORS = {0x1A86}
+
+
+def boards_plugged_in() -> list[str]:
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        return []
+    return sorted(p.device for p in list_ports.comports() if p.vid in BOARD_VENDORS)
+
+
+def rig_spec(rig: str | None, pairs: int, configs: list[Path],
+             boards: Callable[[], list[str]] = boards_plugged_in) -> dict[str, object] | str:
+    """The worker's rig, or why Studio cannot start with it. `configs`: where robot-config.yaml
+    may be, in the order the server reads them (files.root_order)."""
+    config = next((c for c in configs if c.is_file()), None)
+    if rig is None:
+        found = boards()
+        rig = "hardware" if found and config is not None else "mock"
+        why = (f"{len(found)} SO-101 driver board{'s' if len(found) != 1 else ''} plugged in"
+               if found else "no SO-101 driver board plugged in")  # fmt: skip
+        if found and config is None:
+            why += ", and no robot-config.yaml yet: set the rig up on Home"
+        print(f"Rig: {'real arms' if rig == 'hardware' else 'mock'} ({why}). "
+              "--mock or --hardware chooses.", flush=True)  # fmt: skip
+    if rig == "mock":
+        return {"kind": "mock", "pairs": pairs}
+    if config is None:
+        return ("No robot-config.yaml yet. Start phi-studio without --hardware, set up the rig "
+                "on Home, then start it again with --hardware.")  # fmt: skip
+    return {"kind": "lerobot", "config": str(config)}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     rig_dir = find_rig_dir(args.rig_dir)
     data_dir = Path(args.data_dir).expanduser()
-    spec: dict[str, object] = {"kind": "mock", "pairs": args.pairs}
-    if not args.mock:
-        # The order the server reads it in (files.root_order): the rig folder, then Studio's data.
-        found = [d / "robot-config.yaml" for d in (rig_dir, data_dir) if d is not None]
-        config = next((c for c in found if c.is_file()), None)
-        if config is None:
-            print("No robot-config.yaml yet. Start phi-studio without --hardware, set up the rig "
-                  "on Home, then start it again with --hardware.", file=sys.stderr)  # fmt: skip
-            return 1
-        spec = {"kind": "lerobot", "config": str(config)}
+    configs = [d / "robot-config.yaml" for d in (rig_dir, data_dir) if d is not None]
+    spec = rig_spec(args.rig, args.pairs, configs)
+    if isinstance(spec, str):
+        print(spec, file=sys.stderr)
+        return 1
     from phi_studio.server import PortInUse, serve
 
     try:

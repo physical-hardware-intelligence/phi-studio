@@ -72,6 +72,8 @@
 .onb-arm { display: grid; gap: 8px; align-content: start; padding: var(--space-4); min-height: 7.5rem; border-radius: var(--radius-xl);
   border: 1px solid var(--border-subtle); background: var(--bg-sunken); }
 .onb-arm.is-finding { border-color: var(--focus-ring); box-shadow: 0 0 0 3px var(--accent-subtle); }
+.onb-detect { display: grid; gap: 6px; }
+.onb-detect p { display: flex; align-items: center; gap: 6px; margin: 0; }
 .onb-arm-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .onb-find { display: grid; justify-items: start; gap: 6px; font-weight: 600; }
 .onb-find svg { width: 22px; height: 22px; color: var(--accent); }

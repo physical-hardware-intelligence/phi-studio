@@ -2,6 +2,7 @@ import { ArrowLeft, ArrowRight, Camera, Check, CircleAlert, Plug, Search, Unplug
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { ActionBar } from "../components/ActionBar";
 import { Boundary } from "../components/Boundary";
+import { DetectArms } from "../components/DetectArms";
 import { ArmsGlyph } from "../components/data/bits";
 import { Notices } from "../components/Notices";
 import { RigSwitch } from "../components/RigSwitch";
@@ -143,7 +144,11 @@ function ArmsStep({ d, set, onBack, onNext }: { d: Draft; set: (d: Draft) => voi
   return (
     <>
       <h2 className="onb-title">Find each arm</h2>
-      <p className="onb-sub">Unplug an arm's USB when asked, then plug it back in.</p>
+      <p className="onb-sub">Detect arms places every arm whose calibration matches. For any other arm, press Find, then unplug its USB and plug it back in.</p>
+      <DetectArms prefer={d.existing} onPlaced={(p) => set({
+        ...d, layout: p.layout ?? d.layout, ports: { ...d.ports, ...p.ports },
+        ...(p.ids ? { ids: "existing" as const, existing: p.ids } : {}),
+      })} />
       <div className={`onb-arms n-${slots.length}`}>
         {slots.map((slot) => {
           const p = d.ports[slot];

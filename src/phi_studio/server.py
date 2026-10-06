@@ -794,6 +794,29 @@ def port_free(port: int) -> bool:
     return True
 
 
+CHROME_APP = Path("/Applications/Google Chrome.app")
+
+
+def open_in_chrome(url: str) -> None:
+    """Open Studio in Google Chrome. WHY Chrome: it is the browser Studio is built and checked in
+    (WebSockets, WebGL for the 3D view, the terminal). Without Chrome, the default browser."""
+    import subprocess
+    import sys
+    import webbrowser
+
+    if sys.platform == "darwin" and CHROME_APP.is_dir():
+        subprocess.Popen(["open", "-a", str(CHROME_APP), url])  # noqa: S603 (fixed argv)
+        return
+    for name in ("google-chrome", "chrome", "chromium"):
+        try:
+            webbrowser.get(name).open(url)
+            return
+        except webbrowser.Error:
+            continue
+    print("Google Chrome was not found, so Studio opened in the default browser.", flush=True)
+    webbrowser.open(url)
+
+
 def serve(
     spec: dict[str, Any],
     port: int = 8765,
@@ -812,7 +835,5 @@ def serve(
     url = f"http://127.0.0.1:{port}/#token={studio.token}"
     print(f"Phi Studio on {url}\nCtrl+C stops Studio and releases torque.", flush=True)
     if open_browser:
-        import webbrowser
-
-        threading.Timer(0.8, webbrowser.open, args=(url,)).start()
+        threading.Timer(0.8, open_in_chrome, args=(url,)).start()
     web.run_app(studio.app(), host="127.0.0.1", port=port, print=None)

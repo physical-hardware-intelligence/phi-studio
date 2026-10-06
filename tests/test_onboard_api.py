@@ -331,3 +331,20 @@ def test_switching_to_real_arms_starts_the_hardware_worker_even_with_nothing_plu
             studio.stop_worker()
 
     asyncio.run(go())
+
+
+def test_with_no_flag_studio_picks_real_arms_only_when_a_board_and_a_config_are_both_there(
+    tmp_path, capsys
+) -> None:
+    from phi_studio.cli import rig_spec
+
+    cfg = tmp_path / "robot-config.yaml"
+    board = lambda: ["/dev/cu.usbmodem1"]  # noqa: E731
+    none = lambda: []  # noqa: E731
+    assert rig_spec(None, 2, [cfg], boards=board) == {"kind": "mock", "pairs": 2}
+    assert "no robot-config.yaml yet" in capsys.readouterr().out
+    cfg.write_text("robot: {}\n")
+    assert rig_spec(None, 1, [cfg], boards=none) == {"kind": "mock", "pairs": 1}
+    assert rig_spec(None, 1, [cfg], boards=board) == {"kind": "lerobot", "config": str(cfg)}
+    assert "real arms (1 SO-101 driver board plugged in)" in capsys.readouterr().out
+    assert rig_spec("mock", 1, [cfg], boards=board) == {"kind": "mock", "pairs": 1}
