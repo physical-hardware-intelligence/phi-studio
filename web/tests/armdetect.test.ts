@@ -18,12 +18,19 @@ const RIG = [
   arm("/dev/tty.rl", "leader", [`${L}phi_bi_right`, `${L}yash_leader`]),
 ];
 
-test("the four club arms land in their slots with the phi_bi files", () => {
+test("the four club arms land in their slots, and one id for both roles is not offered", () => {
   const p = place(RIG);
   assert.equal(p.layout, "bimanual");
   assert.deepEqual(p.ports, { left_follower: "/dev/tty.lf", right_follower: "/dev/tty.rf", left_leader: "/dev/tty.ll", right_leader: "/dev/tty.rl" });
-  assert.deepEqual(p.ids, { follower: "phi_bi", leader: "phi_bi" });
+  assert.equal(p.ids, null); // Studio keys calibrations by id alone
+  assert.match(p.note ?? "", /both named phi_bi/);
   assert.deepEqual(p.unplaced, []);
+});
+
+test("with the leader files also under phi_bi_leader, the ids differ", () => {
+  const rig = RIG.map((a) => a.role === "leader" ? { ...a, matches: [...(a.matches ?? []), `${L}phi_bi_leader_${a.port === "/dev/tty.ll" ? "left" : "right"}`] } : a);
+  assert.deepEqual(place(rig).ids, { follower: "phi_bi", leader: "phi_bi_leader" });
+  assert.deepEqual(place(rig, { follower: "phi_bi", leader: "phi_bi_leader" }).ids, { follower: "phi_bi", leader: "phi_bi_leader" });
 });
 
 test("an arm that matches no file exactly is left for the person to place, and no ids are offered", () => {

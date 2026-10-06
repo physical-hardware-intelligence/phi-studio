@@ -67,6 +67,7 @@ export function DetectArms({ prefer, onPlaced }: { prefer: Partial<Ids> | null; 
             : "no calibration files to compare. Use Find, then calibrate."}
         </p>
       ))}
+      {p?.note && <p className="warn-text t-sm"><CircleAlert aria-hidden className="ico-inline" />{p.note}</p>}
       {p?.ids && <p className="ok-text t-sm">Calibration files {p.ids.follower} and {p.ids.leader} hold these arms exactly. The next step keeps them.</p>}
     </div>
   );

@@ -13,7 +13,14 @@ from phi_studio import configedit, rigspec
 from phi_studio.detect import Found, calibration_library
 from phi_studio.identity import JointCal, load_calibration
 from phi_studio.rig import JOINTS
-from phi_studio.rig_api import RigApi, RigError, _section, check_assignment, existing_id
+from phi_studio.rig_api import (
+    RigApi,
+    RigError,
+    _section,
+    check_assignment,
+    distinct_ids,
+    existing_id,
+)
 
 
 def cal(seed: int) -> dict[str, JointCal]:
@@ -163,3 +170,12 @@ def test_each_arm_gets_its_own_registers_a_link_is_replaced_never_its_target(
     assert load_calibration(target) == cal(7)  # the file the link pointed at is untouched
     again = api._write_calibrations(BI, {"follower": "phi_bi", "leader": "phi_bi"})
     assert {o["action"] for o in again} == {"unchanged"}
+
+
+def test_one_id_for_both_roles_gives_the_leader_its_own() -> None:
+    from phi_studio.onboard_api import check_answers
+
+    ids = distinct_ids({"follower": "phi_bi", "leader": "phi_bi"})
+    assert ids == {"follower": "phi_bi", "leader": "phi_bi_leader"}
+    check_answers({"name": "Bench", "layout": "bimanual", "ids": ids, "ports": {}})  # accepted
+    assert distinct_ids({"follower": "a", "leader": "b"}) == {"follower": "a", "leader": "b"}

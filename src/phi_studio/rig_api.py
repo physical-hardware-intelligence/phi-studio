@@ -120,6 +120,16 @@ def existing_id(role: str, arms: list[dict[str, Any]], found: dict[str, detect.F
     return ok[0] if ok else None
 
 
+def distinct_ids(ids: dict[str, str]) -> dict[str, str]:
+    """Never one id for both roles. WHY: LeRobot would accept it (the files live in different
+    folders), but Studio's worker keys calibrations by id alone (worker._save_run,
+    mock.calibration_files) and onboard_api.check_answers refuses it. The leader gets its own id,
+    and _write_calibrations writes that id's files from the leader's own registers."""
+    if ids["follower"] != ids["leader"]:
+        return ids
+    return {**ids, "leader": f"{ids['leader']}_leader"}
+
+
 class RigApi:
     def __init__(self, studio: Studio) -> None:
         self.studio = studio
@@ -201,8 +211,7 @@ class RigApi:
             for v in ids.values():
                 if not v or not all(c.isalnum() or c in "_-" for c in v):
                     raise RigError(f"{v!r} is not a usable id: letters, digits, _ and - only.")
-            # WHY the same id may serve both roles: the files live in different folders
-            # (robots/so_follower and teleoperators/so_leader), so they never collide.
+            ids = distinct_ids(ids)
             files = await asyncio.to_thread(self._write_calibrations, arms, ids)
             path = config_target(self.studio)
             sections = {

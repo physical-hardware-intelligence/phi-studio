@@ -13,6 +13,7 @@ export interface Placed {
   ports: Record<string, string>; // slot -> port, slots as in rig.ts SLOTS
   ids: Ids | null; // calibration ids whose files hold these arms' registers exactly
   unplaced: FoundArm[]; // healthy arms Studio could not place: no exact calibration match, or no side
+  note: string | null; // why no ids were offered although every arm was placed
   broken: FoundArm[]; // arms with a motor problem (id clash, missing id, port error)
 }
 
@@ -34,12 +35,18 @@ function sideOf(a: FoundArm, prefer?: string): { side: Side; base: string } | nu
   return sides.size === 1 ? pool[0] : null;
 }
 
-/** A shared base id for both arms of a role, or null. */
-function common(lists: string[][], prefer?: string): string | null {
-  if (!lists.length) return null;
-  const shared = lists.reduce((acc, l) => acc.filter((x) => l.includes(x)));
-  if (prefer && shared.includes(prefer)) return prefer;
-  return shared[0] ?? null;
+/** Base ids every list shares, preferred first. */
+function shared(lists: string[][], prefer?: string): string[] {
+  if (!lists.length) return [];
+  const all = lists.reduce((acc, l) => acc.filter((x) => l.includes(x)));
+  return prefer && all.includes(prefer) ? [prefer, ...all.filter((x) => x !== prefer)] : all;
+}
+
+/** A follower id and a leader id that differ. WHY differ: Studio's worker keys calibrations by id alone
+ * (worker.py _save_run, mock.py calibration_files), and onboard_api.check_answers refuses equal ids. */
+function pick(f: string[], l: string[]): Ids | null {
+  for (const a of f) for (const b of l) if (a !== b) return { follower: a, leader: b };
+  return null;
 }
 
 /** Where each found arm goes. Only an exact register match to a calibration file places an arm: a near match is
@@ -51,17 +58,15 @@ export function place(arms: FoundArm[], prefer?: Partial<Ids> | null): Placed {
   const unknown = healthy.filter((a) => !a.role);
   const by = (r: Role) => known.filter((a) => a.role === r);
   const leaders = by("leader"), followers = by("follower");
-  const out: Placed = { layout: null, ports: {}, ids: null, unplaced: [...unknown], broken };
+  const out: Placed = { layout: null, ports: {}, ids: null, unplaced: [...unknown], broken, note: null };
 
   if (healthy.length === 2 && leaders.length === 1 && followers.length === 1) {
     out.layout = "single";
     out.ports = { leader: leaders[0].port, follower: followers[0].port };
-    const ids = {} as Ids;
-    for (const [r, a] of [["leader", leaders[0]], ["follower", followers[0]]] as [Role, FoundArm][]) {
-      const plain = names(a).filter((n) => !SIDE.test(n));
-      ids[r] = (prefer?.[r] && plain.includes(prefer[r]!) ? prefer[r] : plain[0]) ?? "";
-    }
-    out.ids = ids.leader && ids.follower ? ids : null;
+    const plain = (a: FoundArm, r: Role) => shared([names(a).filter((n) => !SIDE.test(n))], prefer?.[r]);
+    const f = plain(followers[0], "follower"), l = plain(leaders[0], "leader");
+    out.ids = pick(f, l);
+    if (!out.ids && f.length && l.length) out.note = sameIds(f[0]);
     return out;
   }
 
@@ -78,7 +83,13 @@ export function place(arms: FoundArm[], prefer?: Partial<Ids> | null): Placed {
       } else out.unplaced.push(a);
     }
   }
-  const f = common(bases.follower, prefer?.follower), l = common(bases.leader, prefer?.leader);
-  out.ids = f && l && bases.follower.length === 2 && bases.leader.length === 2 ? { follower: f, leader: l } : null;
+  if (bases.follower.length === 2 && bases.leader.length === 2) {
+    const f = shared(bases.follower, prefer?.follower), l = shared(bases.leader, prefer?.leader);
+    out.ids = pick(f, l);
+    if (!out.ids && f.length && l.length) out.note = sameIds(f[0]);
+  }
   return out;
 }
+
+const sameIds = (id: string): string =>
+  `The followers' and leaders' calibration files are both named ${id}. Studio needs a different id for each role, so pick "New calibration" or rename the leader files.`;
