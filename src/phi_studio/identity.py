@@ -118,6 +118,48 @@ def fingerprint_distance(a: Calibration, b: Calibration) -> Distance:
     )
 
 
+# WHY 40: on the phi rig (2026-10-06) two calibrations of one arm put its stops at most 19.7 deg
+# apart (a hand sweep stops short by a few degrees), and two different arms at least 97.6 deg.
+SAME_ARM_DEG = 40.0
+
+
+def stop_gap(a: Calibration, b: Calibration) -> Distance:
+    """How far apart two calibrations put each joint's travel on the servo's own encoder, per
+    joint in degrees. Present_Position = Actual_Position - Homing_Offset (feetech.py:281), so
+    range + homing is where the joint's stops sit in the encoder's frame. The horn's mounting fixes
+    that, not the pose the arm was calibrated in, so it names the physical arm: under SAME_ARM_DEG
+    for one arm calibrated twice, far over it for two arms. fingerprint_distance compares the
+    registers themselves, which change with the calibration pose. Wrist roll (0..4095, no stops)
+    is left out."""
+    def wrap(x: int) -> int:
+        return (x + TICKS_PER_REV // 2) % TICKS_PER_REV - TICKS_PER_REV // 2
+
+    deg = 360.0 / TICKS_PER_REV
+    return Distance({j: deg * max(abs(wrap((a[j].range_min + a[j].homing_offset)
+                                            - (b[j].range_min + b[j].homing_offset))),
+                                  abs(wrap((a[j].range_max + a[j].homing_offset)
+                                            - (b[j].range_max + b[j].homing_offset))))
+                     for j in a if j != "wrist_roll" and j in b})  # fmt: skip
+
+
+def angle_shift(a: Calibration, b: Calibration) -> Distance:
+    """How differently two calibrations read one arm held still, per joint in degrees.
+
+    LeRobot reports (Present - (min + max) / 2) * 360/4095 (motors_bus.py:870-873; the gripper
+    is 0..100 instead), and Present = Actual - Homing, so the reading moves by the change in
+    (min + max) / 2 + homing. WHY not the raw register difference: homing is sign-magnitude near
+    +-2048, so one arm's -1351 and 1771 differ by 274 deg in registers but 86 deg at the joint."""
+
+    def wrap(x: float) -> float:
+        return (x + TICKS_PER_REV / 2) % TICKS_PER_REV - TICKS_PER_REV / 2
+
+    def mid(c: JointCal) -> float:
+        return (c.range_min + c.range_max) / 2 + c.homing_offset
+
+    deg = 360.0 / TICKS_PER_REV
+    return Distance({j: round(abs(wrap(mid(a[j]) - mid(b[j]))) * deg, 1) for j in a if j in b})
+
+
 @dataclass(frozen=True)
 class Match:
     name: str

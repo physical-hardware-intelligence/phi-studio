@@ -142,3 +142,64 @@ robot: {type: bi_so_follower, id: phi_bi, left_arm_config: {port: /dev/tty.LF},
     files = calfiles.inventory(root, bi)
     assert calfiles.shared_files(files) == [(f"{F}/phi_follower.json",
                                              ["left_follower", "right_follower"])]  # fmt: skip
+
+
+
+def arm(stops: list[tuple[int, int]], pose: int = 0) -> dict[str, JointCal]:
+    """One physical arm calibrated in some pose: the stops (range + homing) stay where the horn
+    puts them, while homing moves with the pose and the ranges move the other way."""
+    out = {j: JointCal(i + 1, 0, pose + 10 * i, lo - pose - 10 * i, hi - pose - 10 * i)
+           for i, (j, (lo, hi)) in enumerate(zip(JOINTS, stops, strict=True))}  # fmt: skip
+    out["wrist_roll"] = JointCal(5, 0, pose, 0, 4095)  # LeRobot never narrows wrist roll
+    return out
+
+
+A = [(800, 3400), (800, 3200), (820, 3020), (940, 3280), (0, 4095), (2030, 3540)]
+B = [(lo + 900, hi + 900) for lo, hi in A]  # another arm: its horns sit 79 deg round
+
+
+def test_stop_gap_names_the_physical_arm_whatever_the_calibration_pose() -> None:
+    from phi_studio.identity import SAME_ARM_DEG, angle_shift, stop_gap
+
+    again = arm(A, pose=300)  # the same arm calibrated in another pose: registers all differ
+    assert stop_gap(arm(A), again).max_deg == 0 < SAME_ARM_DEG
+    assert stop_gap(arm(A), arm(B)).max_deg > SAME_ARM_DEG
+    # LeRobot's zero is the middle of the recorded range (motors_bus.py:871), not the pose, so
+    # the body joints read the same; wrist roll (range 0..4095) is the one zero the pose sets
+    shift = angle_shift(arm(A), again).per_joint_deg
+    assert {j: d for j, d in shift.items() if j != "wrist_roll"} == dict.fromkeys(
+        [j for j in JOINTS if j != "wrist_roll"], 0.0)
+    assert shift["wrist_roll"] == round(300 * 360 / 4096, 1)
+
+
+BI = rigspec.parse("""
+teleop: {type: bi_so_leader, id: phi_bi_leader, left_arm_config: {port: /dev/tty.LL},
+         right_arm_config: {port: /dev/tty.RL}}
+""")
+LEAD = "teleoperators/so_leader"
+
+
+def test_a_shared_file_with_the_other_arms_stops_is_named_for_the_wrong_arm(tmp_path: Path) -> None:
+    """The phi rig on 2026-10-06: the shared left leader file had the stops of this Mac's right
+    leader, and the right one the left's."""
+    root, source = tmp_path / "calibration", tmp_path / "phi/configs/calibration"
+    save_calibration(arm(A), root / LEAD / "phi_bi_leader_left.json")
+    save_calibration(arm(B), root / LEAD / "phi_bi_leader_right.json")
+    save_calibration(arm(B, pose=200), source / LEAD / "phi_bi_leader_left.json")  # swapped
+    save_calibration(arm(A, pose=-150), source / LEAD / "phi_bi_leader_right.json")
+    rows = {r["rel"].rsplit("/", 1)[1]: r for r in calfiles.shared(source, root, BI)}
+    left = rows["phi_bi_leader_left.json"]
+    assert (left["named_for"], left["arm_of"]) == ("left_leader", "right_leader")
+    assert rows["phi_bi_leader_right.json"]["arm_of"] == "left_leader"
+    save_calibration(arm(A, pose=90), source / LEAD / "phi_bi_leader_left.json")  # right way round
+    rows = {r["rel"].rsplit("/", 1)[1]: r for r in calfiles.shared(source, root, BI)}
+    left = rows["phi_bi_leader_left.json"]
+    assert left["arm_of"] == left["named_for"] == "left_leader" and left["state"] == "differs"
+
+
+def test_two_arms_files_with_one_arms_stops_are_found(tmp_path: Path) -> None:
+    root = tmp_path / "calibration"
+    save_calibration(arm(A), root / LEAD / "phi_bi_leader_left.json")
+    save_calibration(arm(A, pose=250), root / LEAD / "phi_bi_leader_right.json")  # A again
+    by = {f.rel: f for f in calfiles.inventory(root, BI)}
+    assert by[f"{LEAD}/phi_bi_leader_left.json"].same_arm_as == [f"{LEAD}/phi_bi_leader_right.json"]

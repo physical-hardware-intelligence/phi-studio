@@ -561,3 +561,10 @@ def test_calibration_folder_passes_clean_warns_on_extras_fails_on_a_shared_file(
     (lead / "phi_leader.json").symlink_to("../../robots/so_follower/phi_follower.json")
     r = C.check_calibration_folder(inp)
     assert r["status"] == "fail" and "read one file" in r["detail"]
+    # two arms' files that are one physical arm (the same joint stops, another pose)
+    cal = good_cal()
+    moved = {j: {**c, "homing_offset": c["homing_offset"] + 200, "range_min": c["range_min"] - 200,
+                 "range_max": c["range_max"] - 200} for j, c in cal.items()}  # fmt: skip
+    inp = mac(tmp_path / "e", config=BI, cals={"bi_f_left": cal, "bi_f_right": moved})
+    r = C.check_calibration_folder(inp)
+    assert r["status"] == "fail" and "joint stops" in r["detail"]

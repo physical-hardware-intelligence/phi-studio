@@ -577,7 +577,7 @@ class RigApi:
         spec, root, source = self._spec(), self.cal_root, self._source(msg)
         motors = {p: f.matches for p, f in self.found.items() if f.matches}
         files = calfiles.inventory(root, spec, motors)
-        rows = calfiles.shared(source, root) if source and source.is_dir() else []
+        rows = calfiles.shared(source, root, spec) if source and source.is_dir() else []
         cands = calfiles.shared_candidates(getattr(self.studio, "rig_dir", None))
         return {"type": "rig_calfiles", "root": str(root), "files": [f.public() for f in files],
                 "archives": calfiles.archives(root), "config": spec is not None,

@@ -53,3 +53,23 @@ test("a rig that uses none of the shared files is told how to switch", () => {
   v.shared.rows[0].rel = `${F}/phi_follower.json`;
   assert.ok(!calfileProblems(v).some((x) => x.text.includes("none of the shared")));
 });
+
+test("a shared file whose joint stops are another arm's is a danger and named", () => {
+  const L = "teleoperators/so_leader";
+  const v = view([file(`${L}/phi_bi_leader_left.json`, { folder: L, used_by: ["left_leader"] })]);
+  v.shared = { source: "/phi/configs/calibration", exists: true, candidates: [], rows: [
+    { rel: `${L}/phi_bi_leader_left.json`, id: "phi_bi_leader_left", state: "differs", max_deg: 97.9, worst_joint: "gripper",
+      error: null, named_for: "left_leader", arm_of: "right_leader", arm_gap: 19.6 }] };
+  const p = calfileProblems(v, (k) => k.replace("_", " "));
+  assert.ok(p.some((x) => x.level === "danger" && x.text.includes("named for the left leader, but its joint stops are the right leader's")));
+  v.shared.rows[0].arm_of = "left_leader";
+  assert.ok(!calfileProblems(v).some((x) => x.text.includes("joint stops")));
+});
+
+test("two arms' files with one arm's joint stops are a danger", () => {
+  const p = calfileProblems(view([
+    file(`${F}/l.json`, { used_by: ["left_follower"], same_arm_as: [`${F}/r.json`] }),
+    file(`${F}/r.json`, { used_by: ["right_follower"], same_arm_as: [`${F}/l.json`] }),
+  ]));
+  assert.equal(p.filter((x) => x.level === "danger" && x.text.includes("one arm's joint stops")).length, 1);
+});

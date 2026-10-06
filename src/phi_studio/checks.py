@@ -599,6 +599,13 @@ def check_calibration_folder(inp: Inputs) -> dict[str, Any]:
                       f"{' and '.join(keys)} read one file, {real} (through a link): "
                       "calibrating one arm rewrites the other's.", fix)  # fmt: skip
     for f in used:
+        if f.same_arm_as:
+            return result("calibration_folder", "This Mac", title, "fail",
+                          f"{', '.join(f.used_by)}'s file {f.rel} has the joint stops of "
+                          f"{f.same_arm_as[0]}, another arm's file: one of them is the other "
+                          "arm's calibration.", "Calibrate both arms again with c. "
+                          + fix)  # fmt: skip
+    for f in used:
         # WHY one folder: two followers (or two leaders) are the same kind of arm, so equal numbers
         # mean a copy; web/src/lib/calfiles.ts compares the same way. A link and its target are
         # one file, and one arm under two ids is one arm.

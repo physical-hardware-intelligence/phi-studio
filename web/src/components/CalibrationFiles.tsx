@@ -3,7 +3,7 @@
 // from being written into an arm's servos. Server side: rig_calfiles* in rig_api.py, calfiles.py.
 import { Archive, CircleAlert, Download, LoaderCircle, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { calfileProblems, type CalFile, type CalFilesView, type SharedRow } from "../lib/calfiles";
+import { calfileProblems, wrongArm, type CalFile, type CalFilesView, type SharedRow } from "../lib/calfiles";
 import { label } from "../lib/labels";
 import { studio, useStudio } from "../lib/studio";
 import { terminal } from "../lib/terminal";
@@ -30,7 +30,7 @@ export function CalibrationFiles({ compact = false }: { compact?: boolean }) {
         setPick(new Set(v.files.filter((f) => f.unused).map((f) => f.rel)));
         // WHY not a file the motors hold: this Mac's file then matches its arm, and the shared one may be another arm's
         const held = new Set(v.files.filter((f) => f.on_ports.length > 0).map((f) => f.rel));
-        setTake(new Set(v.shared.rows.filter((r) => r.state !== "same" && r.state !== "broken" && !held.has(r.rel)).map((r) => r.rel)));
+        setTake(new Set(v.shared.rows.filter((r) => r.state !== "same" && r.state !== "broken" && !held.has(r.rel) && !wrongArm(r)).map((r) => r.rel)));
         if (v.shared.source) setSource((s) => s || v.shared.source!);
       }),
       studio.onMessage("rig_scan", () => load(source || undefined)), // which motors hold which file
@@ -161,6 +161,8 @@ function FileChips({ f }: { f: CalFile }) {
 }
 
 function SharedChip({ r }: { r: SharedRow }) {
+  const arm = wrongArm(r);
+  if (arm) return <span className="chip sev-error" title={`Its joint stops match this Mac's ${label(arm)} file, not the ${label(r.named_for!)}'s`}>looks like the {label(arm)}</span>;
   if (r.state === "same") return <span className="chip sev-ok">same as this Mac</span>;
   if (r.state === "new") return <span className="chip">not on this Mac</span>;
   if (r.state === "link") return <span className="chip sev-warn">here a link; installs a real file</span>;

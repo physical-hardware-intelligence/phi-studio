@@ -20,7 +20,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from phi_studio import rigspec
-from phi_studio.identity import Calibration, load_calibration, match_fingerprint, unfinished
+from phi_studio.identity import (
+    SAME_ARM_DEG,
+    Calibration,
+    angle_shift,
+    load_calibration,
+    stop_gap,
+    unfinished,
+)
 
 FOLDERS = tuple(f"{k}/{f}" for k, f in rigspec.FOLDER.values())  # the two LeRobot reads for SO arms
 ARCHIVE = "calibration-archive"  # next to the calibration folder, which LeRobot never reads
@@ -40,6 +47,7 @@ class CalFile:
     unfinished: str | None = None  # identity.unfinished: registers no finished run leaves
     same_as: list[str] = field(default_factory=list)  # other files with exactly these numbers
     on_ports: list[str] = field(default_factory=list)  # ports whose motors hold it exactly
+    same_arm_as: list[str] = field(default_factory=list)  # other arms' files with this arm's stops
     mtime: float = 0.0
     junk: str | None = None  # why it is not a calibration at all: ._ file, backup
 
@@ -55,7 +63,8 @@ class CalFile:
         return {"rel": self.rel, "id": self.id, "folder": self.folder, "used_by": self.used_by,
                 "link": self.link, "real": self.real or self.rel, "error": self.error,
                 "unfinished": self.unfinished,
-                "same_as": self.same_as, "on_ports": self.on_ports, "mtime": self.mtime,
+                "same_as": self.same_as,
+                "same_arm_as": self.same_arm_as, "on_ports": self.on_ports, "mtime": self.mtime,
                 "junk": self.junk, "unused": not self.used_by}  # fmt: skip
 
 
@@ -116,6 +125,13 @@ def inventory(root: Path, spec: rigspec.RigSpec | None,
     for rel, cal in numbers.items():
         f = by_rel[rel]
         f.same_as = [o for o, c in numbers.items() if o != rel and c == cal]
+        # WHY: a file with another rig arm's joint stops is that arm's calibration under this
+        # arm's name (a swapped or copied file); ENTER would write it into the wrong arm
+        f.same_arm_as = [o for o, c in numbers.items()
+                         if o != rel and o.rsplit("/", 1)[0] == rel.rsplit("/", 1)[0]
+                         and f.used_by and by_rel[o].used_by
+                         and not set(f.used_by) & set(by_rel[o].used_by)
+                         and stop_gap(cal, c).max_deg < SAME_ARM_DEG]  # fmt: skip
         name = rel.removesuffix(".json")
         f.on_ports = sorted(p for p, names in (motors or {}).items() if name in names)
     return files
@@ -227,8 +243,42 @@ def restore(root: Path, name: str) -> dict[str, Any]:
     return {"restored": rels, "archived": clash, "archive": aside.name if aside else None}
 
 
-def shared(source: Path, root: Path) -> list[dict[str, Any]]:
-    """Each file of a shared set against this Mac's copy: new, same, or how far it differs."""
+def _named_for(rel: str, spec: rigspec.RigSpec | None) -> str | None:
+    """The rig arm a file's name says it is for: the arm that reads it, else by its _left/_right
+    suffix and folder (phi_bi_leader_left.json is the left leader)."""
+    for a in spec.arms if spec else ():
+        p = a.calibration_path(Path("/"))
+        if p is not None and not a.calibration_dir and str(p.relative_to("/")) == rel:
+            return a.key
+    folder, name = rel.rsplit("/", 1)
+    role = next((r for r, (k, f) in rigspec.FOLDER.items() if f"{k}/{f}" == folder), None)
+    side = next((s for s in rigspec.SIDES if name.removesuffix(".json").endswith(f"_{s}")), None)
+    keys = {a.key for a in spec.arms} if spec else set()
+    key = f"{side}_{role}" if side else role
+    return key if key in keys else None
+
+
+def _arm_of(cal: Calibration, rel: str, spec: rigspec.RigSpec | None,
+            root: Path) -> tuple[str | None, float | None]:  # fmt: skip
+    """The rig arm whose file on this Mac has these joint stops (stop_gap), and how far."""
+    best: tuple[str | None, float | None] = (None, None)
+    folder = rel.rsplit("/", 1)[0]
+    for a in spec.arms if spec else ():
+        p = a.calibration_path(root)
+        if p is None or f"{a.kind}/{a.folder}" != folder or not p.is_file():
+            continue
+        try:
+            gap = stop_gap(cal, load_calibration(p)).max_deg
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if gap < SAME_ARM_DEG and (best[1] is None or gap < best[1]):
+            best = (a.key, round(gap, 1))
+    return best
+
+
+def shared(source: Path, root: Path, spec: rigspec.RigSpec | None = None) -> list[dict[str, Any]]:
+    """Each file of a shared set against this Mac's copy: new, same, or how far it differs, and
+    which of this rig's arms it physically is (its joint stops) against the arm its name says."""
     out = []
     for folder in FOLDERS:
         d = source / folder
@@ -237,20 +287,24 @@ def shared(source: Path, root: Path) -> list[dict[str, Any]]:
                 continue
             rel = f"{folder}/{p.name}"
             row: dict[str, Any] = {"rel": rel, "id": p.stem, "state": "new", "max_deg": None,
-                                   "worst_joint": None, "error": None}  # fmt: skip
+                                   "worst_joint": None, "error": None, "named_for": None,
+                                   "arm_of": None, "arm_gap": None}  # fmt: skip
             try:
                 theirs = load_calibration(p)
             except (OSError, ValueError, KeyError, TypeError) as e:
                 row |= {"state": "broken", "error": str(e)}
                 out.append(row)
                 continue
+            arm, gap = _arm_of(theirs, rel, spec, root)
+            row |= {"named_for": _named_for(rel, spec), "arm_of": arm, "arm_gap": gap}
             local = root / rel
             if local.is_symlink():
                 row["state"] = "link"  # installing replaces the link with the shared file
             elif local.is_file():
                 try:
-                    d_ = match_fingerprint(load_calibration(local), {"x": theirs})[0].distance
-                    row |= {"state": "same" if d_.exact else "differs",
+                    mine = load_calibration(local)
+                    d_ = angle_shift(mine, theirs)  # how differently the arm would read
+                    row |= {"state": "same" if mine == theirs else "differs",
                             "max_deg": round(d_.max_deg, 1), "worst_joint": d_.worst_joint}
                 except (OSError, ValueError, KeyError, TypeError) as e:
                     row |= {"state": "differs", "error": f"this Mac's copy cannot be read: {e}"}
