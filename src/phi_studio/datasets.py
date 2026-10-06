@@ -197,11 +197,14 @@ class Dataset:
             if self.v3:
                 import pyarrow.parquet as pq
 
-                t = pq.read_table(self.root / "meta" / "tasks.parquet").to_pandas()
-                if "task" in t.columns:
-                    pairs = zip(t["task_index"], t["task"], strict=True)
-                else:  # the task string is the index
-                    pairs = zip(t["task_index"], t.index, strict=True)
+                # WHY no to_pandas: pandas is not a dependency. LeRobot writes the task string as
+                # the DataFrame index, which parquet keeps as a column named "task" when the index
+                # is named, else "__index_level_0__".
+                t = pq.read_table(self.root / "meta" / "tasks.parquet")
+                cols = t.column_names
+                text = "task" if "task" in cols else next(c for c in cols if c != "task_index")
+                pairs = zip(t.column("task_index").to_pylist(), t.column(text).to_pylist(),
+                            strict=True)  # fmt: skip
                 ordered = sorted(pairs)
                 self._tasks = [str(task) for _, task in ordered]
             else:

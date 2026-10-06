@@ -481,6 +481,10 @@ class AlignSession:
         self.refs_sent = {k: picture(img) for k, img in ref["images"].items()}
         self.aligned: dict[str, bool] = {}  # dataset key -> the newest reading said in line
         self.reported: bool | None = None  # what record() last said for this session
+        # rig name -> the frame message this session put in Studio.latest_frame, so closing takes
+        # back only its own (a worker frame that replaced one stays).
+        self.published: dict[str, dict[str, Any]] = {}
+        self.sent: dict[str, tuple[Any, int]] = {}  # rig name -> (camera, seq) last published
 
     def _report(self) -> None:
         """Record the session's verdict when it changes: all cameras in line, or not. A camera
@@ -495,10 +499,6 @@ class AlignSession:
         self.api.record({"root": self.ref["root"], "episode": self.ref["episode"],
                          "at": time.time(), "aligned": ok,
                          "cameras": {k: self.aligned[k] for k in keys}})  # fmt: skip
-        # rig name -> the frame message this session put in Studio.latest_frame, so closing takes
-        # back only its own (a worker frame that replaced one stays).
-        self.published: dict[str, dict[str, Any]] = {}
-        self.sent: dict[str, tuple[Any, int]] = {}  # rig name -> (camera, seq) last published
 
     def _fields(self, key: str, source: Any) -> dict[str, Any]:
         """Open a live camera the way the rig's config does for that dataset key, at its size."""
