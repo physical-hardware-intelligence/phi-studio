@@ -240,6 +240,14 @@ function DriveStep({ onBack, onNext }: { onBack: () => void; onNext: () => void 
     <>
       <h2 className="onb-title">Test drive</h2>
       <p className="onb-sub">Move a leader. Its follower should follow{mock ? " (simulated arms)" : ""}.</p>
+      {mock && (
+        // WHY here: saving the rig does not switch Studio to it, so a test drive on the simulated arms
+        // passed while the real ones were never moved.
+        <p className="warn-text t-sm row-gap">
+          <CircleAlert aria-hidden className="ico-inline" />These are simulated arms, not the ones you plugged in.
+          <RigSwitch primary />
+        </p>
+      )}
       <ActionBar activity="teleop" />
       <div className="onb-view">
         <Boundary what="The 3D view"><Suspense fallback={<div className="empty">Loading the 3D view</div>}><Viewer compact /></Suspense></Boundary>
