@@ -298,3 +298,44 @@ def test_a_motor_that_keeps_torque_after_the_check_is_reported() -> None:
     out = run_check(StuckLine())
     assert not out[2].ok and "torque may still be on" in (out[2].error or "")
     assert [r.ok for r in out if r.id != 3] == [True] * 5
+
+
+def search(found: dict[int, list[int]], clash: dict[int, list[int]] | None = None) -> Any:
+    from phi_studio import detect
+
+    asked: list[tuple[int, int]] = []
+
+    def ping(port: str, ids: Any, baud: int) -> tuple[list[int], list[int]]:
+        ids = list(ids)
+        asked.append((baud, len(ids)))
+        return ([i for i in found.get(baud, []) if i in ids],
+                [i for i in (clash or {}).get(baud, []) if i in ids])
+
+    r = detect.find_motors("/dev/tty.x", ping=ping)
+    return r, asked
+
+
+def test_motor_search_pings_every_id_at_1mbaud_and_low_ids_at_other_rates() -> None:
+    r, asked = search({1_000_000: [1, 2, 3, 4, 5, 6]})
+    assert asked[0] == (1_000_000, 254) and all(n == 21 for _, n in asked[1:]) and len(asked) == 8
+    assert r.findings() == []
+
+
+def test_a_motor_never_set_up_is_found_at_its_factory_rate() -> None:
+    r, _ = search({1_000_000: [1, 3, 4, 5, 6], 115_200: [1]})
+    f = r.findings()
+    assert len(f) == 1 and "115200 baud" in f[0]["text"] and "Set motor ids" in f[0]["fix"]
+
+
+def test_a_motor_on_a_wrong_id_and_a_dead_one_are_told_apart() -> None:
+    r, _ = search({1_000_000: [1, 3, 4, 5, 6, 12]})
+    want = "A motor answers at id 12, which an SO-101 does not use."
+    assert [x["text"] for x in r.findings()] == [want]
+    r, _ = search({1_000_000: [1, 3, 4, 5, 6]})
+    assert r.findings()[0]["text"] == "Nothing answers for id 2 at any id or rate."
+
+
+def test_two_motors_on_one_id_are_not_reported_dead() -> None:
+    r, _ = search({1_000_000: [1, 4, 5, 6]}, {1_000_000: [3]})  # motor 2 was given id 3
+    texts = [x["text"] for x in r.findings()]
+    assert texts == ["Two motors answer together at id 3 (1000000 baud)."]

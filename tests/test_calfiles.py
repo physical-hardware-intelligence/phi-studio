@@ -113,3 +113,32 @@ def test_the_phi_repo_is_found_as_a_shared_set(
     (rig / "configs/calibration").mkdir(parents=True)
     assert calfiles.shared_candidates(rig) == [(rig / "configs/calibration").resolve()]
     assert calfiles.shared_candidates(None) == []
+
+
+def test_archive_refuses_a_path_spelled_another_way_and_a_folder(tmp_path: Path) -> None:
+    """Review finding: "./" in a rel moved the file an arm uses past the used check."""
+    root = mac(tmp_path)
+    for bad in (f"{F}/./phi_follower.json", f"{F}/", F, f"{F}//phi_follower.json"):
+        with pytest.raises(ValueError):
+            calfiles.archive(root, [bad], SPEC)
+    assert (root / F / "phi_follower.json").is_file()
+
+
+def test_a_links_target_is_used_by_the_arm_that_reads_it(tmp_path: Path) -> None:
+    """The phi rig: phi_bi_left.json -> phi_follower.json. Moving phi_follower.json aside would
+    leave the left follower's link pointing at nothing."""
+    bi = rigspec.parse("""
+robot: {type: bi_so_follower, id: phi_bi, left_arm_config: {port: /dev/tty.LF},
+        right_arm_config: {port: /dev/tty.RF}}
+""")
+    root = mac(tmp_path)
+    by = {f.rel: f for f in calfiles.inventory(root, bi)}
+    assert by[f"{F}/phi_follower.json"].used_by == ["left_follower"]
+    assert by[f"{F}/phi_bi_left.json"].real == f"{F}/phi_follower.json"
+    assert calfiles.shared_files(list(by.values())) == []  # one arm, one file: fine
+    with pytest.raises(ValueError, match="left_follower"):
+        calfiles.archive(root, [f"{F}/phi_follower.json"], bi)
+    (root / F / "phi_bi_right.json").symlink_to("phi_follower.json")  # now two arms
+    files = calfiles.inventory(root, bi)
+    assert calfiles.shared_files(files) == [(f"{F}/phi_follower.json",
+                                             ["left_follower", "right_follower"])]  # fmt: skip

@@ -147,6 +147,13 @@ class Terminal:
     def history(self) -> bytes:
         return b"".join(self.scrollback)
 
+    def show(self, data: bytes) -> None:
+        """Puts text on every panel without sending it to the shell (promptguard's echo)."""
+        self.scrollback.append(data)
+        self.size += len(data)
+        for fn in list(self.listeners):
+            fn(data)
+
     def write(self, data: bytes) -> None:
         if self.fd is None or not self.alive:
             raise OSError("The shell is not running.")

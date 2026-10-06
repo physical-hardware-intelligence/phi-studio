@@ -28,7 +28,9 @@ export function CalibrationFiles({ compact = false }: { compact?: boolean }) {
         setView(v); setBusy(false); setError(null);
         // WHY preselect: the usual job is "keep the rig's files, move the rest", and "install what differs"
         setPick(new Set(v.files.filter((f) => f.unused).map((f) => f.rel)));
-        setTake(new Set(v.shared.rows.filter((r) => r.state !== "same" && r.state !== "broken").map((r) => r.rel)));
+        // WHY not a file the motors hold: this Mac's file then matches its arm, and the shared one may be another arm's
+        const held = new Set(v.files.filter((f) => f.on_ports.length > 0).map((f) => f.rel));
+        setTake(new Set(v.shared.rows.filter((r) => r.state !== "same" && r.state !== "broken" && !held.has(r.rel)).map((r) => r.rel)));
         if (v.shared.source) setSource((s) => s || v.shared.source!);
       }),
       studio.onMessage("rig_scan", () => load(source || undefined)), // which motors hold which file
@@ -125,7 +127,10 @@ export function CalibrationFiles({ compact = false }: { compact?: boolean }) {
                   <span><input type="checkbox" aria-label={`Install ${name(r.rel)}`} checked={take.has(r.rel)}
                     disabled={!control || busy || r.state === "same" || r.state === "broken"} onChange={() => toggle(take, r.rel, setTake)} /></span>
                   <span className="mono calfiles-name">{r.rel.split("/").slice(-2).join("/")}</span>
-                  <span><SharedChip r={r} /></span>
+                  <span><SharedChip r={r} />
+                    {r.state !== "same" && view.files.some((f) => f.rel === r.rel && f.on_ports.length > 0) && (
+                      <span className="chip sev-warn" title="Installing replaces numbers that match this arm's motors. Install it only if the shared file is for this physical arm, then ENTER at LeRobot's prompt writes it into that arm.">
+                        this Mac's file matches its motors</span>)}</span>
                 </div>
               ))}
           </div>
@@ -145,7 +150,7 @@ function FileChips({ f }: { f: CalFile }) {
     <span className="onb-chips">
       {f.used_by.map((k) => <span key={k} className="chip sev-ok">{label(k)} uses it</span>)}
       {f.on_ports.map((p) => <span key={p} className="chip" title={p}>motors on {p.split(".").pop()} hold it</span>)}
-      {f.link && <span className="chip sev-error" title="LeRobot writes through a link into the file it points at">link to {f.link}</span>}
+      {f.link && <span className="chip" title="LeRobot reads and writes the file it points at">link to {f.link}</span>}
       {f.same_as.length > 0 && <span className="chip" title={f.same_as.join("\n")}>same numbers as {f.same_as.map(name).join(", ")}</span>}
       {f.error && <span className="chip sev-error" title={f.error}>broken</span>}
       {f.unfinished && <span className="chip sev-warn" title={f.unfinished}>unfinished</span>}

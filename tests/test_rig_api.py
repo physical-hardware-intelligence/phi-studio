@@ -408,3 +408,29 @@ def test_calibration_files_are_not_moved_while_lerobot_runs(
         msg = {"files": ["robots/so_follower/old.json"]}
         asyncio.run(api.calfiles_archive(_Client(), msg))  # type: ignore[arg-type]
     assert (tmp_path / "cal/robots/so_follower/old.json").is_file()
+
+
+def test_motor_search_reports_findings_and_the_setup_command_for_the_arm(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    import asyncio
+
+    import phi_studio.rig_api as R
+
+    api = _cal_api(tmp_path, monkeypatch, cal(1))
+    api._holders = lambda ports: {}  # type: ignore[method-assign]
+
+    def find(port: str, on_rate: Any = None) -> Any:
+        on_rate(1_000_000)
+        return R.detect.MotorSearch(port, found={1_000_000: [1, 3, 4, 5, 6], 115_200: [1]})
+
+    monkeypatch.setattr(R.detect, "find_motors", find)
+    c = _Client()
+    asyncio.run(api.find_motors(c, {"port": "/dev/tty.a"}))  # type: ignore[arg-type]
+    assert c.pushed[0]["done"] is False and c.pushed[0]["baud"] == 1_000_000
+    end = c.pushed[-1]
+    assert end["done"] and "115200 baud" in end["findings"][0]["text"]
+    assert end["setup"] == [{"role": "follower", "cmd": "lerobot-setup-motors "
+                             "--robot.type=so101_follower --robot.port=/dev/tty.a"}]
+    asyncio.run(api.find_motors(c, {"port": "/dev/tty.zz"}))  # type: ignore[arg-type]
+    assert [x["role"] for x in c.pushed[-1]["setup"]] == ["follower", "leader"]

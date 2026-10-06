@@ -182,7 +182,7 @@ def calibration_library(root: Path) -> dict[str, Calibration]:
     return out
 
 
-def ping_all(port: str, ids: Iterable[int]) -> tuple[list[int], list[int]]:
+def ping_all(port: str, ids: Iterable[int], baud: int = BAUD) -> tuple[list[int], list[int]]:
     """Ping each id once. A clean reply from an STS3215 is a motor; a garbled one (anything but a
     timeout) means two motors answered together."""
     import scservo_sdk as scs
@@ -191,7 +191,7 @@ def ping_all(port: str, ids: Iterable[int]) -> tuple[list[int], list[int]]:
     if not ph.openPort():
         raise OSError(f"could not open {port}")
     try:
-        ph.setBaudRate(BAUD)
+        ph.setBaudRate(baud)
         ok, clash = [], []
         for i in ids:
             model, comm, _ = pk.ping(ph, i)
@@ -202,6 +202,80 @@ def ping_all(port: str, ids: Iterable[int]) -> tuple[list[int], list[int]]:
         return ok, clash
     finally:
         ph.closePort()
+
+
+# STS3215 rates, fastest first (LeRobot tables.py:154-163). A motor answers at one rate only.
+BAUDS = (1_000_000, 500_000, 250_000, 128_000, 115_200, 57_600, 38_400, 19_200)
+ALL_IDS = range(0, 254)  # 254 is broadcast
+# WHY 0..20 at the other rates: a motor at another rate is one that was never set up (factory id
+# 1) or set up halfway; a full sweep there would take about 9 s a rate (34 ms per silent id,
+# scservo_sdk port_handler.py: 2 * LATENCY_TIMER(16) + 2).
+OTHER_RATE_IDS = range(0, 21)
+
+
+@dataclass
+class MotorSearch:
+    """Every motor one port reaches, at any rate and any id (find_motors)."""
+
+    port: str
+    found: dict[int, list[int]] = field(default_factory=dict)  # baud -> ids that answered
+    clashes: dict[int, list[int]] = field(default_factory=dict)  # baud -> garbled ids
+
+    def findings(self) -> list[dict[str, str]]:
+        """What is wrong, in words, with the fix. Empty when ids 1..6 answer at 1 Mbaud alone."""
+        out = []
+        here = set(self.found.get(BAUD, []))
+        joined = lambda ids: ", ".join(map(str, ids))  # noqa: E731
+        for baud, ids in sorted(self.clashes.items(), reverse=True):
+            out.append({"level": "error",
+                        "text": f"Two motors answer together at id {joined(ids)} ({baud} baud).",
+                        "fix": "Set motor ids: one motor at a time when it asks."})
+        extra = sorted(here - set(ARM_IDS))
+        if extra:
+            out.append({"level": "error",
+                        "text": f"A motor answers at id {joined(extra)}, which an SO-101 does not "
+                        "use.", "fix": "Set motor ids for this arm."})  # fmt: skip
+        for baud, ids in sorted(self.found.items(), reverse=True):
+            if baud != BAUD and ids:
+                out.append({"level": "error", "text": f"Motor id {joined(ids)} answers at "
+                            f"{baud} baud, not 1000000: it was never set up, or set up halfway.",
+                            "fix": "Set motor ids for this arm: it sets each motor's id and "
+                            "rate."})  # fmt: skip
+        # WHY count motors, not ids: a motor at another id or rate fills a missing slot, and a
+        # garbled id is (at least) two motors in one slot
+        elsewhere = sum(len(v) for b, v in self.found.items() if b != BAUD) + len(extra)
+        clashing = 2 * sum(len(v) for v in self.clashes.values())
+        silent = len(ARM_IDS) - len(here & set(ARM_IDS)) - elsewhere - clashing
+        if silent > 0:
+            gone = [i for i in ARM_IDS if i not in here and i not in self.clashes.get(BAUD, [])]
+            which = (f"id {', '.join(map(str, gone))}" if not elsewhere and not clashing
+                     else f"{silent} of the 6 motors")  # fmt: skip
+            out.append({"level": "error", "text": f"Nothing answers for {which} at any id or rate.",
+                        "fix": "Check that motor's two 3-pin cables and the arm's power. If it "
+                        "still does not answer, the motor or its cable is broken: swap the "
+                        "cable, then the motor."})  # fmt: skip
+        return out
+
+    def public(self) -> dict[str, Any]:
+        return {"port": self.port, "found": {str(k): v for k, v in self.found.items()},
+                "clashes": {str(k): v for k, v in self.clashes.items()},
+                "findings": self.findings()}  # fmt: skip
+
+
+def find_motors(port: str, *, ping: Callable[..., tuple[list[int], list[int]]] = ping_all,
+                on_rate: Callable[[int], None] | None = None) -> MotorSearch:  # fmt: skip
+    """Ping every id at 1 Mbaud and the low ids at every other rate. Read-only: a ping changes
+    nothing in a motor."""
+    out = MotorSearch(port)
+    for baud in BAUDS:
+        if on_rate:
+            on_rate(baud)
+        ok, clash = ping(port, ALL_IDS if baud == BAUD else OTHER_RATE_IDS, baud)
+        if ok:
+            out.found[baud] = ok
+        if clash:
+            out.clashes[baud] = clash
+    return out
 
 
 def _close(bus: Any) -> None:

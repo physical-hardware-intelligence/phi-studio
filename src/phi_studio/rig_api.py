@@ -17,6 +17,10 @@ which, and write that into robot-config.yaml and the calibration folder.
                                file; pushes rig_cal_verified
     cmd rig_cal_from_motors (control)  write that arm's file from its registers, only when they hold
                                a finished calibration (identity.unfinished)
+    cmd rig_motors  (control)  ping every id at every STS3215 rate on one port (detect.find_motors):
+                               finds a motor given a wrong id or rate, or none; pushes rig_motors
+    cmd rig_calfiles*          the calibration folder: list (any window), archive, restore,
+                               install a shared set (control); calfiles.py
     cmd rig_apply   (control)  rescan, check the chosen roles and sides, write any missing
                                calibration file from the arm's own registers, replace robot: and
                                teleop: in robot-config.yaml (backup first, every other line kept),
@@ -512,6 +516,49 @@ class RigApi:
         return out
 
 
+    async def find_motors(self, client: Client, msg: dict[str, Any]) -> None:
+        """Every motor a port reaches, at any id and any rate. Read-only (pings), about 14 s."""
+        port = msg.get("port")
+        if not isinstance(port, str) or not port:
+            raise RigError("Choose an arm's port.")
+        async with self.lock:
+            await self._may_open_ports()
+            try:
+                held = await asyncio.to_thread(self._holders, [port])
+            except OSError as e:
+                raise RigError(f"Could not check which processes hold {port}: {e}") from e
+            if held.get(port):
+                h = held[port][0]
+                raise RigError(f"{h.name} (process {h.pid}) has {port} open.", "Stop it first.")
+            loop, push = asyncio.get_running_loop(), client.push
+
+            def rate(baud: int) -> None:
+                loop.call_soon_threadsafe(push, {"type": "rig_motors", "port": port,
+                                                 "baud": baud, "done": False})  # fmt: skip
+
+            try:
+                out = await asyncio.to_thread(detect.find_motors, port, on_rate=rate)
+            except OSError as e:
+                raise RigError(f"Could not open {port}: {e}", "Check its USB cable.") from e
+        push({"type": "rig_motors", "port": port, "done": True, **out.public(),
+              "setup": self._setup_commands(port)})  # fmt: skip
+
+    def _setup_commands(self, port: str) -> list[dict[str, str]]:
+        """lerobot-setup-motors for this port: as the arm robot-config.yaml says it is, or as
+        either role when the port is not in it (or Detect matched no file)."""
+        spec = self._spec()
+        arm = next((a for a in spec.arms if a.port == port), None) if spec else None
+        f = self.found.get(port)
+        roles = [arm.role] if arm else [f.role] if f and f.role else ["follower", "leader"]
+        out = []
+        for role in roles:
+            dev = "robot" if role == "follower" else "teleop"
+            typ = arm.single_type if arm else ("so101_follower" if role == "follower"
+                                               else "so101_leader")  # fmt: skip
+            out.append({"role": role, "cmd": f"lerobot-setup-motors --{dev}.type={typ} "
+                        f"--{dev}.port={port}"})  # fmt: skip
+        return out
+
     # -- the calibration folder (calfiles.py) ---------------------------------------------------
     def _spec(self) -> rigspec.RigSpec | None:
         try:
@@ -628,6 +675,7 @@ def register(studio: Studio) -> None:
     studio.handle("rig_cal_prepare", api.cal_prepare, control=True)
     studio.handle("rig_cal_verify", api.cal_verify, control=True)
     studio.handle("rig_cal_from_motors", api.cal_from_motors, control=True)
+    studio.handle("rig_motors", api.find_motors, control=True)
     studio.handle("rig_calfiles", api.calfiles, control=False)  # reads files only
     studio.handle("rig_calfiles_archive", api.calfiles_archive, control=True)
     studio.handle("rig_calfiles_restore", api.calfiles_restore, control=True)

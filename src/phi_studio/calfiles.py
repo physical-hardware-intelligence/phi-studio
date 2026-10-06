@@ -16,7 +16,7 @@ from __future__ import annotations
 import shutil
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from phi_studio import rigspec
@@ -35,6 +35,7 @@ class CalFile:
     rel: str  # robots/so_follower/phi_follower.json
     used_by: list[str] = field(default_factory=list)  # rig arm keys whose file this is
     link: str | None = None  # a symlink's target, as written
+    real: str = ""  # the file LeRobot opens through any links: a rel inside root, else absolute
     error: str | None = None  # why LeRobot could not load it
     unfinished: str | None = None  # identity.unfinished: registers no finished run leaves
     same_as: list[str] = field(default_factory=list)  # other files with exactly these numbers
@@ -52,7 +53,8 @@ class CalFile:
 
     def public(self) -> dict[str, Any]:
         return {"rel": self.rel, "id": self.id, "folder": self.folder, "used_by": self.used_by,
-                "link": self.link, "error": self.error, "unfinished": self.unfinished,
+                "link": self.link, "real": self.real or self.rel, "error": self.error,
+                "unfinished": self.unfinished,
                 "same_as": self.same_as, "on_ports": self.on_ports, "mtime": self.mtime,
                 "junk": self.junk, "unused": not self.used_by}  # fmt: skip
 
@@ -92,6 +94,11 @@ def inventory(root: Path, spec: rigspec.RigSpec | None,
                 f.junk = "a backup or other file; LeRobot never reads it"
             if p.is_symlink():
                 f.link = str(p.readlink())
+                real = p.resolve()
+                try:
+                    f.real = str(real.relative_to(root.resolve()))
+                except ValueError:
+                    f.real = str(real)
             if f.junk is None:
                 try:
                     cal = load_calibration(p)
@@ -101,12 +108,39 @@ def inventory(root: Path, spec: rigspec.RigSpec | None,
                     f.error = f"LeRobot cannot load it: {e}"
             files.append(f)
     by_rel = {f.rel: f for f in files}
+    for f in files:
+        # WHY: an arm reads a link's target, so moving the target aside breaks that arm
+        t = by_rel.get(f.real) if f.link else None
+        if t is not None:
+            t.used_by += [k for k in f.used_by if k not in t.used_by]
     for rel, cal in numbers.items():
         f = by_rel[rel]
         f.same_as = [o for o, c in numbers.items() if o != rel and c == cal]
         name = rel.removesuffix(".json")
         f.on_ports = sorted(p for p, names in (motors or {}).items() if name in names)
     return files
+
+
+def shared_files(files: list[CalFile]) -> list[tuple[str, list[str]]]:
+    """Files that more than one rig arm reads, after links: (the real file, the arm keys). WHY
+    not every link: one physical arm under two ids (phi_bi_left.json -> phi_follower.json, the
+    phi rig's own robot-config.yaml) is one arm on one file; two arms on one file is the fault."""
+    by_real: dict[str, list[str]] = {}
+    for f in files:
+        for k in f.used_by:
+            keys = by_real.setdefault(f.real or f.rel, [])
+            if k not in keys:
+                keys.append(k)
+    return [(r, ks) for r, ks in by_real.items() if len(ks) > 1]
+
+
+def _checked(rel: str) -> str:
+    """`rel` if it names one file directly inside a folder LeRobot reads, else ValueError."""
+    parts = PurePosixPath(rel).parts
+    if ("\\" in rel or len(parts) != 3 or "/".join(parts) != rel or ".." in parts
+            or "/".join(parts[:2]) not in FOLDERS):  # fmt: skip
+        raise ValueError(f"{rel} is not in the calibration folder.")
+    return rel
 
 
 def stamp() -> str:
@@ -145,14 +179,14 @@ def archive(root: Path, rels: list[str], spec: rigspec.RigSpec | None,
             when: str | None = None) -> Path:  # fmt: skip
     """Moves `rels` into <archive>/<when>/, keeping their folders. Refuses a file an arm uses,
     or anything outside the folders LeRobot reads."""
-    used = _used(spec, root)
+    used = {f.rel: f.used_by for f in inventory(root, spec) if f.used_by}
+    used |= _used(spec, root)  # also a file the config names that is not there yet
     for rel in rels:
-        if not any(rel.startswith(f"{f}/") for f in FOLDERS) or "/../" in f"/{rel}" or "\\" in rel:
-            raise ValueError(f"{rel} is not in the calibration folder.")
+        _checked(rel)  # WHY strict: "so_follower/./x.json" would slip past the used check
         if rel in used:
             raise ValueError(f"{rel} is the file the {', '.join(used[rel])} uses.")
         p = root / rel
-        if not (p.exists() or p.is_symlink()):
+        if not (p.exists() or p.is_symlink()) or (p.is_dir() and not p.is_symlink()):
             raise ValueError(f"{rel} is not there any more.")
     dest = _fresh(root, when)
     for rel in rels:

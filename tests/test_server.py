@@ -521,7 +521,7 @@ def test_checks_run_from_any_window_and_reach_the_assistant(tmp_path: Path, monk
             await b.send_str(json.dumps({"cmd": "checks_run"}))
             first = await until(b, lambda d: d["type"] == "checks")
             before = {r["id"]: r for r in first["results"]}
-            assert len(before) == 21 and before["arms_answer"]["status"] == "skip"
+            assert len(before) == 22 and before["arms_answer"]["status"] == "skip"
             await a.send_str(json.dumps({"cmd": "connect"}))
             await until(b, lambda d: d["type"] == "telemetry" and d["arms"], beat=False)
             await b.send_str(json.dumps({"cmd": "checks_run"}))
@@ -684,7 +684,7 @@ def _bare(state: str | None, telemetry: dict[str, Any] | None = None) -> Any:
     s._rig_spec = lambda: None  # type: ignore[method-assign]
     s._note = lambda *a: None  # type: ignore[method-assign]
     s.spec["cal_root"] = "/cal"
-    s.guard = server_mod.PromptGuard(s._prompt_verdict)
+    s.guard = server_mod.PromptGuard(s._prompt_verdict, s._echo)
     return s
 
 
@@ -796,12 +796,17 @@ class _Written:
 
     def __init__(self) -> None:
         self.out: list[bytes] = []
+        self.shown: list[bytes] = []
 
     def write(self, b: bytes) -> None:
         self.out.append(b)
 
+    def show(self, b: bytes) -> None:
+        self.shown.append(b)
 
-def _guarded(command: str) -> tuple[Any, _Written, list[dict[str, Any]]]:
+
+def _guarded(command: str, monkeypatch: Any) -> tuple[Any, _Written, list[dict[str, Any]]]:
+    monkeypatch.setattr(server_mod.cmdcheck, "plugged_in", lambda p: True)  # fake /dev ports
     s = _bare("DISCONNECTED")
     s._rig_spec = lambda: server_mod.rigspec.parse(GUARD_CFG)  # type: ignore[method-assign]
     s.term_running = {"command": command}
@@ -825,10 +830,10 @@ def _type(s: Any, d: str) -> None:
     asyncio.run(go())
 
 
-def test_enter_at_the_prompt_is_held_when_the_leaders_port_has_another_id() -> None:
+def test_enter_at_the_prompt_is_held_when_the_leaders_port_has_another_id(monkeypatch: Any) -> None:
     crossed = ("lerobot-calibrate --teleop.type=so101_leader --teleop.port=/dev/tty.usbmodemF "
                "--teleop.id=phi_leader")  # the follower's port, the leader's file
-    s, term, sent = _guarded(crossed)
+    s, term, sent = _guarded(crossed, monkeypatch)
     s._watch_output(PROMPT_OUT)
     _type(s, "\r")
     assert term.out == [] and sent[-1]["t"] == "guard" and sent[-1]["held"]
@@ -841,17 +846,17 @@ def test_enter_at_the_prompt_is_held_when_the_leaders_port_has_another_id() -> N
     assert term.out == []  # never for a crossed port and id
 
 
-def test_enter_at_the_prompt_passes_for_the_arms_own_port_and_id() -> None:
+def test_enter_at_the_prompt_passes_for_the_arms_own_port_and_id(monkeypatch: Any) -> None:
     own = ("lerobot-calibrate --teleop.type=so101_leader --teleop.port=/dev/cu.usbmodemL "
            "--teleop.id=phi_leader")
-    s, term, sent = _guarded(own)
+    s, term, sent = _guarded(own, monkeypatch)
     s._watch_output(PROMPT_OUT)
     _type(s, "\r")
     assert term.out == [b"\r"]
 
 
-def test_run_refuses_a_command_whose_port_and_id_name_different_arms() -> None:
-    s, term, sent = _guarded("")
+def test_run_refuses_a_command_whose_port_and_id_name_different_arms(monkeypatch: Any) -> None:
+    s, term, sent = _guarded("", monkeypatch)
     term.running = lambda: None  # type: ignore[attr-defined]
     cmd = ("lerobot-teleoperate --robot.type=so101_follower --robot.port=/dev/tty.usbmodemL "
            "--robot.id=phi_follower")
@@ -865,11 +870,13 @@ def test_run_refuses_a_command_whose_port_and_id_name_different_arms() -> None:
     assert "Leader" in sent[-1]["message"]
 
 
-def test_a_prompt_that_prints_before_the_poll_sees_its_command_still_holds_enter() -> None:
+def test_a_prompt_that_prints_before_the_poll_sees_its_command_still_holds_enter(
+    monkeypatch: Any,
+) -> None:
     # Found in the preview on 2026-10-06: the poll then reset the guard, and ENTER went through.
     crossed = ("python3 fake.py --teleop.type=so101_leader --teleop.port=/dev/tty.usbmodemF "
                "--teleop.id=phi_leader")
-    s, term, sent = _guarded(crossed)
+    s, term, sent = _guarded(crossed, monkeypatch)
     s.term_running = None  # the poll has not seen the command yet
     term.running = lambda: {"command": crossed}  # type: ignore[attr-defined]
     s.term_socks = {object(): "w"}
@@ -896,3 +903,66 @@ def test_a_prompt_that_prints_before_the_poll_sees_its_command_still_holds_enter
     asyncio.run(go())
     assert term.out == [] and sent[-1]["t"] == "guard" and sent[-1]["held"]
     assert sent[-1]["level"] == "danger"  # rechecked against the command once it was known
+
+
+def test_keys_at_a_held_prompt_are_echoed_on_the_panel_not_sent(monkeypatch: Any) -> None:
+    unknown = ("lerobot-calibrate --teleop.type=so101_leader --teleop.port=/dev/tty.usbmodemX "
+               "--teleop.id=phi_leader")  # a port robot-config.yaml does not know
+    s, term, sent = _guarded(unknown, monkeypatch)
+    s._watch_output(PROMPT_OUT)
+    _type(s, "y")
+    _type(s, "\r")
+    assert term.out == [] and term.shown[0] == b"y" and sent[-1]["held"]
+    _type(s, "c\r")
+    assert term.out == [b"c\r"]  # the shell's line is "c", not "yc"
+
+
+def test_prompt_text_printed_by_cat_does_not_hold_the_shells_enter(monkeypatch: Any) -> None:
+    s, term, sent = _guarded("cat /tmp/run.log", monkeypatch)
+    s._watch_output(PROMPT_OUT)
+    _type(s, "\r")
+    assert term.out == [b"\r"] and s.guard.armed is None
+
+
+def test_a_recheck_that_finds_nothing_running_takes_the_notice_down(monkeypatch: Any) -> None:
+    s, term, sent = _guarded("", monkeypatch)
+    s.term_running = None
+    term.running = lambda: None  # type: ignore[attr-defined]
+    s.term_socks = {object(): "w"}
+
+    async def go() -> None:
+        s._watch_output(PROMPT_OUT)
+        await asyncio.sleep(0.05)
+
+    asyncio.run(go())
+    assert s.guard.armed is None and sent[-1] == {"t": "guard", "clear": True}
+
+
+def test_a_typed_crossed_command_holds_enter_from_its_start(monkeypatch: Any) -> None:
+    """Review finding: an ENTER typed while LeRobot connects sits in the tty, and input() takes
+    it the moment the prompt prints."""
+    crossed = ("lerobot-teleoperate --teleop.type=so101_leader --teleop.port=/dev/tty.usbmodemF "
+               "--teleop.id=phi_leader")
+    s, term, sent = _guarded("", monkeypatch)
+    s.term_running = None
+    term.running = lambda: {"command": crossed}  # type: ignore[attr-defined]
+    s.term_socks = {object(): "w"}
+
+    async def go() -> None:
+        orig = asyncio.sleep
+
+        async def once(d: float) -> None:
+            s.term_socks.clear()
+
+        asyncio.sleep = once  # type: ignore[assignment]
+        try:
+            await s._watch_terminal()
+        finally:
+            asyncio.sleep = orig  # type: ignore[assignment]
+        await s._term_message(None, "w", json.dumps({"t": "in", "d": "\r"}))
+        await orig(0)
+
+    asyncio.run(go())
+    assert term.out == [] and sent[-1]["held"] and sent[-1]["level"] == "danger"
+    warn = next(m for m in sent if m["t"] == "error")
+    assert "type c" not in warn["fix"] and "holds ENTER" in warn["fix"]

@@ -3,6 +3,7 @@
 // Server side: rig_scan in src/phi_studio/rig_api.py and detect.py; placement: lib/armdetect.ts.
 import { Activity, CircleAlert, LoaderCircle, ScanSearch } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { MotorIds } from "./MotorIds";
 import { place, type FoundArm, type Ids, type Placed } from "../lib/armdetect";
 import { shortPort } from "../lib/rig";
 import { studio, useStudio } from "../lib/studio";
@@ -57,7 +58,7 @@ export function DetectArms({ prefer, onPlaced }: { prefer: Partial<Ids> | null; 
       </div>
       {error && <p className="warn-text t-sm"><CircleAlert aria-hidden className="ico-inline" />{error}</p>}
       {p && p.broken.map((a) => (
-        <p key={a.port} className="warn-text t-sm">
+        <div key={a.port} className="warn-text t-sm">
           <CircleAlert aria-hidden className="ico-inline" /><span className="mono">{shortPort(a.port)}</span>: {a.problem}
           {a.held_by?.[0] && (
             <button className="btn btn-sm" disabled={!control || scanning} title={a.held_by[0].command}
@@ -65,7 +66,8 @@ export function DetectArms({ prefer, onPlaced }: { prefer: Partial<Ids> | null; 
               Stop {a.held_by[0].name}
             </button>
           )}
-        </p>
+          {!a.held_by?.length && <MotorIds arm={a} />}
+        </div>
       ))}
       {p && p.unplaced.map((a) => (
         <p key={a.port} className="faint t-sm">

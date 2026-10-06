@@ -577,6 +577,51 @@ def check_calibrations(inp: Inputs) -> dict[str, Any]:
     )
 
 
+def check_calibration_folder(inp: Inputs) -> dict[str, Any]:
+    """The folder LeRobot reads as a whole (calfiles.py): a file no arm uses is one wrong id away
+    from being written into an arm's servos (cmdcheck.py), and two arms never share numbers."""
+    from phi_studio import calfiles, rigspec
+
+    title = "Calibration folder"
+    root = inp.roots.get("calibration")
+    if root is None or not root.is_dir():
+        return result("calibration_folder", "This Mac", title, "skip", "No calibration folder yet.")
+    found = find_rig_config(inp)
+    try:
+        spec = rigspec.parse(found[1].read_text()) if found else None
+    except (OSError, ValueError, yaml.YAMLError):
+        spec = None
+    files = calfiles.inventory(root, spec)
+    used = [f for f in files if f.used_by]
+    fix = "Open Calibrate > Calibration files on this Mac."
+    for real, keys in calfiles.shared_files(files):
+        return result("calibration_folder", "This Mac", title, "fail",
+                      f"{' and '.join(keys)} read one file, {real} (through a link): "
+                      "calibrating one arm rewrites the other's.", fix)  # fmt: skip
+    for f in used:
+        # WHY one folder: two followers (or two leaders) are the same kind of arm, so equal numbers
+        # mean a copy; web/src/lib/calfiles.ts compares the same way. A link and its target are
+        # one file, and one arm under two ids is one arm.
+        twin = next((o for o in used if o is not f and o.rel in f.same_as
+                     and o.folder == f.folder and (o.real or o.rel) != (f.real or f.rel)
+                     and not set(o.used_by) & set(f.used_by)), None)  # fmt: skip
+        if twin is not None:
+            return result("calibration_folder", "This Mac", title, "fail",
+                          f"{', '.join(f.used_by)} and {', '.join(twin.used_by)} use files with "
+                          f"the same numbers ({f.rel}, {twin.rel}): one arm holds the other's "
+                          "calibration.", "Calibrate one of them again, or install the shared "
+                          "files. " + fix)  # fmt: skip
+    unused = [f for f in files if not f.used_by]
+    if unused and spec is not None:
+        names = ", ".join(Path(f.rel).name for f in unused[:4])
+        names += " ..." if len(unused) > 4 else ""
+        return result("calibration_folder", "This Mac", title, "warn",
+                      f"{len(unused)} files no arm uses ({names}). A wrong id in a command "
+                      "would load one of them.", "Move them aside: " + fix)  # fmt: skip
+    return result("calibration_folder", "This Mac", title, "pass",
+                  f"{len(files)} files, each used by the rig")
+
+
 def check_disk(inp: Inputs) -> dict[str, Any]:
     title = "Data folder"
     d = inp.data_dir
@@ -986,6 +1031,7 @@ CHECKS: tuple[Callable[[Inputs], dict[str, Any]], ...] = (
     check_step_limit,
     check_camera_config,
     check_calibrations,
+    check_calibration_folder,
     check_disk,
     check_arms_answer,
     check_identity,

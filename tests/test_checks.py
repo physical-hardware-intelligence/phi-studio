@@ -419,8 +419,8 @@ def test_a_check_that_raises_is_reported_not_hidden(monkeypatch: pytest.MonkeyPa
 
 def test_every_check_runs_on_empty_inputs() -> None:
     res = run_checks(Inputs())
-    assert len(res) == len(C.CHECKS) == 21
-    assert len({r["id"] for r in res}) == 21
+    assert len(res) == len(C.CHECKS) == 22
+    assert len({r["id"] for r in res}) == 22
     assert not [r for r in res if "The check itself failed" in r["detail"]]
 
 
@@ -539,3 +539,25 @@ def test_bimanual_config_names_lerobots_calibration_files(tmp_path: Path) -> Non
     assert r["status"] == "fail"
     for f in ("bi_f_left (robot)", "bi_f_right (robot)", "bi_l_left (teleoperator)"):
         assert f in r["detail"]
+
+
+def test_calibration_folder_passes_clean_warns_on_extras_fails_on_a_shared_file(
+    tmp_path: Path,
+) -> None:
+    assert C.check_calibration_folder(mac(tmp_path / "a"))["status"] == "pass"
+    inp = mac(tmp_path / "b", cals={"phi_follower": good_cal(), "phi_leader": good_cal(),
+                                    "yash_follower": good_cal()})  # fmt: skip
+    r = C.check_calibration_folder(inp)
+    assert r["status"] == "warn" and "yash_follower.json" in r["detail"]
+    # one arm under two ids, as the phi rig links phi_bi_left.json to phi_follower.json: fine
+    inp = mac(tmp_path / "c", cals={"phi_leader": good_cal(), "phi_bi_left": good_cal()})
+    f = tmp_path / "c/cal/robots/so_follower"
+    (f / "phi_follower.json").symlink_to("phi_bi_left.json")
+    assert C.check_calibration_folder(inp)["status"] == "pass"
+    # two arms on one file: the leader's file is a link to the follower's
+    inp = mac(tmp_path / "d", cals={"phi_follower": good_cal()})
+    lead = tmp_path / "d/cal/teleoperators/so_leader"
+    lead.mkdir(parents=True, exist_ok=True)
+    (lead / "phi_leader.json").symlink_to("../../robots/so_follower/phi_follower.json")
+    r = C.check_calibration_folder(inp)
+    assert r["status"] == "fail" and "read one file" in r["detail"]

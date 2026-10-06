@@ -181,7 +181,7 @@ class Studio:
         self.term_running: dict[str, Any] | None = None  # the command in the foreground, if any
         self.term_watch: asyncio.Task[None] | None = None
         # WHY: ENTER at LeRobot's calibration prompt writes a file into the servos (promptguard.py)
-        self.guard = PromptGuard(self._prompt_verdict)
+        self.guard = PromptGuard(self._prompt_verdict, self._echo)
         self.cli = ClaudeCLI(cwd=roots[0].path, dirs=[r.path for r in roots[1:]],
                              model=assistant_model)  # fmt: skip
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -457,7 +457,9 @@ class Studio:
                     # WHY not when a command first appears: its prompt may already be showing
                     # (it printed before this poll saw the command), and that prompt is its own
                     self.guard.reset()
-                warn = self._command_warning((now or {}).get("command") or "")
+                bad = self._command_verdict((now or {}).get("command") or "")
+                self.guard.stand(bad)  # a DANGER command holds ENTER from its start
+                warn = self._command_warning(bad)
                 if warn is not None:
                     for ws in list(self.term_socks):
                         asyncio.ensure_future(self._term_send(ws, warn))
@@ -664,9 +666,17 @@ class Studio:
 
         return Path(self.spec.get("cal_root") or lerobot_calibration_dir())
 
-    def _prompt_verdict(self, lerobot_id: str) -> cmdcheck.Verdict:
+    def _prompt_verdict(self, lerobot_id: str) -> cmdcheck.Verdict | None:
+        """None when the running command is known and cannot be LeRobot: the prompt's text came
+        from something else, such as `cat` of a log."""
         command = (self.term_running or {}).get("command")
+        if command and not cmdcheck.may_prompt(command):
+            return None
         return cmdcheck.at_prompt(command, lerobot_id, self._rig_spec(), self._cal_root())
+
+    def _echo(self, text: str) -> None:
+        if self.terminal is not None:
+            self.terminal.show(text.encode())
 
     def _watch_output(self, data: bytes) -> None:
         """Every chunk the shell prints: tells the panels when LeRobot's prompt appears."""
@@ -680,28 +690,40 @@ class Studio:
     async def _recheck_prompt(self) -> None:
         assert self.terminal is not None
         now = await asyncio.to_thread(self.terminal.running)
+        if now is None and self.term_running is None:
+            # WHY: nothing runs, so no LeRobot is waiting; ENTER at the shell must not be held
+            self.guard.reset()
+            self._tell_guard(None)
+            return
         if now is not None and self.term_running is None:
             self.term_running = now
+            self.guard.stand(self._command_verdict(now.get("command") or ""))
             self._term_status()
         v = self.guard.recheck()
+        self._tell_guard(v)
+
+    def _tell_guard(self, v: cmdcheck.Verdict | None) -> None:
+        """Tells the panels what the prompt's ENTER would do; None takes the notice down."""
         if v is not None:
-            self._tell_guard(v)
-
-    def _tell_guard(self, v: cmdcheck.Verdict) -> None:
-        self._note("state" if v.level == cmdcheck.OK else "error",
-                   f"LeRobot asks for ENTER to write a calibration file: {v.message}")
+            self._note("state" if v.level == cmdcheck.OK else "error",
+                       f"LeRobot asks for ENTER to write a calibration file: {v.message}")
+        msg = {"t": "guard", "held": False, **v.public()} if v else {"t": "guard", "clear": True}
         for ws in list(self.term_socks):
-            asyncio.ensure_future(self._term_send(ws, {"t": "guard", "held": False,
-                                                       **v.public()}))  # fmt: skip
+            asyncio.ensure_future(self._term_send(ws, msg))
 
-    def _command_warning(self, command: str) -> dict[str, Any] | None:
-        """A warning for a typed LeRobot command whose ports and ids name different arms."""
+    def _command_verdict(self, command: str) -> cmdcheck.Verdict | None:
+        """The worst arm of a LeRobot command, or None for any other command."""
         spec = self._rig_spec() if command else None
-        bad = cmdcheck.worst(cmdcheck.check(command, spec, self._cal_root())) if spec else None
+        return cmdcheck.worst(cmdcheck.check(command, spec, self._cal_root())) if spec else None
+
+    @staticmethod
+    def _command_warning(bad: cmdcheck.Verdict | None) -> dict[str, Any] | None:
+        """A warning for a typed LeRobot command whose ports and ids name different arms."""
         if bad is None or bad.level != cmdcheck.DANGER:
             return None
         return {"t": "error", "message": bad.message,
-                "fix": f"{bad.fix} If it asks for ENTER, type c or press Ctrl-C."}
+                "fix": f"{bad.fix} Studio holds ENTER for this command: stop it with Ctrl-C and "
+                "run the fixed one."}  # fmt: skip
 
     async def _connect_when_free(self, client: Client, msg: dict[str, Any]) -> None:
         from phi_studio.setup_api import lerobot_busy

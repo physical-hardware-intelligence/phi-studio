@@ -104,7 +104,8 @@ class TerminalLink {
         const was = this.snap.running;
         const gone = running === null || (was !== null && was.command !== running.command);
         this.set({ alive: m.alive, running, typing: m.typing, ...(gone ? { guard: null } : {}) });
-      } else if (m.t === "guard") this.set({ guard: { level: m.level, message: m.message, fix: m.fix ?? "", arm: m.arm ?? null, file: m.file ?? null, held: !!m.held } });
+      } else if (m.t === "guard" && m.clear) this.set({ guard: null });
+      else if (m.t === "guard") this.set({ guard: { level: m.level, message: m.message, fix: m.fix ?? "", arm: m.arm ?? null, file: m.file ?? null, held: !!m.held } });
       else if (m.t === "error") this.set({ error: { message: m.message, fix: m.fix ?? "" } });
     };
     ws.onclose = () => {
