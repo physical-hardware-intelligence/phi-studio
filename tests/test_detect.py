@@ -132,3 +132,47 @@ def test_watch_motion_finds_the_arm_being_moved() -> None:
     moved = watch_motion(found, 1.0, bus_factory=make, clock=lambda: t[0], sleep=sleep)
     assert moved["/dev/tty.b"] > 100 and moved["/dev/tty.a"] == 0
     assert all(not b.port_handler.open for b in buses.values())
+
+
+LSOF = "p4242\nn/dev/tty.usbmodemA\np99\nn/dev/cu.usbmodemB\np7\nn/dev/tty.usbmodemA\n"
+PS = ("4242 T    /opt/anaconda3/envs/phi/bin/python health_check/roll_live.py\n"
+      "99   S+   /opt/anaconda3/envs/phi/bin/lerobot-teleoperate --robot.type=so101_follower\n")
+
+
+def test_port_holders_names_each_process_and_skips_studio(monkeypatch: Any) -> None:
+    from phi_studio import detect
+
+    monkeypatch.setattr(detect.os.path, "exists", lambda p: True)
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> str:
+        calls.append(argv)
+        return LSOF if argv[0] == "lsof" else PS
+
+    held = detect.port_holders(["/dev/tty.usbmodemA", "/dev/cu.usbmodemB"], run=run, me=7)
+    assert set(held) == {"/dev/tty.usbmodemA", "/dev/tty.usbmodemB"}  # cu folded into tty
+    a = held["/dev/tty.usbmodemA"]
+    assert [(h.pid, h.name, h.paused) for h in a] == [(4242, "roll_live.py", True)]  # 7 is Studio
+    assert held["/dev/tty.usbmodemB"][0].name == "lerobot-teleoperate"
+    assert "-F" in calls[0] and "/dev/cu.usbmodemA" in calls[0]  # both names of each device
+
+
+def test_a_held_port_is_reported_and_never_pinged(tmp_path: Path) -> None:
+    from phi_studio.detect import Holder
+
+    pinged: list[str] = []
+
+    def ping(p: str, ids: Any) -> tuple[list[int], list[int]]:
+        pinged.append(p)
+        return [1, 2, 3, 4, 5, 6], []
+
+    h = Holder(4242, "python health_check/roll_live.py", True)
+    found = scan([("/dev/tty.a", "A"), ("/dev/tty.b", "B")], tmp_path, ping=ping,
+                 bus_factory=lambda p, c: FakeBus(p),
+                 holders=lambda ps: {"/dev/tty.a": [h]})  # fmt: skip
+    by = {f.port: f for f in found}
+    assert pinged == ["/dev/tty.b"]
+    problem = by["/dev/tty.a"].problem
+    assert problem and "roll_live.py (process 4242, paused)" in problem
+    assert by["/dev/tty.a"].public()["held_by"][0]["paused"] is True
+    assert by["/dev/tty.b"].problem is None

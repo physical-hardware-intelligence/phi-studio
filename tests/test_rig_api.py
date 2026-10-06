@@ -179,3 +179,25 @@ def test_one_id_for_both_roles_gives_the_leader_its_own() -> None:
     assert ids == {"follower": "phi_bi", "leader": "phi_bi_leader"}
     check_answers({"name": "Bench", "layout": "bimanual", "ids": ids, "ports": {}})  # accepted
     assert distinct_ids({"follower": "a", "leader": "b"}) == {"follower": "a", "leader": "b"}
+
+
+def test_stop_process_terms_then_continues_a_paused_one_and_kills_if_needed() -> None:
+    import signal
+
+    from phi_studio.rig_api import stop_process
+
+    sent: list[int] = []
+    state = {"alive": True}
+
+    def kill(pid: int, sig: int) -> None:
+        sent.append(sig)
+        if sig == signal.SIGKILL:
+            state["alive"] = False
+
+    never_dies = {"alive": lambda p: state["alive"], "sleep": lambda s: None}
+    assert stop_process(5, wait_s=0.3, kill=kill, **never_dies)
+    assert sent == [signal.SIGTERM, signal.SIGCONT, signal.SIGKILL]
+    sent.clear()  # a process that obeys SIGTERM is never sent SIGKILL
+    assert stop_process(5, kill=lambda p, s: sent.append(s), alive=lambda p: False,
+                        sleep=lambda s: None)  # fmt: skip
+    assert sent == [signal.SIGTERM, signal.SIGCONT]

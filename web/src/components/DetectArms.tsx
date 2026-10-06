@@ -26,7 +26,7 @@ export function DetectArms({ prefer, onPlaced }: { prefer: Partial<Ids> | null; 
       latest.current.onPlaced(placed);
     });
     const off2 = studio.onMessage("error", (m) => {
-      if (m.cmd !== "rig_scan") return;
+      if (m.cmd !== "rig_scan" && m.cmd !== "rig_stop") return;
       setScanning(false); setError([m.message, m.fix].filter(Boolean).join(" "));
     });
     return () => { off1(); off2(); };
@@ -57,7 +57,15 @@ export function DetectArms({ prefer, onPlaced }: { prefer: Partial<Ids> | null; 
       </div>
       {error && <p className="warn-text t-sm"><CircleAlert aria-hidden className="ico-inline" />{error}</p>}
       {p && p.broken.map((a) => (
-        <p key={a.port} className="warn-text t-sm"><CircleAlert aria-hidden className="ico-inline" /><span className="mono">{shortPort(a.port)}</span>: {a.problem}</p>
+        <p key={a.port} className="warn-text t-sm">
+          <CircleAlert aria-hidden className="ico-inline" /><span className="mono">{shortPort(a.port)}</span>: {a.problem}
+          {a.held_by?.[0] && (
+            <button className="btn btn-sm" disabled={!control || scanning} title={a.held_by[0].command}
+              onClick={() => { if (studio.send({ cmd: "rig_stop", pid: a.held_by![0].pid })) setScanning(true); }}>
+              Stop {a.held_by[0].name}
+            </button>
+          )}
+        </p>
       ))}
       {p && p.unplaced.map((a) => (
         <p key={a.port} className="faint t-sm">

@@ -10,6 +10,8 @@ so the robot worker and LeRobot commands can open it afterwards.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -33,6 +35,69 @@ def _short(e: BaseException) -> str:
     return text[0] if text else type(e).__name__
 
 
+@dataclass(frozen=True)
+class Holder:
+    """A process, not Studio, with an arm's serial port open."""
+
+    pid: int
+    command: str
+    paused: bool  # stopped with Ctrl-Z: it still holds the port and reads nothing
+
+    @property
+    def name(self) -> str:
+        words = self.command.split()
+        script = next((w for w in words[1:] if w.endswith(".py") or "lerobot" in w), None)
+        return Path(script or (words[0] if words else "?")).name
+
+    def public(self) -> dict[str, Any]:
+        return {"pid": self.pid, "command": self.command, "name": self.name,
+                "paused": self.paused}  # fmt: skip
+
+
+def _run(argv: list[str]) -> str:
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=5).stdout  # noqa: S603
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def port_holders(ports: Iterable[str], run: Callable[[list[str]], str] = _run,
+                 me: int | None = None) -> dict[str, list[Holder]]:
+    """Which other processes have each port open, as lsof sees it. Keys are /dev/tty.* names.
+    WHY lsof: macOS serial ports are not opened exclusively, so a second opener is not refused;
+    it silently shares the line and corrupts replies."""
+    me = os.getpid() if me is None else me
+    want: dict[str, str] = {}
+    for p in ports:
+        tty = p.replace("/dev/cu.", "/dev/tty.")
+        for dev in (tty, tty.replace("/dev/tty.", "/dev/cu.")):
+            if os.path.exists(dev):
+                want[dev] = tty
+    if not want:
+        return {}
+    pids: dict[int, set[str]] = {}
+    pid = None
+    for line in run(["lsof", "-F", "pn", *want]).splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("n") and pid is not None and line[1:] in want and pid != me:
+            pids.setdefault(pid, set()).add(want[line[1:]])
+    if not pids:
+        return {}
+    info: dict[int, tuple[str, str]] = {}
+    listed = run(["ps", "-o", "pid=,stat=,command=", "-p", ",".join(map(str, pids))])
+    for line in listed.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit():
+            info[int(parts[0])] = (parts[1], parts[2] if len(parts) > 2 else "")
+    out: dict[str, list[Holder]] = {}
+    for holder, devs in sorted(pids.items()):
+        stat, cmd = info.get(holder, ("", ""))
+        for d in sorted(devs):
+            out.setdefault(d, []).append(Holder(holder, cmd, stat.startswith("T")))
+    return out
+
+
 @dataclass
 class Found:
     """What one serial port reaches."""
@@ -48,6 +113,7 @@ class Found:
     # WHY every exact match, not just the nearest: one arm's registers can match several files
     # (phi_bi_left.json links to phi_follower.json), and only a _left/_right name tells the side.
     matches: list[str] = field(default_factory=list)
+    held_by: list[Holder] = field(default_factory=list)  # other processes with this port open
     error: str | None = None
 
     @property
@@ -59,6 +125,12 @@ class Found:
 
     @property
     def problem(self) -> str | None:
+        if self.held_by:
+            # WHY first: tonight's real fault (2026-10-05). A script paused with Ctrl-Z kept all
+            # four ports open, and LeRobot then read its leftover bytes as garbled packets.
+            h = self.held_by[0]
+            return (f"{h.name} (process {h.pid}{', paused' if h.paused else ''}) has this port "
+                    "open. Stop it, then scan again.")  # fmt: skip
         if self.error:
             return self.error
         if self.clashes:
@@ -81,6 +153,7 @@ class Found:
         return {"port": self.port, "serial": self.serial, "ids": self.ids,
                 "clashes": self.clashes, "torque": self.torque, "match": self.match,
                 "match_deg": self.match_deg, "matches": self.matches, "role": self.role,
+                "held_by": [h.public() for h in self.held_by],
                 "problem": self.problem}  # fmt: skip
 
 
@@ -141,11 +214,16 @@ def scan(
     ping: Callable[[str, Iterable[int]], tuple[list[int], list[int]]] = ping_all,
     bus_factory: Callable[[str, Calibration | None], Any] = default_bus,
     ids: Iterable[int] = SCAN_IDS,
+    holders: Callable[[list[str]], dict[str, list[Holder]]] = port_holders,
 ) -> list[Found]:
     """What each (device, serial) port reaches. Writes nothing, moves nothing."""
     library = calibration_library(cal_root)
+    held = holders([d for d, _ in ports])
     out = []
     for device, serial in ports:
+        if held.get(device):
+            out.append(Found(device, serial, [], [], held_by=held[device]))
+            continue  # WHY no ping: replies on a shared line are not to be trusted
         try:
             ok, clash = ping(device, list(ids))
         except OSError as e:

@@ -3,8 +3,9 @@
 
 export type Role = "leader" | "follower";
 export type Side = "left" | "right";
+export interface Holder { pid: number; command: string; name: string; paused: boolean }
 export interface FoundArm {
-  port: string; serial: string; ids: number[]; clashes: number[]; torque: boolean | null;
+  port: string; serial: string; ids: number[]; clashes: number[]; torque: boolean | null; held_by?: Holder[];
   match: string | null; match_deg: number | null; matches?: string[]; role: Role | null; problem: string | null;
 }
 export interface Ids { follower: string; leader: string }

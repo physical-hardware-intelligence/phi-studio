@@ -5,6 +5,8 @@ which, and write that into robot-config.yaml and the calibration folder.
                                to calibration files (detect.scan); pushes rig_scan
     cmd rig_motion  (control)  watch every healthy arm for MOTION_S while a person moves one by
                                hand; pushes rig_motion with ticks moved per port
+    cmd rig_stop    (control)  stop a process that holds an arm's port (SIGTERM, then SIGKILL),
+                               only when a fresh lsof still shows it holding one; rescans
     cmd rig_apply   (control)  rescan, check the chosen roles and sides, write any missing
                                calibration file from the arm's own registers, replace robot: and
                                teleop: in robot-config.yaml (backup first, every other line kept),
@@ -17,6 +19,8 @@ rig, or real arms disconnected) and no LeRobot command in the terminal may hold 
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -36,6 +40,47 @@ DEFAULT_IDS = {"follower": "phi_follower", "leader": "phi_leader"}
 
 class RigError(Refusal):
     """A request Studio refuses; the message is shown as is."""
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:  # a zombie is gone for our purposes: its ports are closed
+        import subprocess
+
+        st = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True,  # noqa: S603, S607
+                            text=True, timeout=5).stdout.strip()  # fmt: skip
+        return bool(st) and not st.startswith("Z")
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
+def stop_process(pid: int, wait_s: float = 2.0, kill: Any = os.kill, alive: Any = _alive,
+                 sleep: Any = time.sleep) -> bool:
+    """SIGTERM, then SIGCONT so a process paused with Ctrl-Z can act on it, then SIGKILL if it
+    is still there after `wait_s`. True when it is gone."""
+    for sig in (signal.SIGTERM, signal.SIGCONT):
+        try:
+            kill(pid, sig)
+        except ProcessLookupError:
+            return True
+    for _ in range(int(wait_s / 0.1)):
+        if not alive(pid):
+            return True
+        sleep(0.1)
+    try:
+        kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    for _ in range(10):
+        if not alive(pid):
+            return True
+        sleep(0.1)
+    return not alive(pid)
 
 
 def _section(role: str, rid: str, arms: list[dict[str, Any]]) -> str:
@@ -178,6 +223,24 @@ class RigApi:
         client.push({"type": "rig_scan", "arms": [f.public() for f in found],
                      "config": self._config_view(), "at": time.time()})  # fmt: skip
 
+    async def stop_holder(self, client: Client, msg: dict[str, Any]) -> None:
+        pid = msg.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+            raise RigError("Which process? Scan again and use its Stop button.")
+        async with self.lock:
+            ports = [d for d, _ in await asyncio.to_thread(detect.serial_ports)]
+            held = await asyncio.to_thread(detect.port_holders, ports)
+            if not any(h.pid == pid for hs in held.values() for h in hs):
+                # WHY re-check: the pid comes from the page and may be stale or reused; Studio
+                # stops only a process that holds an arm's port right now.
+                raise RigError(f"Process {pid} no longer holds an arm's port.", "Scan again.")
+            gone = await asyncio.to_thread(stop_process, pid)
+            if not gone:
+                raise RigError(f"Process {pid} did not stop.", f"Run kill -9 {pid} in a terminal.")
+            found = await self._scan()
+        client.push({"type": "rig_scan", "arms": [f.public() for f in found],
+                     "config": self._config_view(), "at": time.time()})  # fmt: skip
+
     async def motion(self, client: Client, msg: dict[str, Any]) -> None:
         async with self.lock:
             await self._may_open_ports()
@@ -282,4 +345,5 @@ def register(studio: Studio) -> None:
     # WHY control for a read-only scan too: it opens the ports, and only one window may.
     studio.handle("rig_scan", api.scan, control=True)
     studio.handle("rig_motion", api.motion, control=True)
+    studio.handle("rig_stop", api.stop_holder, control=True)
     studio.handle("rig_apply", api.apply, control=True)
