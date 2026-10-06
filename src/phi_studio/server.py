@@ -52,6 +52,7 @@ Handler = Callable[["Client", dict[str, Any]], Awaitable[None]]
 # feature can land on its own.
 FEATURES = (
     "setup_api", "hub_api", "train_api", "scene_api", "recon_api", "data_api", "onboard_api",
+    "rig_api",
 )
 
 COMMANDS = {"heartbeat", "connect", "identify", "confirm", "arm", "start", "stop", "resume",

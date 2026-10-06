@@ -1,0 +1,276 @@
+"""Set up's Detect arms step, server side: find the real arms plugged into this Mac, tell which is
+which, and write that into robot-config.yaml and the calibration folder.
+
+    cmd rig_scan    (control)  ping every USB serial board, read each arm's registers, match them
+                               to calibration files (detect.scan); pushes rig_scan
+    cmd rig_motion  (control)  watch every healthy arm for MOTION_S while a person moves one by
+                               hand; pushes rig_motion with ticks moved per port
+    cmd rig_apply   (control)  rescan, check the chosen roles and sides, write any missing
+                               calibration file from the arm's own registers, replace robot: and
+                               teleop: in robot-config.yaml (backup first, every other line kept),
+                               then switch the worker to the real arms; pushes rig_applied
+
+Scanning opens each port read-only, so it runs only when no worker holds the real arms (the mock
+rig, or real arms disconnected) and no LeRobot command in the terminal may hold a port.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from phi_studio import configedit, detect, rigspec
+from phi_studio.errors import Refusal
+from phi_studio.identity import Calibration, load_calibration, save_calibration
+from phi_studio.onboard_api import HOLDING_STATES, STEP_LIMIT, config_target
+from phi_studio.setup_api import BACKUPS, data_dir, lerobot_busy
+
+if TYPE_CHECKING:
+    from phi_studio.server import Client, Studio
+
+MOTION_S = 3.0
+DEFAULT_IDS = {"follower": "phi_follower", "leader": "phi_leader"}
+
+
+class RigError(Refusal):
+    """A request Studio refuses; the message is shown as is."""
+
+
+def _section(role: str, rid: str, arms: list[dict[str, Any]]) -> str:
+    """The robot: or teleop: section for these arms, in LeRobot 0.6.0's own keys."""
+    name = "robot" if role == "follower" else "teleop"
+    bi = len(arms) == 2
+    typ = ("bi_so_follower" if bi else "so101_follower") if role == "follower" else (
+        "bi_so_leader" if bi else "so101_leader")
+    out = [f"{name}:  # written by Studio's Detect arms, {time.strftime('%Y-%m-%d')}",
+           f"  type: {typ}", f"  id: {rid}"]  # fmt: skip
+    # WHY the step limit on followers only: a bi_so_leader takes no per-arm options (rigspec), and
+    # the limit is what stops a follower jumping to a leader that disagrees with it.
+    step = [f"max_relative_target: {STEP_LIMIT}"] if role == "follower" else []
+    if bi:
+        for a in sorted(arms, key=lambda a: a["side"]):
+            out += [f"  {a['side']}_arm_config:", f"    port: {a['port']}"]
+            out += [f"    {s}" for s in step]
+    else:
+        out.append(f"  port: {arms[0]['port']}")
+        out += [f"  {s}" for s in step]
+    return "\n".join(out) + "\n"
+
+
+def check_assignment(arms: Any, found: dict[str, detect.Found]) -> list[dict[str, Any]]:
+    """The arms to write, each {port, role, side}: one leader and one follower, or two of each
+    with one left and one right. Raises RigError naming what is wrong."""
+    if not isinstance(arms, list) or not arms:
+        raise RigError("Choose a role for each arm first.")
+    out = []
+    for a in arms:
+        if not isinstance(a, dict) or a.get("role") not in ("leader", "follower"):
+            raise RigError("Each arm needs a role: leader or follower.")
+        port = a.get("port")
+        f = found.get(port) if isinstance(port, str) else None
+        if f is None:
+            raise RigError(f"{port} is not an arm Studio found. Scan again.")
+        if f.problem:
+            raise RigError(f"The arm on {port} cannot be used yet: {f.problem}")
+        side = a.get("side")
+        if side not in (None, *rigspec.SIDES):
+            raise RigError(f"{side!r} is not a side; use left or right.")
+        out.append({"port": port, "role": a["role"], "side": side})
+    if len({a["port"] for a in out}) != len(out):
+        raise RigError("The same port is chosen twice.")
+    by = {r: [a for a in out if a["role"] == r] for r in ("leader", "follower")}
+    n = len(by["leader"])
+    if n != len(by["follower"]) or n not in (1, 2):
+        raise RigError("Studio drives one leader with one follower, or two of each. These are "
+                       f"{len(by['leader'])} leaders and {len(by['follower'])} "
+                       "followers.")  # fmt: skip
+    for role, group in by.items():
+        sides = sorted(str(a["side"]) for a in group)
+        if n == 2 and sides != ["left", "right"]:
+            raise RigError(f"With two pairs, one {role} must be left and one right.")
+        if n == 1:
+            group[0]["side"] = None
+    return out
+
+
+def existing_id(role: str, arms: list[dict[str, Any]], found: dict[str, detect.Found],
+                library: dict[str, Calibration],
+                prefer: str | None = None) -> str | None:  # fmt: skip
+    """An id whose files already hold these exact arms (<id>.json, or <id>_left/_right.json for a
+    pair), so applying keeps the files LeRobot commands already use. WHY: an arm can match more
+    than one file (a symlink, an old copy); only an id that fits every arm of the role is safe."""
+    kind, folder = rigspec.FOLDER[role]
+    prefix = f"{kind}/{folder}/"
+    names = {k[len(prefix):] for k in library if k.startswith(prefix)}
+    group = [a for a in arms if a["role"] == role]
+    ok = []
+    for name in sorted(names):
+        base = name
+        if group[0]["side"]:
+            if not name.endswith(f"_{group[0]['side']}"):
+                continue
+            base = name[: -len(group[0]["side"]) - 1]
+        if all(library.get(prefix + (f"{base}_{a['side']}" if a["side"] else base))
+               == found[a["port"]].registers for a in group):  # fmt: skip
+            ok.append(base)
+    if prefer in ok:
+        return prefer
+    return ok[0] if ok else None
+
+
+class RigApi:
+    def __init__(self, studio: Studio) -> None:
+        self.studio = studio
+        self.lock = asyncio.Lock()  # one scan, motion watch or apply at a time
+        self.found: dict[str, detect.Found] = {}
+
+    @property
+    def cal_root(self) -> Path:
+        from phi_studio.files import lerobot_calibration_dir
+
+        return Path(self.studio.spec.get("cal_root") or lerobot_calibration_dir())
+
+    async def _may_open_ports(self) -> None:
+        state = (self.studio.last.get("state") or {}).get("state")
+        if self.studio.spec.get("kind") != "mock" and state not in (None, "DISCONNECTED"):
+            raise RigError("The real arms are connected, so Studio's robot worker holds their "
+                           "ports.", "Disconnect the rig first.")  # fmt: skip
+        busy = await lerobot_busy(self.studio)
+        if busy:
+            raise RigError(f"The terminal is running {busy}, which may hold the arms' ports.",
+                           "Stop it first.")  # fmt: skip
+
+    def _config_view(self) -> dict[str, Any]:
+        """Which port robot-config.yaml gives which arm now, so the page can start from it."""
+        ids = dict(DEFAULT_IDS)
+        try:
+            spec = rigspec.parse(config_target(self.studio).read_text())
+        except (Refusal, OSError, ValueError):
+            return {"arms": [], "ids": ids}
+        for role, sec in (("follower", spec.robot), ("leader", spec.teleop)):
+            if isinstance(sec.get("id"), str) and sec["id"]:
+                ids[role] = sec["id"]
+        return {"arms": [{"key": a.key, "role": a.role, "side": a.side, "port": a.port}
+                         for a in spec.arms], "ids": ids}  # fmt: skip
+
+    async def _scan(self) -> list[detect.Found]:
+        ports = await asyncio.to_thread(detect.serial_ports)
+        found = await asyncio.to_thread(detect.scan, ports, self.cal_root)
+        self.found = {f.port: f for f in found}
+        return found
+
+    async def scan(self, client: Client, msg: dict[str, Any]) -> None:
+        async with self.lock:
+            await self._may_open_ports()
+            found = await self._scan()
+        client.push({"type": "rig_scan", "arms": [f.public() for f in found],
+                     "config": self._config_view(), "at": time.time()})  # fmt: skip
+
+    async def motion(self, client: Client, msg: dict[str, Any]) -> None:
+        async with self.lock:
+            await self._may_open_ports()
+            healthy = [f for f in self.found.values() if f.problem is None]
+            if not healthy:
+                raise RigError("Scan for arms first.")
+            client.push({"type": "rig_motion", "watching": True, "seconds": MOTION_S})
+            try:
+                moved = await asyncio.to_thread(detect.watch_motion, healthy, MOTION_S)
+            finally:
+                client.push({"type": "rig_motion", "watching": False})
+        client.push({"type": "rig_motion", "watching": False, "moved": moved, "at": time.time()})
+
+    async def apply(self, client: Client, msg: dict[str, Any]) -> None:
+        async with self.lock:
+            state = (self.studio.last.get("state") or {}).get("state", "DISCONNECTED")
+            if state in HOLDING_STATES:
+                raise RigError("An arm may be holding torque.", "Release torque, then disconnect.")
+            await self._may_open_ports()
+            await self._scan()  # the registers as they are now, not at the first scan
+            arms = check_assignment(msg.get("arms"), self.found)
+            library = await asyncio.to_thread(detect.calibration_library, self.cal_root)
+            ids = self._config_view()["ids"]
+            for role in ("follower", "leader"):
+                v = msg.get("ids", {}).get(role) if isinstance(msg.get("ids"), dict) else None
+                if isinstance(v, str) and v.strip():
+                    ids[role] = v.strip()
+                else:
+                    ids[role] = existing_id(role, arms, self.found, library,
+                                            prefer=ids[role]) or ids[role]  # fmt: skip
+            for v in ids.values():
+                if not v or not all(c.isalnum() or c in "_-" for c in v):
+                    raise RigError(f"{v!r} is not a usable id: letters, digits, _ and - only.")
+            # WHY the same id may serve both roles: the files live in different folders
+            # (robots/so_follower and teleoperators/so_leader), so they never collide.
+            files = await asyncio.to_thread(self._write_calibrations, arms, ids)
+            path = config_target(self.studio)
+            sections = {
+                "robot": _section("follower", ids["follower"],
+                                  [a for a in arms if a["role"] == "follower"]),
+                "teleop": _section("leader", ids["leader"],
+                                   [a for a in arms if a["role"] == "leader"]),
+            }  # fmt: skip
+            async with self.studio.config_lock:
+                backup = await asyncio.to_thread(self._write_config, path, sections)
+            if state != "DISCONNECTED":
+                self.studio.to_worker({"cmd": "disconnect"})
+                await asyncio.sleep(0.3)
+            await asyncio.to_thread(self.studio.switch_rig, {"kind": "lerobot",
+                                                             "config": str(path)})  # fmt: skip
+        n = len(arms) // 2
+        what = "bimanual" if n == 2 else "single-arm"
+        note = f"Detect arms wrote a {what} rig to {path.name}"
+        self.studio._note("state", note + (f"; backup {backup}" if backup else ""))
+        client.push({"type": "rig_applied", "backup": str(backup) if backup else None,
+                     "files": files, "bimanual": n == 2, "ids": ids, "config": str(path),
+                     "at": time.time()})  # fmt: skip
+        try:
+            self.studio._fanout({"type": "files", **self.studio.files.index()})
+        except Exception:
+            pass
+
+    def _write_config(self, path: Path, sections: dict[str, str]) -> Path | None:
+        if not path.is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("".join(sections.values()))
+            return None
+        return configedit.replace_sections(path, sections, data_dir(self.studio) / BACKUPS)
+
+    def _write_calibrations(self, arms: list[dict[str, Any]],
+                            ids: dict[str, str]) -> list[dict[str, Any]]:  # fmt: skip
+        """Each arm's file, from the registers it holds now. WHY its own registers and never
+        another arm's file: homing offsets record where each servo's magnet sat when that arm was
+        calibrated, so they differ arm to arm. Copying a file onto another arm drove it into its
+        stops on 2026-10-05."""
+        out = []
+        for a in arms:
+            f = self.found[a["port"]]
+            assert f.registers is not None  # check_assignment refused arms with a problem
+            kind, folder = rigspec.FOLDER[a["role"]]
+            rid = ids[a["role"]] + (f"_{a['side']}" if a["side"] else "")
+            target = self.cal_root / kind / folder / f"{rid}.json"
+            if target.is_file():
+                try:
+                    same = load_calibration(target) == f.registers
+                except (ValueError, KeyError, TypeError):
+                    same = False
+                if same:
+                    out.append({"port": a["port"], "file": str(target), "action": "unchanged"})
+                    continue
+            if target.is_symlink():
+                target.unlink()  # replace the link itself, never the file it points at
+            kept = save_calibration(f.registers, target, backup=True)
+            out.append({"port": a["port"], "file": str(target),
+                        "action": "replaced" if kept else "written", "from": f.match,
+                        "backup": str(kept) if kept else None})  # fmt: skip
+        return out
+
+
+def register(studio: Studio) -> None:
+    api = RigApi(studio)
+    studio.rig_api = api  # type: ignore[attr-defined]
+    # WHY control for a read-only scan too: it opens the ports, and only one window may.
+    studio.handle("rig_scan", api.scan, control=True)
+    studio.handle("rig_motion", api.motion, control=True)
+    studio.handle("rig_apply", api.apply, control=True)

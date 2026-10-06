@@ -267,3 +267,74 @@ def camera_source_path(cam: CameraSpec, spec: RigSpec) -> KeyPath:
     if isinstance(on_robot, dict) and any(isinstance(v, dict) for v in on_robot.values()):
         return ("robot", "cameras", cam.key, field)
     return ("cameras", cam.key, field)
+
+
+def replace_sections(path: Path, sections: Mapping[str, str], backup_dir: Path) -> Path:
+    """Replace whole top-level sections (`robot:`, `teleop:`) of robot-config.yaml with new YAML
+    text, keeping every other line. A section that is missing is added at the end. WHY not
+    set_values: going from one arm to two changes a section's shape (port becomes
+    left_arm_config.port), which a single-value edit cannot do. Returns the backup of the original;
+    the same order as write_values: check in memory, back up, replace atomically."""
+    path = path.resolve()
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ConfigEditError(f"{path.name} is not UTF-8 text, so Studio cannot edit it.") from e
+    try:
+        before = yaml.safe_load(text) or {}
+        root = yaml.compose(text)
+    except yaml.YAMLError as e:
+        raise ConfigEditError(f"robot-config.yaml is not valid YAML: {e}") from e
+    if not isinstance(root, yaml.MappingNode) or root.flow_style or not isinstance(before, dict):
+        raise ConfigEditError("robot-config.yaml is not a block mapping of sections, so Studio "
+                              "cannot edit it.")  # fmt: skip
+    lines = text.splitlines(keepends=True)
+    starts = [k.start_mark.line for k, _ in root.value]  # each top-level key's line
+    spans: dict[str, tuple[int, int]] = {}
+    for i, (k, _) in enumerate(root.value):
+        if isinstance(k, yaml.ScalarNode) and k.value in sections:
+            if k.start_mark.column != 0:
+                raise ConfigEditError(f"{k.value}: is indented; Studio edits top-level "
+                                      "sections only.")
+            end = starts[i + 1] if i + 1 < len(starts) else len(lines)
+            # WHY stop before comments that sit right above the next key: they describe that key.
+            while end - 1 > k.start_mark.line and (not lines[end - 1].strip()
+                                                    or lines[end - 1].lstrip().startswith("#")):
+                end -= 1
+            spans[k.value] = (k.start_mark.line, end)
+    out = list(lines)
+    for name, (a, b) in sorted(spans.items(), key=lambda kv: -kv[1][0]):
+        out[a:b] = [sections[name].rstrip("\n") + "\n"]
+    new = "".join(out)
+    for name in sections:
+        if name not in spans:
+            new = new.rstrip("\n") + "\n" + sections[name].rstrip("\n") + "\n"
+    try:
+        after = yaml.safe_load(new) or {}
+    except yaml.YAMLError as e:
+        raise ConfigEditError(f"Studio's edit did not parse ({e}), so robot-config.yaml was left "
+                              "as it was.") from e  # fmt: skip
+    kept = {k: v for k, v in before.items() if k not in sections}
+    if {k: v for k, v in after.items() if k not in sections} != kept:
+        raise ConfigEditError("Studio's edit changed other sections of robot-config.yaml, so the "
+                              "file was left as it was.")  # fmt: skip
+    for name, body in sections.items():
+        if after.get(name) != (yaml.safe_load(body) or {}).get(name):
+            raise ConfigEditError(f"Studio's {name}: section did not read back as written, so "
+                                  "robot-config.yaml was left as it was.")  # fmt: skip
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / f"{path.name}.{datetime.now():%Y%m%d-%H%M%S-%f}.bak"
+    backup.write_bytes(raw)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(new.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return backup

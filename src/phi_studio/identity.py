@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -46,13 +48,19 @@ def load_calibration(src: Path | str | dict[str, Any]) -> Calibration:
     return {joint: JointCal(**{f: int(v[f]) for f in JointCal._fields}) for joint, v in raw.items()}
 
 
-def save_calibration(cal: Calibration, path: Path) -> None:
+def save_calibration(cal: Calibration, path: Path, backup: bool = False) -> Path | None:
     """Write `cal` as a LeRobot calibration JSON, the shape `load_calibration` reads. Atomic: a
-    crash mid-write leaves the previous file whole."""
+    crash mid-write leaves the previous file whole. With `backup`, an existing file is first copied
+    to <name>.json.bak-<time>, and that path is returned."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    kept = None
+    if backup and path.is_file():
+        kept = path.with_name(f"{path.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+        shutil.copy2(path, kept)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps({j: c._asdict() for j, c in cal.items()}, indent=4))
     os.replace(tmp, path)
+    return kept
 
 
 @dataclass(frozen=True)
