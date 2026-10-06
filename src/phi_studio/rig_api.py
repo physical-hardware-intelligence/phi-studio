@@ -35,6 +35,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import yaml
+
 from phi_studio import configedit, detect, rigspec
 from phi_studio.errors import Refusal
 from phi_studio.identity import (
@@ -78,26 +80,28 @@ def _alive(pid: int) -> bool:
 
 def stop_process(pid: int, wait_s: float = 2.0, kill: Any = os.kill, alive: Any = _alive,
                  sleep: Any = time.sleep) -> bool:
-    """SIGTERM, then SIGCONT so a process paused with Ctrl-Z can act on it, then SIGKILL if it
-    is still there after `wait_s`. True when it is gone."""
-    for sig in (signal.SIGTERM, signal.SIGCONT):
+    """SIGINT (with SIGCONT, so a process paused with Ctrl-Z can act on it), then SIGTERM, then
+    SIGKILL, each after `wait_s` if it is still there. True when it is gone. WHY SIGINT first:
+    lerobot-teleoperate turns torque off only on KeyboardInterrupt (lerobot_teleoperate.py
+    274-280); SIGTERM ends it with the follower still powered."""
+
+    def gone_within(s: float) -> bool:
+        for _ in range(max(1, int(s / 0.1))):
+            if not alive(pid):
+                return True
+            sleep(0.1)
+        return not alive(pid)
+
+    for sigs, wait in (((signal.SIGINT, signal.SIGCONT), wait_s), ((signal.SIGTERM,), wait_s),
+                       ((signal.SIGKILL,), 1.0)):  # fmt: skip
         try:
-            kill(pid, sig)
+            for sig in sigs:
+                kill(pid, sig)
         except ProcessLookupError:
             return True
-    for _ in range(int(wait_s / 0.1)):
-        if not alive(pid):
+        if gone_within(wait):
             return True
-        sleep(0.1)
-    try:
-        kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return True
-    for _ in range(10):
-        if not alive(pid):
-            return True
-        sleep(0.1)
-    return not alive(pid)
+    return False
 
 
 def _section(role: str, rid: str, arms: list[dict[str, Any]]) -> str:
@@ -255,7 +259,10 @@ class RigApi:
             raise RigError("Which process? Scan again and use its Stop button.")
         async with self.lock:
             ports = [d for d, _ in await asyncio.to_thread(detect.serial_ports)]
-            held = await asyncio.to_thread(self._holders, ports)
+            try:
+                held = await asyncio.to_thread(self._holders, ports)
+            except OSError as e:
+                raise RigError(f"Could not check which processes hold the ports: {e}") from e
             if pid in self._ours() or not any(h.pid == pid for hs in held.values() for h in hs):
                 # WHY re-check: the pid comes from the page and may be stale or reused; Studio
                 # stops only a process that holds an arm's port right now.
@@ -276,6 +283,14 @@ class RigApi:
                 raise RigError("Scan for arms first, then check one of them.")
             if f.problem:
                 raise RigError(f"Fix this arm first: {f.problem}")
+            try:  # WHY again: the scan may be minutes old, and a powered motor on a shared line
+                held = await asyncio.to_thread(self._holders, [f.port])  # corrupts both
+            except OSError as e:
+                raise RigError(f"Could not check which processes hold {f.port}: {e}") from e
+            if held.get(f.port):
+                h = held[f.port][0]
+                raise RigError(f"{h.name} (process {h.pid}) has {f.port} open now.",
+                               "Stop it, then scan again.")  # fmt: skip
             loop = asyncio.get_running_loop()
             push = client.push
 
@@ -310,6 +325,20 @@ class RigApi:
         client.push({"type": "rig_motion", "watching": False, "moved": moved, "at": time.time()})
 
     # -- calibration in the terminal, one arm at a time -------------------------------------------
+    def _others(self, arm: rigspec.ArmSpec) -> dict[str, str]:
+        """The rig's other arms by their calibration file, as kind/folder/id (detect.scan's
+        names), so a port holding another arm's registers is caught."""
+        out = {}
+        try:
+            spec = rigspec.parse(config_target(self.studio).read_text())
+        except (OSError, ValueError, Refusal, yaml.YAMLError):
+            return {}
+        for b in spec.arms:
+            if b.key != arm.key and b.lerobot_id:
+                kind, folder = rigspec.FOLDER[b.role]
+                out[f"{kind}/{folder}/{b.lerobot_id}"] = b.key
+        return out
+
     def _arm(self, msg: dict[str, Any]) -> tuple[rigspec.ArmSpec, Path]:
         """The arm `msg["arm"]` names in robot-config.yaml, and its calibration file."""
         try:
@@ -340,6 +369,17 @@ class RigApi:
         if f.registers is None:
             out["problem"] = out["problem"] or "Could not read its calibration registers."
             return out
+        others = self._others(arm)
+        kind, folder = rigspec.FOLDER[arm.role]
+        own = f"{kind}/{folder}/{arm.lerobot_id}"
+        # WHY not when it matches its own file too: one file can be a copy of another
+        swap = None if own in f.matches else next((m for m in f.matches if m in others), None)
+        if swap is not None and not out["problem"]:
+            # WHY a problem, not a difference: saving would write that arm's calibration into
+            # this arm's file, and the next Identify would call the swap correct.
+            other = others[swap].replace("_", " ")
+            out["problem"] = (f"These motors hold the {other}'s calibration ({swap.split('/')[-1]}"
+                              f".json) exactly: are the {other}'s and this arm's cables swapped?")
         out["unfinished"] = unfinished(f.registers)
         if out["file"]:
             try:
@@ -372,8 +412,10 @@ class RigApi:
         arm, path = self._arm(msg)
         async with self.lock:
             f = await self._read_arm(arm)
-            if f.problem or f.registers is None:
-                raise RigError(f"Did not save: {f.problem or 'its registers could not be read'}")
+            v = self._verdict(arm, path, f)
+            if v["problem"]:
+                raise RigError(f"Did not save: {v['problem']}")
+            assert f.registers is not None  # else _verdict names a problem
             why = unfinished(f.registers)
             if why:
                 raise RigError(f"Did not save: {why}.", "Calibrate this arm again.")

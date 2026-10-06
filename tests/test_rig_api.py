@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 import yaml
 
-from phi_studio import configedit, rigspec
+from phi_studio import configedit, detect, rigspec
 from phi_studio.detect import Found, calibration_library
 from phi_studio.identity import JointCal, load_calibration
 from phi_studio.rig import JOINTS
@@ -196,11 +196,11 @@ def test_stop_process_terms_then_continues_a_paused_one_and_kills_if_needed() ->
 
     never_dies = {"alive": lambda p: state["alive"], "sleep": lambda s: None}
     assert stop_process(5, wait_s=0.3, kill=kill, **never_dies)
-    assert sent == [signal.SIGTERM, signal.SIGCONT, signal.SIGKILL]
-    sent.clear()  # a process that obeys SIGTERM is never sent SIGKILL
+    assert sent == [signal.SIGINT, signal.SIGCONT, signal.SIGTERM, signal.SIGKILL]
+    sent.clear()  # a process that obeys Ctrl-C (LeRobot's torque-off path) gets nothing else
     assert stop_process(5, kill=lambda p, s: sent.append(s), alive=lambda p: False,
                         sleep=lambda s: None)  # fmt: skip
-    assert sent == [signal.SIGTERM, signal.SIGCONT]
+    assert sent == [signal.SIGINT, signal.SIGCONT]
 
 
 def test_registers_a_calibration_run_never_finished_are_named() -> None:
@@ -296,3 +296,60 @@ def test_verify_refuses_while_studio_holds_the_arms(tmp_path: Path, monkeypatch:
     api.studio.last = {"state": {"state": "IDENTIFIED"}}  # type: ignore[attr-defined]
     with pytest.raises(RigError, match="worker holds their ports"):
         asyncio.run(api.cal_verify(_Client(), {"arm": "left_follower"}))  # type: ignore[arg-type]
+
+
+def _holding(monkeypatch: Any, matches: list[str]) -> None:
+    import phi_studio.rig_api as R
+
+    monkeypatch.setattr(R.detect, "scan", lambda ports, root, holders=None: [
+        Found(ports[0][0], "SN", [1, 2, 3, 4, 5, 6], [], registers=cal(1), matches=matches)])
+
+
+def test_save_from_motors_refuses_motors_that_hold_another_arms_calibration(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    import asyncio
+
+    api = _cal_api(tmp_path, monkeypatch, cal(1))
+    _holding(monkeypatch, ["teleoperators/so_leader/phi_bi_left"])  # the left leader's file
+    path = tmp_path / "cal/robots/so_follower/phi_bi_left.json"
+    with pytest.raises(RigError, match="cables swapped"):
+        asyncio.run(api.cal_from_motors(_Client(), {"arm": "left_follower"}))  # type: ignore[arg-type]
+    assert not path.exists()
+
+
+def test_a_copy_of_its_own_file_is_not_called_a_swap(tmp_path: Path, monkeypatch: Any) -> None:
+    import asyncio
+
+    api = _cal_api(tmp_path, monkeypatch, cal(1))
+    _holding(monkeypatch, ["robots/so_follower/phi_bi_left", "robots/so_follower/phi_bi_right"])
+    c = _Client()
+    asyncio.run(api.cal_verify(c, {"arm": "left_follower"}))  # type: ignore[arg-type]
+    assert c.pushed[-1]["problem"] is None
+
+
+@pytest.mark.parametrize("holders, why", [
+    (lambda ports: {ports[0]: [detect.Holder(4242, "python roll_live.py", True)]}, "4242"),
+    (lambda ports: (_ for _ in ()).throw(OSError("lsof failed")), "Could not check"),
+])  # fmt: skip
+def test_motor_check_looks_again_for_a_holder_before_powering(
+    monkeypatch: Any, holders: Any, why: str
+) -> None:
+    import asyncio
+
+    import phi_studio.rig_api as R
+
+    async def idle(studio: Any) -> None:
+        return None
+
+    monkeypatch.setattr(R, "lerobot_busy", idle)
+    powered: list[str] = []
+    monkeypatch.setattr(R.detect, "check_arm", lambda port, s, **kw: powered.append(port))
+    api = RigApi(_Studio())  # type: ignore[arg-type]
+    api.studio.spec = {"kind": "lerobot"}
+    api.studio.last = {}  # type: ignore[attr-defined]
+    api.found = dict(FOUR)  # the scan saw no holder; one appeared since
+    api._holders = holders  # type: ignore[method-assign]
+    with pytest.raises(RigError, match=why):
+        asyncio.run(api.check(_Client(), {"port": "/dev/tty.a"}))  # type: ignore[arg-type]
+    assert not powered

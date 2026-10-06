@@ -347,6 +347,7 @@ class FeetechArm:
 
     def close(self) -> None:
         self._drop()
+        self._next_try = 0.0  # WHY: a Connect right after Disconnect must try, not report silence
 
 
 @dataclass
@@ -371,8 +372,11 @@ class HardwareRig:
         return self.calibration_files()
 
     def calibration_files(self) -> dict[str, Calibration]:
-        """Every calibration file under LeRobot's folder, by id: identity matches an arm's registers
-        against all of them, so an arm on another arm's cable is caught (worker.py _identify)."""
+        """Every calibration file under LeRobot's folder, keyed kind/folder/id: identity matches an
+        arm's registers against all of them, so an arm on another arm's cable is caught (worker.py
+        _identify). WHY by path: robots/so_follower/phi_bi_left.json and
+        teleoperators/so_leader/phi_bi_left.json both exist on one Mac, and by id one hid the
+        other, which hid a leader/follower swap."""
         out: dict[str, Calibration] = {}
         for kind, folder in rigspec.FOLDER.values():
             d = self.cal_root / kind / folder
@@ -382,7 +386,7 @@ class HardwareRig:
                 if p.name.startswith("._"):
                     continue
                 try:
-                    out[p.stem] = load_calibration(p)
+                    out[f"{kind}/{folder}/{p.stem}"] = load_calibration(p)
                 except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
                     continue  # a broken file matches nothing; Checks reports it
         return out

@@ -151,6 +151,13 @@ def calibration_file(a: ArmBus) -> str:
     return f"{kind}/{folder}/{a.calibration_id}.json"
 
 
+def _own_key(a: ArmBus, cals: dict[str, Calibration]) -> str:
+    """The arm's own entry among `cals`: kind/folder/id for a real rig, whose files are keyed by
+    path (hardware.py calibration_files), else its id (the mock, tests)."""
+    path = calibration_file(a).removesuffix(".json")
+    return path if path in cals else a.calibration_id
+
+
 def _calibrated(a: ArmBus) -> bool:
     """False for a real arm with no calibration file: it has no degrees to read (hardware.py
     read_positions), so the loop skips it instead of faulting the whole rig. Mock arms always
@@ -271,6 +278,13 @@ class RigWorker:
     def _cmd_identify(self, msg: dict[str, Any]) -> None:
         if self.cal is not None or self.autos:
             self.error("Finish or cancel the calibration first.")
+            return
+        if self.session.state not in (State.IDENTIFIED, State.READY):
+            # WHY before any read: reading reopens a released port (and would swap a moving
+            # follower's calibration); the session refused the state change only afterwards.
+            self.error("Read the arms again once connected, with torque off.",
+                       "Connect first." if self.session.state is State.DISCONNECTED
+                       else "Turn torque off first.")  # fmt: skip
             return
         self._identify()
 
@@ -583,7 +597,7 @@ class RigWorker:
                        "Support the arm, then use Torque off.")  # fmt: skip
             return
         mine = next((x for x in self.identity if x["name"] == a.name), None)
-        if mine and mine["exact"] and mine["match"] != a.calibration_id:
+        if mine and mine["exact"] and not mine["ok"]:
             self.error(f"{label(a.name)} holds the calibration in {mine['match']}.json: are the "
                        "cables swapped?",
                        f"Fix the cables first. Calibrating now would write {label(a.name)}'s "
@@ -613,7 +627,7 @@ class RigWorker:
             return
         for a in arms:
             mine = next((x for x in self.identity if x["name"] == a.name), None)
-            if mine and mine["exact"] and mine["match"] != a.calibration_id:
+            if mine and mine["exact"] and not mine["ok"]:
                 self.error(f"{label(a.name)} holds the calibration in {mine['match']}.json: are "
                            "the cables swapped?", "Fix the cables first.")  # fmt: skip
                 return
@@ -814,7 +828,7 @@ class RigWorker:
         """Write a finished calibration to the servos and its file, and say so."""
         assert c.new is not None
         c.arm.write_calibration(c.new)
-        self.calibrations[c.arm.calibration_id] = c.new
+        self.calibrations[_own_key(c.arm, self.calibrations)] = c.new
         path = None
         if self.cal_dir is not None:
             # WHY the arm's own file first: Identify re-reads that one (hardware.py
@@ -904,7 +918,11 @@ class RigWorker:
         self._rec_end()
         self._cal_abort()
         self._autocal_abort()
-        self._release_all()
+        silent = self._release_all()
+        if silent:  # WHY say so: the state goes to DISCONNECTED, and that arm may stay powered
+            self.error(f"{labels(silent)} did not confirm torque off.",
+                       "Support the arm and switch its power off, or Connect again and use "
+                       "Torque off.")  # fmt: skip
         # WHY keep the run: Disconnect is how the scene gets reset, and an ended eval episode must
         # stay judgeable after it. Dropping the run lost it from the eval record with no message.
         if self.run is not None and self.run.running:
@@ -969,16 +987,12 @@ class RigWorker:
                             "error": str(e), "ok": False})  # fmt: skip
                 continue
             self.dead.discard(a.name)
-            cals = dict(self.calibrations)
-            own = getattr(a, "calibration", None)
-            if own is not None:
-                # WHY: files are keyed by name alone, so a leader's phi_bi_left.json hid the
-                # follower's phi_bi_left.json; the arm's own file comes from its own folder.
-                cals[a.calibration_id] = own
+            cals = self.calibrations
+            own = _own_key(a, cals)
             ranked = match_fingerprint(regs, cals) if cals else []
             # WHY prefer its own among exact matches: phi_follower.json can be a copy of
             # phi_bi_left.json, and a tie must not read as swapped cables.
-            best = next((m for m in ranked if m.distance.exact and m.name == a.calibration_id),
+            best = next((m for m in ranked if m.distance.exact and m.name == own),
                         ranked[0] if ranked else None)  # fmt: skip
             exact = bool(best and best.distance.exact)
             out.append({
@@ -992,13 +1006,15 @@ class RigWorker:
                 "worst_joint": best.distance.worst_joint if best else None,
                 "exact": exact,
                 "calibrated": _calibrated(a),
-                "ok": exact and best is not None and best.name == a.calibration_id,
+                "ok": exact and best is not None and best.name == own,
             })  # fmt: skip
         self.identity = out
         self.send({"type": "identity", "arms": out})  # before the state, so the UI has the matches
         self.session.identified()
 
     def _set_torque(self, a: ArmBus, on: bool) -> None:
+        if on:  # WHY before the write: one that fails halfway leaves some motors powered, and
+            self.torque[a.name] = True  # Freeze and Torque off skip an arm marked off
         a.set_torque(on)
         self.torque[a.name] = on
 
@@ -1048,11 +1064,15 @@ class RigWorker:
         """Per joint, the largest step one tick may take: Studio's own, or robot-config.yaml's
         max_relative_target where that is stricter. WHY never looser: Studio's step is per 30 Hz
         tick, LeRobot's per 60 fps step, so a config value is already twice as fast here."""
+        def ok(x: Any) -> bool:  # WHY > 0: a negative limit made every step +2 deg toward the stops
+            return isinstance(x, (int, float)) and not isinstance(x, bool) and 0 < x < float("inf")
+
         cfg = getattr(arm, "max_step", None)
-        if isinstance(cfg, (int, float)) and not isinstance(cfg, bool):
+        if isinstance(cfg, (int, float)) and ok(cfg):
             return {j: min(v, float(cfg)) for j, v in self.max_step.items()}
         if isinstance(cfg, dict):
-            return {j: min(v, float(cfg.get(j, v))) for j, v in self.max_step.items()}
+            return {j: min(v, float(cfg[j])) if ok(cfg.get(j)) else v
+                    for j, v in self.max_step.items()}  # fmt: skip
         return self.max_step
 
     def _clip(self, goal: dict[str, float], present: dict[str, float],

@@ -650,3 +650,130 @@ def test_a_terminal_command_that_opens_a_port_is_recognised() -> None:
     assert _touches_arms("lerobot-calibrate --robot.type=so101_follower --robot.port=/dev/tty.x")
     assert _touches_arms("python health_check/roll_live.py /dev/cu.usbmodem1")
     assert not _touches_arms("ls -la") and not _touches_arms("hf auth login")
+
+
+class _Term:
+    def __init__(self, cmd: str) -> None:
+        self.cmd, self.stopped = cmd, 0
+
+    def running(self) -> dict[str, Any]:
+        return {"command": self.cmd}
+
+    def interrupt(self) -> None:
+        self.stopped += 1
+
+
+class _Sock:
+    closed = False
+
+    def __init__(self, studio: Any) -> None:
+        self.studio, self.sent = studio, []
+
+    async def send_str(self, s: str) -> None:
+        self.sent.append(json.loads(s))
+        self.studio.term_socks.clear()  # one poll is enough
+
+
+def _bare(state: str | None, telemetry: dict[str, Any] | None = None) -> Any:
+    s = Studio.__new__(Studio)
+    s.spec = {"kind": "lerobot", "config": "/nonexistent/robot-config.yaml"}
+    s.last = {"state": {"state": state}} if state else {}
+    s.telemetry = telemetry or {}
+    s.term_running = None
+    s._term_status = lambda: None  # type: ignore[method-assign]
+    return s
+
+
+@pytest.mark.parametrize("state,cmd,stopped", [
+    ("READY", "lerobot-calibrate --robot.port=/dev/tty.x", 1),
+    ("READY", "ls -la", 0),
+    ("DISCONNECTED", "lerobot-calibrate --robot.port=/dev/tty.x", 0),
+])
+def test_a_typed_arm_command_is_stopped_while_studio_holds_the_arms(
+    state: str, cmd: str, stopped: int
+) -> None:
+    s = _bare(state)
+    s.terminal = _Term(cmd)
+    sock = _Sock(s)
+    s.term_socks = {sock}
+    if not stopped:
+        s._term_status = lambda: s.term_socks.clear()  # type: ignore[method-assign]
+
+    async def go() -> None:
+        await s._watch_terminal()
+        await asyncio.sleep(0)
+
+    asyncio.run(go())
+    assert s.terminal.stopped == stopped
+    if stopped:
+        assert sock.sent[-1]["t"] == "error" and "Disconnect first" in sock.sent[-1]["fix"]
+
+
+def test_disconnected_arms_that_kept_torque_still_count_as_held() -> None:
+    s = _bare("DISCONNECTED", {"arms": {"left_follower": {"torque": True}}})
+    assert s._arms_held_by_worker() == "left_follower may hold torque"
+    assert _bare("DISCONNECTED", {"arms": {"left_follower": {"torque": False}}}
+                 )._arms_held_by_worker() is None
+
+
+class _Pushes:
+    def __init__(self) -> None:
+        self.pushed: list[dict[str, Any]] = []
+
+    def push(self, m: dict[str, Any]) -> None:
+        self.pushed.append(m)
+
+
+def _connecting(monkeypatch: Any, tmp_path: Path, holders: Any) -> tuple[Any, _Pushes, list[Any]]:
+    import threading
+
+    import phi_studio.setup_api as setup_api
+    from phi_studio import detect
+
+    cfg = tmp_path / "robot-config.yaml"
+    cfg.write_text("robot:\n  type: so101_follower\n  port: /dev/tty.f\n  id: f\n"
+                   "teleop:\n  type: so101_leader\n  port: /dev/tty.l\n  id: l\n")
+
+    async def idle(studio: Any) -> None:
+        return None
+
+    monkeypatch.setattr(setup_api, "lerobot_busy", idle)
+    monkeypatch.setattr(detect, "port_holders", holders)
+    s = _bare(None)
+    s.spec["config"] = str(cfg)
+    s.proc = None
+    s._note = lambda *a: None  # type: ignore[method-assign]
+    sent: list[Any] = []
+    s.to_worker = sent.append  # type: ignore[method-assign]
+    s.rig_api = type("A", (), {"lock": threading.Lock()})()
+    return s, _Pushes(), sent
+
+
+def test_connect_refuses_while_another_process_has_a_port(monkeypatch: Any, tmp_path: Path) -> None:
+    from phi_studio.detect import Holder
+
+    def held(ports: Any, me: Any = None, **kw: Any) -> dict[str, list[Holder]]:
+        assert {"/dev/tty.f", "/dev/tty.l"} <= set(ports)
+        return {"/dev/tty.f": [Holder(pid=4242, command="python roll_live.py", paused=True)]}
+
+    s, c, sent = _connecting(monkeypatch, tmp_path, held)
+    asyncio.run(s._connect_when_free(c, {"cmd": "connect"}))
+    assert not sent and "4242, paused" in c.pushed[-1]["message"]
+
+
+def test_connect_refuses_when_it_cannot_check_the_ports(monkeypatch: Any, tmp_path: Path) -> None:
+    def broken(ports: Any, me: Any = None, **kw: Any) -> Any:
+        raise OSError("lsof failed")
+
+    s, c, sent = _connecting(monkeypatch, tmp_path, broken)
+    asyncio.run(s._connect_when_free(c, {"cmd": "connect"}))
+    assert not sent and "could not check" in c.pushed[-1]["message"]
+
+
+def test_connect_waits_for_rig_setup_then_goes(monkeypatch: Any, tmp_path: Path) -> None:
+    s, c, sent = _connecting(monkeypatch, tmp_path, lambda ports, me=None, **kw: {})
+    with s.rig_api.lock:
+        asyncio.run(s._connect_when_free(c, {"cmd": "connect"}))
+    assert not sent and "Rig setup" in c.pushed[-1]["message"]
+    asyncio.run(s._connect_when_free(c, {"cmd": "connect"}))
+    assert sent == [{"cmd": "connect"}]

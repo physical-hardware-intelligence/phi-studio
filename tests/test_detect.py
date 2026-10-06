@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from phi_studio.detect import Found, calibration_library, scan, watch_motion
 from phi_studio.identity import JointCal
 from phi_studio.rig import JOINTS
@@ -191,7 +193,8 @@ class FakeLine:
     def read(self, mid: int, name: str) -> int | None:
         if mid == self.mute:
             return None
-        return {"pos": 2000 + mid, "volt": 118, "current": 3, "temp": 35, "status": 0}[name]
+        return {"pos": 2000 + mid, "volt": 118, "current": 3, "temp": 35, "status": 0,
+                "torque": self.torque[mid]}[name]  # fmt: skip
 
     def write(self, mid: int, name: str, value: int) -> bool:
         self.log.append((mid, name, value))
@@ -250,3 +253,48 @@ def test_studio_and_its_worker_are_never_reported_as_holders(monkeypatch: Any) -
     run = lambda argv: LSOF if argv[0] == "lsof" else PS  # noqa: E731
     held = detect.port_holders(["/dev/tty.usbmodemA", "/dev/tty.usbmodemB"], run=run, me={7, 4242})
     assert set(held) == {"/dev/tty.usbmodemB"}
+
+
+def test_scan_fails_closed_when_lsof_cannot_run(tmp_path: Path) -> None:
+    pinged: list[str] = []
+
+    def ping(p: str, ids: Any) -> tuple[list[int], list[int]]:
+        pinged.append(p)
+        return [1, 2, 3, 4, 5, 6], []
+
+    def broken(ps: list[str]) -> dict[str, Any]:
+        raise OSError("lsof exited 2")
+
+    found = scan([("/dev/tty.a", "A")], tmp_path, ping=ping, bus_factory=lambda p, c: FakeBus(p),
+                 holders=broken)  # fmt: skip
+    assert not pinged  # a port nobody could vouch for is never pinged
+    assert found[0].problem and "Could not check" in found[0].problem
+
+
+def test_lsof_that_fails_is_an_error_not_an_empty_answer(monkeypatch: Any) -> None:
+    from phi_studio import detect
+
+    class Done:
+        returncode, stdout, stderr = 2, "", "lsof: bad option"
+
+    monkeypatch.setattr(detect.subprocess, "run", lambda *a, **k: Done())
+    with pytest.raises(OSError):
+        detect._run(["lsof", "-F", "pc", "/dev/tty.x"])
+    Done.returncode = 1  # lsof's "nothing has it open"
+    assert detect._run(["lsof", "/dev/tty.x"]) == ""
+
+
+class StuckLine(FakeLine):
+    """Motor 3 takes torque on and ignores torque off."""
+
+    def write(self, mid: int, name: str, value: int) -> bool:
+        if mid == 3 and name == "torque" and value == 0 and self.torque[3]:
+            self.log.append((mid, name, value))
+            return True  # the write "succeeds" but the register stays 1
+        return super().write(mid, name, value)
+
+
+def test_a_motor_that_keeps_torque_after_the_check_is_reported() -> None:
+    out = run_check(StuckLine())
+    assert not out[2].ok and "torque may still be on" in (out[2].error or "")
+    assert [r.ok for r in out if r.id != 3] == [True] * 5

@@ -449,6 +449,16 @@ class Studio:
             now = await asyncio.to_thread(self.terminal.running)
             if (now or {}).get("command") != (self.term_running or {}).get("command"):
                 self.term_running = now
+                held = self._arms_held_by_worker()
+                if now and held and _touches_arms(now.get("command") or ""):
+                    # WHY here: typed keys go straight to the shell, so only Run is checked at
+                    # the door; a typed command is caught within one poll (0.5 s) of starting.
+                    self.terminal.interrupt()
+                    err = {"t": "error", "fix": "Disconnect first, then run it.",
+                           "message": f"Stopped it: Studio is connected to the arms ({held}) and "
+                           "holds their ports."}  # fmt: skip
+                    for ws in list(self.term_socks):
+                        asyncio.ensure_future(self._term_send(ws, err))
                 self._term_status()
             await asyncio.sleep(0.5)
         self.term_watch = None
@@ -602,7 +612,12 @@ class Studio:
         if self.spec.get("kind") != "lerobot":
             return None
         state = (self.last.get("state") or {}).get("state")
-        return None if state in (None, "DISCONNECTED") else str(state).lower()
+        if state not in (None, "DISCONNECTED"):
+            return str(state).lower()
+        arms = (self.telemetry or {}).get("arms") or {}
+        # WHY: an arm that did not confirm torque off on Disconnect may still be powered
+        on = [k for k, a in arms.items() if isinstance(a, dict) and a.get("torque")]
+        return f"{', '.join(on)} may hold torque" if on else None
 
     async def _connect_when_free(self, client: Client, msg: dict[str, Any]) -> None:
         from phi_studio.setup_api import lerobot_busy
@@ -612,7 +627,42 @@ class Studio:
             self._tell(client, f"The terminal is running {busy}, which holds the arms' ports.",
                        "Let it finish, or stop it, then connect.", "connect")  # fmt: skip
             return
+        api = getattr(self, "rig_api", None)
+        if api is not None and api.lock.locked():  # WHY: a motor check may be powering a motor
+            self._tell(client, "Rig setup is using the arms' ports (detect or motor check).",
+                       "Wait for it to finish, then connect.", "connect")  # fmt: skip
+            return
+        held = await asyncio.to_thread(self._port_holders)
+        if held:
+            # WHY lsof too: a job paused with Ctrl-Z is not the terminal's foreground command,
+            # and it keeps its ports open (the 2026-10-05 fault).
+            self._tell(client, held, "Stop it (Rig setup > Detect arms has a Stop button), then "
+                       "connect.", "connect")  # fmt: skip
+            return
         self.to_worker({k: v for k, v in msg.items() if isinstance(k, str)})
+
+    def _port_holders(self) -> str | None:
+        """Why the rig's ports are not free, from lsof, or None."""
+        import yaml
+
+        from phi_studio import detect, rigspec
+
+        try:
+            ports = [a.port for a in rigspec.parse(Path(self.spec["config"]).read_text()).arms
+                     if a.port]  # fmt: skip
+        except (KeyError, OSError, ValueError, yaml.YAMLError):
+            return None  # the worker reports a config it cannot read
+        pid = getattr(self.proc, "pid", None)
+        me = {os.getpid()} | ({pid} if isinstance(pid, int) else set())
+        try:
+            held = detect.port_holders(ports, me=me)
+        except OSError as e:
+            return f"Studio could not check which processes have the arms' ports open: {e}"
+        for port, hs in held.items():
+            h = hs[0]
+            return (f"{h.name} (process {h.pid}{', paused' if h.paused else ''}) has {port} "
+                    "open.")
+        return None
 
     def handle(self, cmd: str, fn: Handler, *, control: bool) -> None:
         """Answer `cmd` with `fn(client, msg)`. control=True: only the window with control may

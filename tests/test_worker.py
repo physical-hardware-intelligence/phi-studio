@@ -429,3 +429,76 @@ def test_a_bimanual_mock_has_a_wrist_camera_per_arm() -> None:
     assert one == ["front", "wrist", "top"]
     assert two == ["front", "top", "left_wrist", "right_wrist"]
     assert build_rig({"kind": "mock", "pairs": 2, "cameras": []}).cameras == []  # none asked: none
+
+
+@pytest.mark.parametrize("bad", [-5.0, 0.0, float("inf"), float("nan"), True])
+def test_a_bad_step_limit_in_the_config_is_ignored(bad: float) -> None:
+    # Review 2026-10-05: max_relative_target -5 made every step +5 deg toward the stops.
+    w, _, _ = make()
+    fol = arm(w, "follower")
+    fol.max_step = bad  # type: ignore[attr-defined]
+    assert w._limit(fol) == w.max_step
+    fol.max_step = {"shoulder_pan": bad, "elbow_flex": 1.0}  # type: ignore[attr-defined]
+    lim = w._limit(fol)
+    assert lim["shoulder_pan"] == w.max_step["shoulder_pan"] and lim["elbow_flex"] == 1.0
+    stepped = w._clip({"shoulder_pan": 50.0}, {"shoulder_pan": 0.0}, fol)
+    assert 0 < stepped["shoulder_pan"] <= w.max_step["shoulder_pan"]
+
+
+def test_a_leader_and_follower_with_one_id_are_told_apart_by_folder() -> None:
+    # robots/so_follower/x.json and teleoperators/so_leader/x.json both exist; keyed by id, one
+    # hid the other, and a swapped pair read as matching.
+    clock = FakeClock()
+    rig = mock_rig(pairs=1, cameras=("front",), clock=clock)
+    for a in rig.arms:
+        a.calibration_id = "x"
+    cals = {f"{'robots/so_follower' if a.role == 'follower' else 'teleoperators/so_leader'}/x":
+            a._own_cal for a in rig.arms}  # fmt: skip
+    out: list[dict] = []
+    w = RigWorker(rig, send=out.append, clock=clock, loop_hz=HZ, calibrations=cals)
+    w.handle({"cmd": "connect"})
+    assert all(a["ok"] for a in of(out, "identity")[-1]["arms"])
+    w.handle({"cmd": "disconnect"})
+    w.handle({"cmd": "inject", "arm": "leader", "kind": "swap"})
+    w.handle({"cmd": "connect"})
+    ident = {a["name"]: a for a in of(out, "identity")[-1]["arms"]}
+    assert ident["leader"]["exact"] and not ident["leader"]["ok"]
+    assert ident["leader"]["match"] == "robots/so_follower/x"
+
+
+def test_a_torque_enable_that_fails_halfway_still_counts_as_on() -> None:
+    w, _, _ = make()
+    w.handle({"cmd": "connect"})
+    fol = arm(w, "follower")
+
+    def half(on: bool) -> None:
+        raise OSError("motor 4 did not answer")
+
+    fol.set_torque = half  # type: ignore[method-assign]
+    with pytest.raises(OSError):
+        w._set_torque(fol, True)
+    assert w.torque["follower"]  # so Torque off and Disconnect still try it
+
+
+def test_identify_is_refused_while_disconnected_and_reads_nothing() -> None:
+    w, _, out = make()
+    reads: list[str] = []
+    for a in w.rig.arms:
+        a.read_calibration = lambda a=a: reads.append(a.name)  # type: ignore[method-assign]
+    w.handle({"cmd": "identify"})
+    assert not reads and "Connect first" in of(out, "error")[-1]["fix"]
+    assert w.session.state.name == "DISCONNECTED"
+
+
+def test_disconnect_names_an_arm_that_did_not_confirm_torque_off() -> None:
+    w, clock, out = armed()
+    run(w, clock, 0.2)
+    fol = arm(w, "follower")
+
+    def silent(on: bool) -> None:
+        raise OSError("no answer")
+
+    fol.set_torque = silent  # type: ignore[method-assign]
+    w.handle({"cmd": "disconnect"})
+    assert "did not confirm torque off" in of(out, "error")[-1]["message"]
+    assert w.torque["follower"]  # still reported as possibly on

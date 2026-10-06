@@ -55,10 +55,16 @@ class Holder:
 
 
 def _run(argv: list[str]) -> str:
+    """argv's output. Raises OSError when it cannot run: WHY not "": an lsof that timed out
+    would read as no holder, and a shared port as free."""
     try:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=5).stdout  # noqa: S603
-    except (OSError, subprocess.SubprocessError):
-        return ""
+        got = subprocess.run(argv, capture_output=True, text=True, timeout=5)  # noqa: S603
+    except (OSError, subprocess.SubprocessError) as e:
+        raise OSError(f"{argv[0]} failed: {e}") from e
+    # lsof exits 1 when no process has the files open, ps when a pid has just gone: answers
+    if got.returncode not in (0, 1):
+        raise OSError(f"{argv[0]} failed: {got.stderr.strip()[:200]}")
+    return got.stdout
 
 
 def port_holders(ports: Iterable[str], run: Callable[[list[str]], str] = _run,
@@ -219,7 +225,11 @@ def scan(
 ) -> list[Found]:
     """What each (device, serial) port reaches. Writes nothing, moves nothing."""
     library = calibration_library(cal_root)
-    held = holders([d for d, _ in ports])
+    try:
+        held = holders([d for d, _ in ports])
+    except OSError as e:  # WHY no ping then: a port nobody could vouch for may be shared
+        return [Found(d, s, [], [], error=f"Could not check which processes have it open ({e}). "
+                      "Scan again.") for d, s in ports]  # fmt: skip
     out = []
     for device, serial in ports:
         if held.get(device):
@@ -369,13 +379,18 @@ def check_motor(line: Any, mid: int, seconds: float = 3.0, *,
                 sleep: Callable[[float], None] = time.sleep) -> MotorCheck:
     """Hold motor `mid` where it is with torque on for `seconds`; poll it and the whole bus."""
     r = MotorCheck(mid)
+    powered = False
     try:
         pos = line.read(mid, "pos")
         if pos is None:
             r.error = "does not answer"
             return r
         # WHY goal first: the motor holds where it already is, so nothing moves
-        if not (line.write(mid, "goal", pos) and line.write(mid, "torque", 1)):
+        if not line.write(mid, "goal", pos):
+            r.error = "would not take a goal"
+            return r
+        powered = True  # WHY before the write: a write whose reply is lost may still turn it on
+        if not line.write(mid, "torque", 1):
             r.error = "would not take torque"
             return r
         t0 = clock()
@@ -397,9 +412,14 @@ def check_motor(line: Any, mid: int, seconds: float = 3.0, *,
             sleep(0.1)
         return r
     finally:
-        for _ in range(3):  # WHY 3 tries: the bus may be what is failing
-            if line.write(mid, "torque", 0):
+        off = not powered
+        for _ in range(3 if powered else 0):  # WHY 3 tries: the bus may be what is failing
+            if line.write(mid, "torque", 0) and line.read(mid, "torque") == 0:
+                off = True
                 break
+        if not off:  # WHY say so: the motor this check exists for is the one that may stay on
+            r.error = ((f"{r.error}; " if r.error else "") + "torque may still be on: it did not "
+                       "confirm torque off. Cut the arm's power.")  # fmt: skip
 
 
 def check_arm(port: str, seconds: float = 3.0, *, line_factory: Callable[[str], Any] = Line,

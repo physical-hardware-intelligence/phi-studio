@@ -300,10 +300,10 @@ def test_build_rig_from_config(tmp_path) -> None:
         and by["left_follower"].port == "/dev/tty.usbmodemA"
     )
     assert by["right_leader"].calibration is None  # its file is missing: identity will say so
-    assert set(rig.calibration_files()) == {
-        "phi_bi_follower_left",
-        "phi_bi_follower_right",
-        "phi_bi_leader_left",
+    assert set(rig.calibration_files()) == {  # by path: one id may exist in both folders
+        "robots/so_follower/phi_bi_follower_left",
+        "robots/so_follower/phi_bi_follower_right",
+        "teleoperators/so_leader/phi_bi_leader_left",
     }
 
 
@@ -569,7 +569,7 @@ def test_an_arm_is_matched_to_its_own_file_when_another_role_shares_its_name(tmp
                   clock=lambda: 0.0)  # fmt: skip
     w.handle({"cmd": "connect"})
     fol = next(a for a in w.identity if a["role"] == "follower")
-    assert fol["match"] == "f" and fol["ok"], fol
+    assert fol["match"] == "robots/so_follower/f" and fol["ok"], fol
 
 
 def test_torque_off_reaches_every_motor_past_one_that_fails() -> None:
@@ -622,3 +622,16 @@ def test_one_silent_arm_does_not_fault_the_connect_and_is_named(tmp_path: Any) -
     from phi_studio.worker import _identity_problem
 
     assert _identity_problem(entry)[0] == "Leader is not answering: no status packet"
+
+
+def test_a_connect_right_after_a_failed_try_and_a_close_tries_again() -> None:
+    # Review 2026-10-05: Disconnect then Connect within RECONNECT_S reported a working arm silent.
+    t = [100.0]
+    a = H.FeetechArm("f", "follower", "/dev/x", "f", dict(CAL), clock=lambda: t[0],
+                     bus_factory=lambda p, c: FakeBus(p, H.to_motor_calibration(c)))  # fmt: skip
+    FakeBus.fail_connect = 1
+    with pytest.raises(ConnectionError):
+        a.read_positions()  # the arm was off; this try sets the backoff
+    a.close()  # Disconnect
+    t[0] += 0.5  # power on, Connect again at once
+    assert a.read_positions()["shoulder_pan"] == pytest.approx(0, abs=0.1)
