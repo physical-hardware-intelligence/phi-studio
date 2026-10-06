@@ -421,7 +421,8 @@ def lerobot_commands(spec: RigSpec) -> list[dict[str, str]]:
             # not swept. bimanual.py:52-54: one run does left, then right.
             why += (" Put every joint in the middle of its range and press Enter, then move each "
                     "joint end to end except wrist roll, and press Enter again. If a file exists, "
-                    "Enter keeps it and c redoes it.")  # fmt: skip
+                    "type c to redo it: Enter alone writes that file into the motors, which is "
+                    "right only when this port and this id are the same arm.")  # fmt: skip
             if len(arms) > 1:
                 why += " It does the left arm, then the right."
             c = _cmd("calibrate", f"calibrate_{dev}", f"Calibrate the {noun}", why,

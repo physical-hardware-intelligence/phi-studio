@@ -39,11 +39,13 @@ from typing import Any
 
 from aiohttp import WSMsgType, web
 
+from phi_studio import cmdcheck, rigspec
 from phi_studio.assistant import ClaudeCLI, Conversation
 from phi_studio.checks import Inputs, run_checks
 from phi_studio.errors import Refusal
 from phi_studio.evals import EvalError, EvalStore
 from phi_studio.files import FileError, Files, default_roots, list_ports
+from phi_studio.promptguard import PromptGuard
 from phi_studio.terminal import Terminal
 
 STATIC = Path(__file__).parent / "static"
@@ -178,6 +180,8 @@ class Studio:
         self.term_socks: dict[web.WebSocketResponse, str] = {}  # each terminal socket's window id
         self.term_running: dict[str, Any] | None = None  # the command in the foreground, if any
         self.term_watch: asyncio.Task[None] | None = None
+        # WHY: ENTER at LeRobot's calibration prompt writes a file into the servos (promptguard.py)
+        self.guard = PromptGuard(self._prompt_verdict)
         self.cli = ClaudeCLI(cwd=roots[0].path, dirs=[r.path for r in roots[1:]],
                              model=assistant_model)  # fmt: skip
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -448,7 +452,15 @@ class Studio:
         while self.term_socks and self.terminal is not None:
             now = await asyncio.to_thread(self.terminal.running)
             if (now or {}).get("command") != (self.term_running or {}).get("command"):
-                self.term_running = now
+                before, self.term_running = self.term_running, now
+                if now is None or before is not None:
+                    # WHY not when a command first appears: its prompt may already be showing
+                    # (it printed before this poll saw the command), and that prompt is its own
+                    self.guard.reset()
+                warn = self._command_warning((now or {}).get("command") or "")
+                if warn is not None:
+                    for ws in list(self.term_socks):
+                        asyncio.ensure_future(self._term_send(ws, warn))
                 held = self._arms_held_by_worker()
                 if now and held and _touches_arms(now.get("command") or ""):
                     # WHY here: typed keys go straight to the shell, so only Run is checked at
@@ -474,6 +486,7 @@ class Studio:
         if self.terminal is None:
             self.terminal = Terminal(self._term_cwd())
             self.terminal.on_exit = self._term_status
+            self.terminal.listeners.add(self._watch_output)
         if not self.terminal.alive:
             self.terminal.start(loop)
         term = self.terminal
@@ -536,7 +549,17 @@ class Studio:
             refuse("The shell is not running.", "Press Restart.")
             return
         if kind == "in" and isinstance(msg.get("d"), str):
-            term.write(msg["d"].encode())
+            data, stopped = self.guard.gate(msg["d"])
+            if data:
+                term.write(data.encode())
+            if stopped is not None:
+                self._note("error", f"Held ENTER at LeRobot's prompt: {stopped.message}")
+                asyncio.ensure_future(self._term_send(ws, {"t": "guard", "held": True,
+                                                           **stopped.public()}))  # fmt: skip
+        elif kind == "allow":
+            if self.guard.allow():
+                self._note("state", "ENTER sent at LeRobot's calibration prompt after a warning")
+                term.write(b"\r")
         elif kind == "interrupt":
             term.interrupt()
         elif kind == "run" and isinstance(msg.get("cmd"), str) and msg["cmd"].strip():
@@ -554,6 +577,12 @@ class Studio:
                 # share the line and read each other's replies (2026-10-05).
                 refuse(f"Studio is connected to the arms ({held}), so it holds their ports.",
                        "Disconnect first, then run it.")  # fmt: skip
+                return
+            spec = self._rig_spec()
+            bad = cmdcheck.worst(cmdcheck.check(cmd, spec, self._cal_root())) if spec else None
+            if bad is not None and bad.level == cmdcheck.DANGER:
+                # WHY refuse: at LeRobot's mismatch prompt ENTER would write the wrong arm's file
+                refuse(bad.message, bad.fix)
                 return
             self._note("state", f"Ran in the terminal: {cmd[:200]}")
             term.write(cmd.encode() + b"\r")
@@ -619,6 +648,61 @@ class Studio:
         on = [k for k, a in arms.items() if isinstance(a, dict) and a.get("torque")]
         return f"{', '.join(on)} may hold torque" if on else None
 
+    def _rig_spec(self) -> rigspec.RigSpec | None:
+        """robot-config.yaml as Studio reads it, or None when there is none or it is broken."""
+        import yaml
+
+        from phi_studio.onboard_api import config_target
+
+        try:
+            return rigspec.parse(config_target(self).read_text())
+        except (OSError, ValueError, yaml.YAMLError):
+            return None
+
+    def _cal_root(self) -> Path:
+        from phi_studio.files import lerobot_calibration_dir
+
+        return Path(self.spec.get("cal_root") or lerobot_calibration_dir())
+
+    def _prompt_verdict(self, lerobot_id: str) -> cmdcheck.Verdict:
+        command = (self.term_running or {}).get("command")
+        return cmdcheck.at_prompt(command, lerobot_id, self._rig_spec(), self._cal_root())
+
+    def _watch_output(self, data: bytes) -> None:
+        """Every chunk the shell prints: tells the panels when LeRobot's prompt appears."""
+        v = self.guard.feed(data)
+        if v is None:
+            return
+        if self.term_running is None and self.terminal is not None:
+            asyncio.ensure_future(self._recheck_prompt())  # ENTER stays held meanwhile
+        self._tell_guard(v)
+
+    async def _recheck_prompt(self) -> None:
+        assert self.terminal is not None
+        now = await asyncio.to_thread(self.terminal.running)
+        if now is not None and self.term_running is None:
+            self.term_running = now
+            self._term_status()
+        v = self.guard.recheck()
+        if v is not None:
+            self._tell_guard(v)
+
+    def _tell_guard(self, v: cmdcheck.Verdict) -> None:
+        self._note("state" if v.level == cmdcheck.OK else "error",
+                   f"LeRobot asks for ENTER to write a calibration file: {v.message}")
+        for ws in list(self.term_socks):
+            asyncio.ensure_future(self._term_send(ws, {"t": "guard", "held": False,
+                                                       **v.public()}))  # fmt: skip
+
+    def _command_warning(self, command: str) -> dict[str, Any] | None:
+        """A warning for a typed LeRobot command whose ports and ids name different arms."""
+        spec = self._rig_spec() if command else None
+        bad = cmdcheck.worst(cmdcheck.check(command, spec, self._cal_root())) if spec else None
+        if bad is None or bad.level != cmdcheck.DANGER:
+            return None
+        return {"t": "error", "message": bad.message,
+                "fix": f"{bad.fix} If it asks for ENTER, type c or press Ctrl-C."}
+
     async def _connect_when_free(self, client: Client, msg: dict[str, Any]) -> None:
         from phi_studio.setup_api import lerobot_busy
 
@@ -643,15 +727,12 @@ class Studio:
 
     def _port_holders(self) -> str | None:
         """Why the rig's ports are not free, from lsof, or None."""
-        import yaml
+        from phi_studio import detect
 
-        from phi_studio import detect, rigspec
-
-        try:
-            ports = [a.port for a in rigspec.parse(Path(self.spec["config"]).read_text()).arms
-                     if a.port]  # fmt: skip
-        except (KeyError, OSError, ValueError, yaml.YAMLError):
+        spec = self._rig_spec()
+        if spec is None:
             return None  # the worker reports a config it cannot read
+        ports = [a.port for a in spec.arms if a.port]
         pid = getattr(self.proc, "pid", None)
         me = {os.getpid()} | ({pid} if isinstance(pid, int) else set())
         try:

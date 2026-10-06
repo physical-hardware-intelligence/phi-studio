@@ -12,12 +12,24 @@ export interface TermState {
   running: Running | null; // the command in the foreground, null at the prompt
   typing: boolean; // this window has control, so it may type
   error: { message: string; fix: string } | null;
+  guard: Guard | null; // LeRobot is asking for ENTER to write a calibration file into an arm
+}
+
+/** LeRobot's "Press ENTER to use provided calibration file" prompt, as the server judged it (promptguard.py).
+ * held: Studio dropped an ENTER typed at it because the port and the id may name different arms. */
+export interface Guard {
+  level: "ok" | "danger" | "unknown";
+  message: string;
+  fix: string;
+  arm: string | null;
+  file: string | null;
+  held: boolean;
 }
 
 type Listener = () => void;
 
 class TerminalLink {
-  snap: TermState = { open: false, link: "idle", alive: false, running: null, typing: false, error: null };
+  snap: TermState = { open: false, link: "idle", alive: false, running: null, typing: false, error: null, guard: null };
   private listeners = new Set<Listener>();
   private output = new Set<(data: Uint8Array) => void>();
   private ws: WebSocket | null = null;
@@ -85,7 +97,14 @@ class TerminalLink {
         return;
       }
       const m = JSON.parse(e.data);
-      if (m.t === "status") this.set({ alive: m.alive, running: m.running ?? null, typing: m.typing });
+      if (m.t === "status") {
+        const running = m.running ?? null;
+        // WHY clear only when a command ends or is replaced: a prompt can arrive before the status that first names
+        // its command, and that prompt belongs to it (server.py _watch_terminal does the same)
+        const was = this.snap.running;
+        const gone = running === null || (was !== null && was.command !== running.command);
+        this.set({ alive: m.alive, running, typing: m.typing, ...(gone ? { guard: null } : {}) });
+      } else if (m.t === "guard") this.set({ guard: { level: m.level, message: m.message, fix: m.fix ?? "", arm: m.arm ?? null, file: m.file ?? null, held: !!m.held } });
       else if (m.t === "error") this.set({ error: { message: m.message, fix: m.fix ?? "" } });
     };
     ws.onclose = () => {
@@ -110,11 +129,16 @@ class TerminalLink {
   }
   input(data: string): void { this.send({ t: "in", d: data }); }
   interrupt(): void { this.send({ t: "interrupt" }); }
+  /** At LeRobot's calibration prompt: calibrate again instead of writing the file. */
+  recalibrate(): void { this.set({ guard: null }); this.send({ t: "in", d: "c\r" }); }
+  /** Sends the ENTER Studio held back: LeRobot writes the file into the arm. */
+  allow(): void { this.set({ guard: null }); this.send({ t: "allow" }); }
   restart(): void { this.set({ error: null }); this.send({ t: "restart" }); }
   resize(cols: number, rows: number): void {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ t: "resize", cols, rows }));
   }
   dismissError(): void { this.set({ error: null }); }
+  dismissGuard(): void { this.set({ guard: null }); }
 }
 
 export const terminal = new TerminalLink();

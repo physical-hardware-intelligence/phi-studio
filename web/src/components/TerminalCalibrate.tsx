@@ -88,7 +88,7 @@ export function TerminalCalibrate() {
       </div>
       <ol className="t-sm faint">
         <li>Pick an arm. LeRobot's calibration runs in the terminal below.</li>
-        <li>If it asks about an existing file, type <span className="mono">c</span> and press Enter to calibrate again. Enter alone keeps the file and writes it to the motors.</li>
+        <li>If it asks about an existing file, type <span className="mono">c</span> and press Enter to calibrate again. Enter alone writes that file into the motors, so Studio holds it back unless the port and the id are the same arm in robot-config.yaml.</li>
         <li>Put every joint in the middle of its range and press Enter. Wrist roll reads 0 at the twist it has now, so give it the same twist on every arm.</li>
         <li>Move every joint except wrist roll from one end to the other, then press Enter.</li>
         <li>When the command ends, Studio checks the motors against the file.</li>

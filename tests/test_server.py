@@ -681,6 +681,10 @@ def _bare(state: str | None, telemetry: dict[str, Any] | None = None) -> Any:
     s.telemetry = telemetry or {}
     s.term_running = None
     s._term_status = lambda: None  # type: ignore[method-assign]
+    s._rig_spec = lambda: None  # type: ignore[method-assign]
+    s._note = lambda *a: None  # type: ignore[method-assign]
+    s.spec["cal_root"] = "/cal"
+    s.guard = server_mod.PromptGuard(s._prompt_verdict)
     return s
 
 
@@ -740,7 +744,7 @@ def _connecting(monkeypatch: Any, tmp_path: Path, holders: Any) -> tuple[Any, _P
     monkeypatch.setattr(setup_api, "lerobot_busy", idle)
     monkeypatch.setattr(detect, "port_holders", holders)
     s = _bare(None)
-    s.spec["config"] = str(cfg)
+    s._rig_spec = lambda: server_mod.rigspec.parse(cfg.read_text())  # type: ignore[method-assign]
     s.proc = None
     s._note = lambda *a: None  # type: ignore[method-assign]
     sent: list[Any] = []
@@ -777,3 +781,118 @@ def test_connect_waits_for_rig_setup_then_goes(monkeypatch: Any, tmp_path: Path)
     assert not sent and "Rig setup" in c.pushed[-1]["message"]
     asyncio.run(s._connect_when_free(c, {"cmd": "connect"}))
     assert sent == [{"cmd": "connect"}]
+
+
+GUARD_CFG = """
+robot: {type: so101_follower, id: phi_follower, port: /dev/tty.usbmodemF}
+teleop: {type: so101_leader, id: phi_leader, port: /dev/tty.usbmodemL}
+"""
+PROMPT_OUT = (b"Press ENTER to use provided calibration file associated with the id phi_leader, "
+              b"or type 'c' and press ENTER to run calibration: ")
+
+
+class _Written:
+    alive = True
+
+    def __init__(self) -> None:
+        self.out: list[bytes] = []
+
+    def write(self, b: bytes) -> None:
+        self.out.append(b)
+
+
+def _guarded(command: str) -> tuple[Any, _Written, list[dict[str, Any]]]:
+    s = _bare("DISCONNECTED")
+    s._rig_spec = lambda: server_mod.rigspec.parse(GUARD_CFG)  # type: ignore[method-assign]
+    s.term_running = {"command": command}
+    s.terminal = _Written()
+    s._may_type = lambda w: True  # type: ignore[method-assign]
+    sent: list[dict[str, Any]] = []
+
+    async def send(ws: Any, m: dict[str, Any]) -> None:
+        sent.append(m)
+
+    s._term_send = send  # type: ignore[method-assign]
+    s.term_socks = {}
+    return s, s.terminal, sent
+
+
+def _type(s: Any, d: str) -> None:
+    async def go() -> None:
+        await s._term_message(None, "w", json.dumps({"t": "in", "d": d}))
+        await asyncio.sleep(0)
+
+    asyncio.run(go())
+
+
+def test_enter_at_the_prompt_is_held_when_the_leaders_port_has_another_id() -> None:
+    crossed = ("lerobot-calibrate --teleop.type=so101_leader --teleop.port=/dev/tty.usbmodemF "
+               "--teleop.id=phi_leader")  # the follower's port, the leader's file
+    s, term, sent = _guarded(crossed)
+    s._watch_output(PROMPT_OUT)
+    _type(s, "\r")
+    assert term.out == [] and sent[-1]["t"] == "guard" and sent[-1]["held"]
+    assert sent[-1]["level"] == "danger"
+
+    async def allow() -> None:
+        await s._term_message(None, "w", json.dumps({"t": "allow"}))
+
+    asyncio.run(allow())
+    assert term.out == []  # never for a crossed port and id
+
+
+def test_enter_at_the_prompt_passes_for_the_arms_own_port_and_id() -> None:
+    own = ("lerobot-calibrate --teleop.type=so101_leader --teleop.port=/dev/cu.usbmodemL "
+           "--teleop.id=phi_leader")
+    s, term, sent = _guarded(own)
+    s._watch_output(PROMPT_OUT)
+    _type(s, "\r")
+    assert term.out == [b"\r"]
+
+
+def test_run_refuses_a_command_whose_port_and_id_name_different_arms() -> None:
+    s, term, sent = _guarded("")
+    term.running = lambda: None  # type: ignore[attr-defined]
+    cmd = ("lerobot-teleoperate --robot.type=so101_follower --robot.port=/dev/tty.usbmodemL "
+           "--robot.id=phi_follower")
+
+    async def go() -> None:
+        await s._term_message(None, "w", json.dumps({"t": "run", "cmd": cmd}))
+        await asyncio.sleep(0)
+
+    asyncio.run(go())
+    assert term.out == [] and "uses it as the follower" in sent[-1]["message"]
+    assert "Leader" in sent[-1]["message"]
+
+
+def test_a_prompt_that_prints_before_the_poll_sees_its_command_still_holds_enter() -> None:
+    # Found in the preview on 2026-10-06: the poll then reset the guard, and ENTER went through.
+    crossed = ("python3 fake.py --teleop.type=so101_leader --teleop.port=/dev/tty.usbmodemF "
+               "--teleop.id=phi_leader")
+    s, term, sent = _guarded(crossed)
+    s.term_running = None  # the poll has not seen the command yet
+    term.running = lambda: {"command": crossed}  # type: ignore[attr-defined]
+    s.term_socks = {object(): "w"}
+
+    async def go() -> None:
+        s._watch_output(PROMPT_OUT)  # arms with no command known: unknown, ENTER held
+        await asyncio.sleep(0.05)  # the recheck finds the command
+        polled = {"n": 0}
+
+        async def once(d: float) -> None:
+            polled["n"] += 1
+            s.term_socks.clear()
+
+        orig = asyncio.sleep
+        asyncio.sleep = once  # type: ignore[assignment]
+        try:
+            s.term_running = None  # and the poll sees the command start after the prompt
+            await s._watch_terminal()
+        finally:
+            asyncio.sleep = orig  # type: ignore[assignment]
+        await s._term_message(None, "w", json.dumps({"t": "in", "d": "\r"}))
+        await orig(0)
+
+    asyncio.run(go())
+    assert term.out == [] and sent[-1]["t"] == "guard" and sent[-1]["held"]
+    assert sent[-1]["level"] == "danger"  # rechecked against the command once it was known

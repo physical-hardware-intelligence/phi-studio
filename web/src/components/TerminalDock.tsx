@@ -4,7 +4,7 @@ import "@xterm/xterm/css/xterm.css";
 import { OctagonX, RotateCcw, SquareTerminal, X } from "lucide-react";
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { studio, useStudio, useTheme } from "../lib/studio";
-import { shortCommand, terminal, useTerminal } from "../lib/terminal";
+import { shortCommand, terminal, useTerminal, type Guard } from "../lib/terminal";
 
 const HEIGHT_KEY = "phi-studio-terminal-h";
 
@@ -45,6 +45,7 @@ function Dock({ open }: { open: boolean }) {
   const alive = useTerminal((s) => s.alive);
   const link = useTerminal((s) => s.link);
   const error = useTerminal((s) => s.error);
+  const guard = useTerminal((s) => s.guard);
   const control = useStudio((s) => s.control);
   const theme = useTheme();
 
@@ -120,7 +121,40 @@ function Dock({ open }: { open: boolean }) {
           <button className="btn btn-ghost btn-sm btn-icon" onClick={() => terminal.dismissError()} aria-label="Dismiss"><X aria-hidden /></button>
         </div>
       )}
+      {guard && <GuardBanner guard={guard} typing={typing} />}
       <div className="term-body" ref={host} />
     </section>
+  );
+}
+
+// LeRobot asks "Press ENTER to use provided calibration file". ENTER writes that file into the arm's motors, so
+// this says which arm and file, and whether that is that arm's own file (cmdcheck.py).
+function GuardBanner({ guard, typing }: { guard: Guard; typing: boolean }) {
+  const [sure, setSure] = useState(false);
+  const file = guard.file?.split("/").pop() ?? "the file";
+  if (guard.level === "ok") {
+    return (
+      <div className="term-guard tone-info" role="status">
+        <span><strong>LeRobot asks for ENTER.</strong> ENTER writes {file} into the motors. {guard.message} Type c and ENTER
+          instead to calibrate it again.</span>
+        <button className="btn btn-ghost btn-sm btn-icon" onClick={() => terminal.dismissGuard()} aria-label="Dismiss"><X aria-hidden /></button>
+      </div>
+    );
+  }
+  return (
+    <div className="term-guard tone-danger" role="alert">
+      <span>
+        <strong>{guard.held ? "Studio held your ENTER." : "Do not press ENTER yet."}</strong> {guard.message} {guard.fix}
+        {" "}ENTER would write {file} into the arm's motors.
+      </span>
+      <span className="term-guard-actions">
+        <button className="btn btn-sm" disabled={!typing} onClick={() => terminal.interrupt()}>Stop command</button>
+        {/* WHY not for danger: c on a crossed port and id calibrates one arm into the other's file */}
+        {guard.level === "unknown" && <button className="btn btn-sm" disabled={!typing} onClick={() => terminal.recalibrate()}>Calibrate it again (c)</button>}
+        {guard.held && guard.level === "unknown" && (sure
+          ? <button className="btn btn-sm btn-danger" disabled={!typing} onClick={() => terminal.allow()}>Yes, write {file}</button>
+          : <button className="btn btn-ghost btn-sm" disabled={!typing} onClick={() => setSure(true)}>Write it anyway</button>)}
+      </span>
+    </div>
   );
 }

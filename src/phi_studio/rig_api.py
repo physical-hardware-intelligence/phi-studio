@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from phi_studio import configedit, detect, rigspec
+from phi_studio import calfiles, configedit, detect, rigspec
 from phi_studio.errors import Refusal
 from phi_studio.identity import (
     Calibration,
@@ -357,7 +357,7 @@ class RigApi:
 
     async def cal_prepare(self, client: Client, msg: dict[str, Any]) -> None:
         arm, path = self._arm(msg)
-        unlinked, kept = await asyncio.to_thread(_own_copy, path)
+        unlinked, kept = await asyncio.to_thread(_own_copy, path, self.cal_root)
         client.push({"type": "rig_cal_prepared", "arm": arm.key, "path": str(path),
                      "unlinked": unlinked, "backup": str(kept) if kept else None})  # fmt: skip
 
@@ -420,7 +420,7 @@ class RigApi:
             if why:
                 raise RigError(f"Did not save: {why}.", "Calibrate this arm again.")
             regs = f.registers
-            await asyncio.to_thread(_save_own, regs, path)
+            await asyncio.to_thread(_save_own, regs, path, self.cal_root)
         client.push(self._verdict(arm, path, f))
 
     async def apply(self, client: Client, msg: dict[str, Any]) -> None:
@@ -505,13 +505,88 @@ class RigApi:
                 if same:
                     out.append({"port": a["port"], "file": str(target), "action": "unchanged"})
                     continue
-            if target.is_symlink():
-                target.unlink()  # replace the link itself, never the file it points at
-            kept = save_calibration(f.registers, target, backup=True)
+            kept = _save_own(f.registers, target, self.cal_root)
             out.append({"port": a["port"], "file": str(target),
                         "action": "replaced" if kept else "written", "from": f.match,
                         "backup": str(kept) if kept else None})  # fmt: skip
         return out
+
+
+    # -- the calibration folder (calfiles.py) ---------------------------------------------------
+    def _spec(self) -> rigspec.RigSpec | None:
+        try:
+            return rigspec.parse(config_target(self.studio).read_text())
+        except (OSError, ValueError, yaml.YAMLError):
+            return None
+
+    def _source(self, msg: dict[str, Any]) -> Path | None:
+        src = msg.get("source")
+        if isinstance(src, str) and src.strip():
+            return Path(src.strip()).expanduser()
+        found = calfiles.shared_candidates(getattr(self.studio, "rig_dir", None))
+        return found[0] if found else None
+
+    def _calfiles_view(self, msg: dict[str, Any]) -> dict[str, Any]:
+        spec, root, source = self._spec(), self.cal_root, self._source(msg)
+        motors = {p: f.matches for p, f in self.found.items() if f.matches}
+        files = calfiles.inventory(root, spec, motors)
+        rows = calfiles.shared(source, root) if source and source.is_dir() else []
+        cands = calfiles.shared_candidates(getattr(self.studio, "rig_dir", None))
+        return {"type": "rig_calfiles", "root": str(root), "files": [f.public() for f in files],
+                "archives": calfiles.archives(root), "config": spec is not None,
+                "shared": {"source": str(source) if source else None,
+                           "exists": bool(source and source.is_dir()), "rows": rows,
+                           "candidates": [str(c) for c in cands]},
+                "scanned": bool(self.found)}  # fmt: skip
+
+    async def calfiles(self, client: Client, msg: dict[str, Any]) -> None:
+        client.push(await asyncio.to_thread(self._calfiles_view, msg))
+
+    async def _may_change_files(self) -> None:
+        busy = await lerobot_busy(self.studio)
+        if busy:  # WHY: lerobot-calibrate writes its file when it ends; a move now would race it
+            raise RigError(f"The terminal is running {busy}, which may read or write these files.",
+                           "Let it finish first.")  # fmt: skip
+
+    async def calfiles_archive(self, client: Client, msg: dict[str, Any]) -> None:
+        rels = msg.get("files")
+        if not isinstance(rels, list) or not rels or not all(isinstance(r, str) for r in rels):
+            raise RigError("Choose the files to move aside.")
+        await self._may_change_files()
+        try:
+            dest = await asyncio.to_thread(calfiles.archive, self.cal_root, rels, self._spec())
+        except ValueError as e:
+            raise RigError(str(e)) from e
+        self.studio._note("state", f"Moved {len(rels)} calibration files to {dest}")
+        client.push({**self._calfiles_view(msg), "done": {"action": "archived", "files": rels,
+                                                          "archive": dest.name}})  # fmt: skip
+
+    async def calfiles_restore(self, client: Client, msg: dict[str, Any]) -> None:
+        name = msg.get("name")
+        if not isinstance(name, str):
+            raise RigError("Choose an archive to restore.")
+        await self._may_change_files()
+        try:
+            out = await asyncio.to_thread(calfiles.restore, self.cal_root, name)
+        except ValueError as e:
+            raise RigError(str(e)) from e
+        self.studio._note("state", f"Restored calibration archive {name}")
+        client.push({**self._calfiles_view(msg), "done": {"action": "restored", **out}})
+
+    async def calfiles_install(self, client: Client, msg: dict[str, Any]) -> None:
+        source, rels = self._source(msg), msg.get("files")
+        if source is None or not source.is_dir():
+            raise RigError("There is no shared calibration folder.",
+                           "Get the phi repo's configs/calibration (git pull), or give its path.")
+        if not isinstance(rels, list) or not rels or not all(isinstance(r, str) for r in rels):
+            raise RigError("Choose the files to install.")
+        await self._may_change_files()
+        try:
+            out = await asyncio.to_thread(calfiles.install, source, self.cal_root, rels)
+        except ValueError as e:
+            raise RigError(str(e)) from e
+        self.studio._note("state", f"Installed calibration files from {source}: {out['copied']}")
+        client.push({**self._calfiles_view(msg), "done": {"action": "installed", **out}})
 
 
 def detect_name(a: dict[str, Any]) -> str:
@@ -519,7 +594,7 @@ def detect_name(a: dict[str, Any]) -> str:
     return (f"{a['side']} {a['role']}" if a.get("side") else str(a["role"])).capitalize()
 
 
-def _own_copy(path: Path) -> tuple[bool, Path | None]:
+def _own_copy(path: Path, root: Path) -> tuple[bool, Path | None]:
     """Make `path` a file of its own and back it up. Returns (was a link, backup). WHY: LeRobot
     saves with open(path, "w") (robot.py:170), which writes through a symlink into the file it
     points at, so recalibrating phi_bi_left.json would rewrite phi_follower.json too."""
@@ -529,17 +604,16 @@ def _own_copy(path: Path) -> tuple[bool, Path | None]:
         path.unlink()
         if data is not None:
             path.write_bytes(data)
-    kept = None
-    if path.is_file():
-        kept = path.with_name(f"{path.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
-        kept.write_bytes(path.read_bytes())
-    return unlinked, kept
+    return unlinked, calfiles.backup(root, path)
 
 
-def _save_own(cal: Calibration, path: Path) -> Path | None:
+def _save_own(cal: Calibration, path: Path, root: Path) -> Path | None:
+    """Write `cal` to `path`, the old file copied to the archive first. Returns that copy."""
+    kept = calfiles.backup(root, path)
     if path.is_symlink():
         path.unlink()  # replace the link itself, never the file it points at
-    return save_calibration(cal, path, backup=True)
+    save_calibration(cal, path)
+    return kept
 
 
 def register(studio: Studio) -> None:
@@ -554,3 +628,7 @@ def register(studio: Studio) -> None:
     studio.handle("rig_cal_prepare", api.cal_prepare, control=True)
     studio.handle("rig_cal_verify", api.cal_verify, control=True)
     studio.handle("rig_cal_from_motors", api.cal_from_motors, control=True)
+    studio.handle("rig_calfiles", api.calfiles, control=False)  # reads files only
+    studio.handle("rig_calfiles_archive", api.calfiles_archive, control=True)
+    studio.handle("rig_calfiles_restore", api.calfiles_restore, control=True)
+    studio.handle("rig_calfiles_install", api.calfiles_install, control=True)

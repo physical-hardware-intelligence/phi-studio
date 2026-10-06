@@ -2,6 +2,7 @@ import { ArrowLeft, ArrowRight, Camera, Check, CircleAlert, Plug, Search, Square
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { ActionBar } from "../components/ActionBar";
 import { Boundary } from "../components/Boundary";
+import { CalibrationFiles } from "../components/CalibrationFiles";
 import { DetectArms } from "../components/DetectArms";
 import { ArmsGlyph } from "../components/data/bits";
 import { Notices } from "../components/Notices";
@@ -184,6 +185,10 @@ function ArmsStep({ d, set, onBack, onNext }: { d: Draft; set: (d: Draft) => voi
           );
         })}
       </div>
+      <details className="onb-calfiles">
+        <summary className="strong">Calibration files on this Mac</summary>
+        <CalibrationFiles compact />
+      </details>
       <p className="faint t-sm">{ports === null ? "Looking for USB arms" : ports.length ? `${ports.length} USB ${ports.length === 1 ? "device" : "devices"} plugged in` : "No USB arms plugged in. You can find them later."}</p>
       <Foot onBack={onBack} onNext={onNext} />
     </>

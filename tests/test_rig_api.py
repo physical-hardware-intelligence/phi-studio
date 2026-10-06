@@ -150,6 +150,9 @@ def test_a_section_that_would_not_read_back_leaves_the_file_alone(tmp_path: Path
 class _Studio:
     spec: dict[str, Any] = {}
 
+    def _note(self, *a: Any) -> None:
+        pass
+
 
 def test_each_arm_gets_its_own_registers_a_link_is_replaced_never_its_target(
     tmp_path: Path,
@@ -223,12 +226,13 @@ def test_before_lerobot_calibrates_a_linked_file_becomes_its_own_copy(tmp_path: 
     target = write_cal(tmp_path, "robots/so_follower/phi_follower", cal(3))
     link = tmp_path / "robots/so_follower/phi_bi_left.json"
     link.symlink_to("phi_follower.json")
-    unlinked, kept = _own_copy(link)
+    unlinked, kept = _own_copy(link, tmp_path)
     assert unlinked and not link.is_symlink() and load_calibration(link) == cal(3)
     link.write_text("{}")  # what LeRobot's save does next
     assert load_calibration(target) == cal(3)
     assert kept is not None and load_calibration(kept) == cal(3)
-    assert _own_copy(tmp_path / "robots/so_follower/none.json") == (False, None)  # a new arm
+    none = tmp_path / "robots/so_follower/none.json"
+    assert _own_copy(none, tmp_path) == (False, None)  # a new arm
 
 
 class _Client:
@@ -353,3 +357,54 @@ def test_motor_check_looks_again_for_a_holder_before_powering(
     with pytest.raises(RigError, match=why):
         asyncio.run(api.check(_Client(), {"port": "/dev/tty.a"}))  # type: ignore[arg-type]
     assert not powered
+
+
+def test_calibration_files_are_listed_moved_aside_restored_and_installed(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    import asyncio
+
+    api = _cal_api(tmp_path, monkeypatch, cal(1))
+    root = tmp_path / "cal"
+    write_cal(root, "robots/so_follower/phi_bi_left", cal(1))  # the left follower's own file
+    write_cal(root, "robots/so_follower/yash_follower", cal(2))
+    shared = tmp_path / "phi/configs/calibration"
+    write_cal(shared, "robots/so_follower/phi_bi_right", cal(3))
+    c = _Client()
+    run = lambda cmd, **m: asyncio.run(getattr(api, cmd)(c, m))  # noqa: E731
+    run("calfiles", source=str(shared))
+    v = c.pushed[-1]
+    by = {f["rel"]: f for f in v["files"]}
+    assert by["robots/so_follower/phi_bi_left.json"]["used_by"] == ["left_follower"]
+    assert by["robots/so_follower/yash_follower.json"]["unused"]
+    assert v["shared"]["rows"][0]["state"] == "new"
+    with pytest.raises(RigError, match="left_follower uses"):
+        run("calfiles_archive", files=["robots/so_follower/phi_bi_left.json"])
+    run("calfiles_archive", files=["robots/so_follower/yash_follower.json"])
+    assert not (root / "robots/so_follower/yash_follower.json").exists()
+    name = c.pushed[-1]["done"]["archive"]
+    run("calfiles_restore", name=name)
+    assert (root / "robots/so_follower/yash_follower.json").is_file()
+    run("calfiles_install", source=str(shared), files=["robots/so_follower/phi_bi_right.json"])
+    assert load_calibration(root / "robots/so_follower/phi_bi_right.json") == cal(3)
+    assert c.pushed[-1]["done"]["copied"] == ["robots/so_follower/phi_bi_right.json"]
+
+
+def test_calibration_files_are_not_moved_while_lerobot_runs(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    import asyncio
+
+    import phi_studio.rig_api as R
+
+    api = _cal_api(tmp_path, monkeypatch, cal(1))
+    write_cal(tmp_path / "cal", "robots/so_follower/old", cal(2))
+
+    async def busy(studio: Any) -> str:
+        return "lerobot-calibrate"
+
+    monkeypatch.setattr(R, "lerobot_busy", busy)
+    with pytest.raises(RigError, match="lerobot-calibrate"):
+        msg = {"files": ["robots/so_follower/old.json"]}
+        asyncio.run(api.calfiles_archive(_Client(), msg))  # type: ignore[arg-type]
+    assert (tmp_path / "cal/robots/so_follower/old.json").is_file()

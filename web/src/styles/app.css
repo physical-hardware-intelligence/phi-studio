@@ -625,5 +625,23 @@ fieldset.form { border: 0; margin: 0; min-width: 0; }
 .term-spacer { flex: 1; }
 .term-error { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-4); background: var(--warn-subtle); color: var(--warn-text); }
 .term-error > span { flex: 1; }
+.term-guard { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); padding: var(--space-3) var(--space-4); background: var(--tone-subtle); color: var(--tone-text); }
+.term-guard > span:first-child { flex: 1 1 24rem; }
+.term-guard-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
 .term-body { min-height: 0; padding: var(--space-2) 0 0 var(--space-3); }
 .term-body .xterm { height: 100%; }
+
+/* Calibration files (components/CalibrationFiles.tsx) */
+.calfiles { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-3); }
+.calfiles-h { margin: var(--space-2) 0 0; font-size: var(--text-sm, 0.875rem); font-weight: 600; }
+.calfiles { min-width: 0; }
+.calfiles-rows { display: flex; flex-direction: column; }
+.calfiles-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--border-subtle); }
+.calfiles-row > span:first-child { width: 1.25rem; }
+.calfiles-name, .calfiles-path { overflow-wrap: anywhere; }
+.calfiles-src { flex: 1 1 22rem; min-width: 0; }
+.calfiles-panel { padding: var(--space-3) var(--space-4); }
+.onb-calfiles { margin-top: var(--space-3); }
+.calfiles .chip { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.calfiles-row > span:last-child { min-width: 0; max-width: 100%; }
+.calfiles-wrap { flex-wrap: wrap; }

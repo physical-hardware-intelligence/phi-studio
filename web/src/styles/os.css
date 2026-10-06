@@ -2,6 +2,7 @@
 
 .ok-text { color: var(--ok-text); }
 .warn-text { color: var(--warn-text); }
+.danger-text { color: var(--danger-text); }
 .row-gap { display: inline-flex; align-items: center; gap: var(--space-3); }
 .pulse { animation: pulse 1.2s ease-in-out infinite; }
 .chip.sev-ok { --tone-subtle: var(--ok-subtle); --tone-text: var(--ok-text); }
