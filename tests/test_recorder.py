@@ -389,8 +389,10 @@ def test_a_writer_that_crashes_takes_only_itself_down(tmp_path, monkeypatch) -> 
     os.kill(w.rec.writer.proc.pid, signal.SIGKILL)
     assert w.rec.writer.done.wait(30)
     assert "stopped unexpectedly" in (w.rec.writer.error or "")
-    tick(w, clock, 0.5)  # frames now refused, counted, and the loop goes on
-    assert w.session.state.name == "MOVING" and w.rec.writer.dropped > 0
+    tick(w, clock, 0.5)  # the recording ends, teleop goes on
+    assert w.session.state.name == "MOVING"
+    assert w.rec.phase == "done" and "stopped unexpectedly" in (w.rec.why or "")
+    assert w.rec.take is None  # WHY: a take after the writer died would look recorded
     assert any(m.get("type") == "rec_error" for m in out)
 
 
@@ -444,3 +446,45 @@ def test_recording_through_the_real_process_chain(tmp_path, monkeypatch) -> None
             await asyncio.sleep(0.25)
 
     asyncio.run(go())
+
+
+def test_resume_refuses_a_dataset_this_rig_cannot_add_to(tmp_path) -> None:
+    import json
+
+    pytest.importorskip("lerobot")
+    names = [f"{j}.pos" for j in ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex",
+                                  "wrist_roll", "gripper")]  # fmt: skip
+    feats = R.features(names, {"front": (480, 640, 3)})
+    (tmp_path / "meta").mkdir()
+    info = tmp_path / "meta/info.json"
+
+    def write(**over) -> None:
+        f = {k: {**v, "shape": list(v["shape"])} for k, v in feats.items()}
+        info.write_text(json.dumps({"fps": 30, "features": f} | over))
+
+    write()
+    assert R.resume_problem(tmp_path, feats, 30) is None
+    assert "recorded at 30 fps" in (R.resume_problem(tmp_path, feats, 15) or "")
+    write(features={k: v for k, v in feats.items() if "front" not in k})
+    assert "has no observation.images.front" in (R.resume_problem(tmp_path, feats, 30) or "")
+    small = R.features(names, {"front": (240, 320, 3)})
+    write()
+    assert "this rig gives [240, 320, 3]" in (R.resume_problem(tmp_path, small, 30) or "")
+    info.write_text("{")
+    assert "cannot be read" in (R.resume_problem(tmp_path, feats, 30) or "")
+
+
+def test_recording_is_refused_on_a_full_disk_and_for_non_degree_arms(tmp_path, monkeypatch) -> None:
+    w, _, out = session(tmp_path, monkeypatch)
+    monkeypatch.setattr(R, "low_disk", lambda p: "Only 0.4 GB free on the disk")
+    start(w)
+    assert w.rec is None and out[-1]["message"] == "Only 0.4 GB free on the disk"
+    monkeypatch.setattr(R, "low_disk", lambda p: None)
+    w.pairs[0][1].use_degrees = False  # robot-config.yaml use_degrees: false on the follower
+    start(w)
+    assert w.rec is None and "use_degrees: false for Follower" in out[-1]["message"]
+
+
+def test_low_disk_reads_the_nearest_existing_folder(tmp_path) -> None:
+    assert R.low_disk(tmp_path / "not" / "yet", need_gb=0.0) is None
+    assert "GB free" in (R.low_disk(tmp_path, need_gb=1e9) or "")

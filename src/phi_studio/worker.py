@@ -386,6 +386,19 @@ class RigWorker:
         if resume and not (root / "meta" / "info.json").is_file():
             self.error(f"There is no dataset {repo} to add to.")
             return
+        raw = [a.name for p in self.pairs for a in p if getattr(a, "use_degrees", True) is False]
+        if raw:
+            # WHY refuse: Studio reads degrees (hardware.motor_table); lerobot-record with this
+            # config records -100..100, and one rig's datasets would disagree on units.
+            self.error(f"robot-config.yaml sets use_degrees: false for {labels(raw)}, and Studio "
+                       "records in degrees.",
+                       "Set use_degrees: true (LeRobot's default), or record with lerobot-record "
+                       "in the terminal.")  # fmt: skip
+            return
+        full = recorder.low_disk(home)
+        if full:
+            self.error(full, "Free some space, or move older datasets off this Mac.")
+            return
         shapes: dict[str, tuple[int, int, int]] = {}
         for cam in self.rig.cameras:
             try:
@@ -400,9 +413,14 @@ class RigWorker:
                                 int(nums["episodes"]), nums["episode_s"], nums["reset_s"],
                                 resume=resume)  # fmt: skip
         robot_type = "bi_so_follower" if len(self.pairs) > 1 else "so_follower"
+        feats = recorder.features(names, shapes)
+        if resume:
+            why = recorder.resume_problem(root, feats, spec.fps)
+            if why:
+                self.error(f"Cannot add to {repo}. {why}", "Record a new dataset instead.")
+                return
         ring_shapes: dict[str, tuple[int, ...]] = dict(shapes)
-        writer = recorder.WriterProcess(spec, recorder.features(names, shapes), robot_type,
-                                        self.send, ring_shapes)  # fmt: skip
+        writer = recorder.WriterProcess(spec, feats, robot_type, self.send, ring_shapes)
         writer.start()
         self.rec = recorder.Recording(spec, writer, names, state_cols, action_cols,
                                       list(self.rig.cameras), t0=self.clock())  # fmt: skip
@@ -514,6 +532,12 @@ class RigWorker:
     def _rec_tick(self, now: float, pos: dict[str, dict[str, float]]) -> None:
         r = self.rec
         assert r is not None
+        if r.writer.error:
+            # WHY end it: a dead writer drops every frame, and takes would look recorded.
+            # Teleop goes on; the error is in the recording's view (Recording.view).
+            r.phase, r.t0, r.take, r.waiting = "done", now, None, False
+            r.why = r.writer.error
+            return
         if r.phase == "warmup" and now - r.t0 >= r.spec.warmup_s and r.writer.ready.is_set():
             self._rec_take(now)  # WHY wait for ready: the writer process takes a moment to start
         elif r.phase == "reset" and now - r.t0 >= r.spec.reset_s:

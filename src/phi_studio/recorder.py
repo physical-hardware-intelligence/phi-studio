@@ -35,8 +35,10 @@ so a take of N frames is N / fps seconds long, exactly.
 
 from __future__ import annotations
 
+import json
 import queue
 import re
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -53,6 +55,7 @@ SLOTS = 48  # frames in flight per camera to the writer process: 1.6 s at 30 Hz
 WARMUP_S = 3.0
 LATE_S = 0.1  # a camera frame older than this when recorded is late (LeRobot accepts 0.5 s)
 CAMERA_GRACE_S = 1.0  # a camera with no fresh picture this long pauses the recording
+MIN_FREE_GB = 2.0  # refuse to start below this: a full disk mid-take loses the encoder's output
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
 
@@ -89,6 +92,41 @@ def check_repo_id(repo_id: Any) -> str:
 def stamped(repo_id: str, now: float | None = None) -> str:
     """A new dataset's name with lerobot-record's date suffix: create refuses an existing folder."""
     return f"{repo_id}_{time.strftime('%Y%m%d_%H%M%S', time.localtime(now))}"
+
+
+def low_disk(path: Path, need_gb: float = MIN_FREE_GB) -> str | None:
+    """Why there is too little room to record under `path` (its nearest existing folder)."""
+    p = path
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    free = shutil.disk_usage(p).free / 1e9
+    if free < need_gb:
+        return (f"Only {free:.1f} GB free on the disk that holds {path}; recording needs "
+                f"{need_gb:g} GB.")  # fmt: skip
+    return None
+
+
+def resume_problem(root: Path, feats: dict[str, Any], fps: int) -> str | None:
+    """Why episodes recorded now cannot join the dataset at `root`, or None. WHY check before:
+    LeRobot's resume keeps the dataset's own fps and features, so a frame of another shape fails
+    in the writer mid-take, and another fps gives every new episode a wrong clock."""
+    try:
+        info = json.loads((root / "meta" / "info.json").read_text())
+    except (OSError, ValueError) as e:
+        return f"Its meta/info.json cannot be read: {e}"
+    if info.get("fps") != fps:
+        return f"It was recorded at {info.get('fps')} fps; Studio records at {fps}."
+    old = info.get("features") or {}
+    for k, f in feats.items():
+        o = old.get(k)
+        if o is None:
+            return f"It has no {k}: this rig has a camera or arm the dataset does not."
+        if list(o.get("shape") or []) != list(f["shape"]) or o.get("names") != f.get("names"):
+            return f"Its {k} is {o.get('shape')}, this rig gives {list(f['shape'])}."
+    extra = [k for k in old if k.startswith("observation.images.") and k not in feats]
+    if extra:
+        return f"It has {extra[0]}, which this rig does not."
+    return None
 
 
 Cols = list[tuple[str, str]]  # per feature name: (arm, joint)

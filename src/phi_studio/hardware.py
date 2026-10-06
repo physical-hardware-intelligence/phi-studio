@@ -126,6 +126,7 @@ class FeetechArm:
     last_error: str | None = None
     cal_path: Path | None = None  # the file `calibration` came from; Identify re-reads it
     max_step: float | dict[str, float] | None = None  # robot-config.yaml's max_relative_target
+    use_degrees: bool = True  # robot-config.yaml's; Studio reads degrees either way (motor_table)
 
     # -- connection ------------------------------------------------------------------------------
     def connect(self) -> None:
@@ -406,6 +407,7 @@ def build_rig(
         arm = FeetechArm(
             a.key, a.role, a.port, a.lerobot_id or a.key, cal, side=a.side,
             bus_factory=bus_factory, cal_path=path, max_step=a.max_relative_target,
+            use_degrees=a.use_degrees is not False,
         )  # fmt: skip
         try:
             arm.connect()
