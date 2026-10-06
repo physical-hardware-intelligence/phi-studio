@@ -63,6 +63,22 @@ def save_calibration(cal: Calibration, path: Path, backup: bool = False) -> Path
     return kept
 
 
+def unfinished(cal: Calibration) -> str | None:
+    """Why these registers cannot be a finished calibration, or None. LeRobot's reset sets every
+    joint to homing 0 and 0..4095 (motors_bus.py:765-770), and recording ranges narrows each joint
+    but wrist roll (so_follower.py:132-143), so 0..4095 anywhere else means a run never finished
+    or never ran. WHY it matters: a file written from such registers calls a wrong zero right."""
+    for j, c in cal.items():
+        if j == "wrist_roll":
+            continue
+        name = j.replace("_", " ")
+        if c.range_min >= c.range_max:
+            return f"{name} has no range ({c.range_min} to {c.range_max})"
+        if c.range_min == 0 and c.range_max == TICKS_PER_REV - 1:
+            return f"{name} still has the factory range 0 to 4095: its range was never recorded"
+    return None
+
+
 @dataclass(frozen=True)
 class Distance:
     per_joint_deg: dict[str, float]

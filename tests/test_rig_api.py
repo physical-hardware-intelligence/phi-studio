@@ -201,3 +201,98 @@ def test_stop_process_terms_then_continues_a_paused_one_and_kills_if_needed() ->
     assert stop_process(5, kill=lambda p, s: sent.append(s), alive=lambda p: False,
                         sleep=lambda s: None)  # fmt: skip
     assert sent == [signal.SIGTERM, signal.SIGCONT]
+
+
+def test_registers_a_calibration_run_never_finished_are_named() -> None:
+    from phi_studio.identity import unfinished
+
+    assert unfinished(cal(1)) is None
+    reset = {j: c._replace(homing_offset=0, range_min=0, range_max=4095) for j, c in cal(1).items()}
+    assert "shoulder pan still has the factory range" in (unfinished(reset) or "")
+    roll_only = cal(1) | {"wrist_roll": reset["wrist_roll"]}  # LeRobot keeps wrist roll 0..4095
+    assert unfinished(roll_only) is None
+    flat = cal(1) | {"gripper": cal(1)["gripper"]._replace(range_min=2000, range_max=2000)}
+    assert "gripper has no range" in (unfinished(flat) or "")
+
+
+def test_before_lerobot_calibrates_a_linked_file_becomes_its_own_copy(tmp_path: Path) -> None:
+    """LeRobot saves with open(path, "w"), which writes through a link: recalibrating
+    phi_bi_left.json rewrote phi_follower.json too."""
+    from phi_studio.rig_api import _own_copy
+
+    target = write_cal(tmp_path, "robots/so_follower/phi_follower", cal(3))
+    link = tmp_path / "robots/so_follower/phi_bi_left.json"
+    link.symlink_to("phi_follower.json")
+    unlinked, kept = _own_copy(link)
+    assert unlinked and not link.is_symlink() and load_calibration(link) == cal(3)
+    link.write_text("{}")  # what LeRobot's save does next
+    assert load_calibration(target) == cal(3)
+    assert kept is not None and load_calibration(kept) == cal(3)
+    assert _own_copy(tmp_path / "robots/so_follower/none.json") == (False, None)  # a new arm
+
+
+class _Client:
+    def __init__(self) -> None:
+        self.pushed: list[dict[str, Any]] = []
+
+    def push(self, m: dict[str, Any]) -> None:
+        self.pushed.append(m)
+
+
+def _cal_api(tmp_path: Path, monkeypatch: Any, regs: dict[str, JointCal]) -> RigApi:
+    import phi_studio.rig_api as R
+
+    cfg = tmp_path / "robot-config.yaml"
+    cfg.write_text(_section("follower", "phi_bi", BI[:2]) + _section("leader", "phi_bi", BI[2:]))
+    api = RigApi(_Studio())  # type: ignore[arg-type]
+    api.studio.spec = {"cal_root": str(tmp_path / "cal"), "kind": "lerobot"}
+    api.studio.last = {}  # type: ignore[attr-defined]
+    monkeypatch.setattr(R, "config_target", lambda studio: cfg)
+
+    async def idle(studio: Any) -> None:
+        return None
+
+    monkeypatch.setattr(R, "lerobot_busy", idle)
+    monkeypatch.setattr(R.detect, "serial_ports", lambda: [(p, "SN") for p in PORTS])
+    monkeypatch.setattr(R.detect, "scan", lambda ports, root, holders=None: [
+        Found(ports[0][0], "SN", [1, 2, 3, 4, 5, 6], [], registers=regs)])
+    return api
+
+
+def test_verify_compares_the_arms_registers_with_its_file(tmp_path: Path, monkeypatch: Any) -> None:
+    import asyncio
+
+    api = _cal_api(tmp_path, monkeypatch, cal(1))
+    c = _Client()
+    asyncio.run(api.cal_verify(c, {"arm": "left_follower"}))  # type: ignore[arg-type]
+    assert c.pushed[-1]["file"] is False and c.pushed[-1]["exact"] is False
+    write_cal(tmp_path / "cal", "robots/so_follower/phi_bi_left", cal(1))
+    asyncio.run(api.cal_verify(c, {"arm": "left_follower"}))  # type: ignore[arg-type]
+    v = c.pushed[-1]
+    assert v["exact"] and v["max_deg"] == 0 and v["unfinished"] is None and v["problem"] is None
+
+
+def test_save_from_motors_writes_finished_registers_and_refuses_unfinished_ones(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    import asyncio
+
+    reset = {j: c._replace(homing_offset=0, range_min=0, range_max=4095) for j, c in cal(1).items()}
+    api = _cal_api(tmp_path, monkeypatch, reset)
+    path = tmp_path / "cal/robots/so_follower/phi_bi_left.json"
+    with pytest.raises(RigError, match="factory range"):
+        asyncio.run(api.cal_from_motors(_Client(), {"arm": "left_follower"}))  # type: ignore[arg-type]
+    assert not path.exists()
+    api = _cal_api(tmp_path, monkeypatch, cal(1))
+    c = _Client()
+    asyncio.run(api.cal_from_motors(c, {"arm": "left_follower"}))  # type: ignore[arg-type]
+    assert load_calibration(path) == cal(1) and c.pushed[-1]["exact"]
+
+
+def test_verify_refuses_while_studio_holds_the_arms(tmp_path: Path, monkeypatch: Any) -> None:
+    import asyncio
+
+    api = _cal_api(tmp_path, monkeypatch, cal(1))
+    api.studio.last = {"state": {"state": "IDENTIFIED"}}  # type: ignore[attr-defined]
+    with pytest.raises(RigError, match="worker holds their ports"):
+        asyncio.run(api.cal_verify(_Client(), {"arm": "left_follower"}))  # type: ignore[arg-type]

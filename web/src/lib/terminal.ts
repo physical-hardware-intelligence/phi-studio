@@ -36,8 +36,10 @@ class TerminalLink {
       }
     });
     // Stop (the button or Esc) also ends a LeRobot command running here: it may be driving the arms.
+    // WHY not lerobot-calibrate: it never powers a motor, and Esc pressed by habit midway would leave the
+    // motors reset to 0..4095 with no file saved.
     studio.onStop.push(() => {
-      if (this.snap.running && /\blerobot-/.test(this.snap.running.command)) this.interrupt();
+      if (this.snap.running && /\blerobot-(?!calibrate\b)/.test(this.snap.running.command)) this.interrupt();
     });
   }
 

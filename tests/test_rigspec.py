@@ -592,3 +592,27 @@ def test_rollout_refusals_are_refusals_and_say_what_they_check():
         _rollout(strategy=strategy, dataset_repo_id="me/rollout_x", episodes=0)
     with pytest.raises(Refusal, match="at least 1 episode"):
         _rollout(strategy="dagger", dataset_repo_id="me/rollout_x", episodes=0)
+
+
+@needs_lerobot
+@pytest.mark.parametrize("text", [BIMANUAL, BIMANUAL_OPTS], ids=["bimanual", "bimanual-options"])
+def test_each_bimanual_arm_calibrates_alone_into_the_file_the_pair_reads(text, tmp_path,
+                                                                         monkeypatch):  # fmt: skip
+    """Studio's Calibrate page runs lerobot-calibrate per arm: the single-arm type with the sided
+    id must land on the very path bi_so_follower / bi_so_leader load (bi_so_follower.py:56)."""
+    import lerobot.robots.robot as robot_mod
+    import lerobot.teleoperators.teleoperator as teleop_mod
+    from lerobot.robots.utils import make_robot_from_config
+    from lerobot.teleoperators.utils import make_teleoperator_from_config
+
+    monkeypatch.setattr(robot_mod, "HF_LEROBOT_CALIBRATION", tmp_path)
+    monkeypatch.setattr(teleop_mod, "HF_LEROBOT_CALIBRATION", tmp_path)
+    spec = rigspec.parse(text.replace("CALDIR", str(tmp_path / "own")))
+    per_arm = {c["arm"]: c["cmd"] for c in spec.commands() if c.get("arm")}
+    assert set(per_arm) == {"left_follower", "right_follower", "left_leader", "right_leader"}
+    for a in spec.arms:
+        cfg = _parse_cli(per_arm[a.key])
+        dev = (make_robot_from_config(cfg.robot) if a.role == "follower"
+               else make_teleoperator_from_config(cfg.teleop))  # fmt: skip
+        assert dev.id == a.lerobot_id and dev.calibration_fpath == a.calibration_path(tmp_path)
+        assert f"port={a.port}" in per_arm[a.key]

@@ -10,6 +10,13 @@ which, and write that into robot-config.yaml and the calibration folder.
                                per motor, then with done
     cmd rig_stop    (control)  stop a process that holds an arm's port (SIGTERM, then SIGKILL),
                                only when a fresh lsof still shows it holding one; rescans
+    cmd rig_cal_prepare  (control)  before lerobot-calibrate runs for one arm in the terminal: back
+                               up its file, and turn a symlinked file into a copy, because LeRobot
+                               writes through a link into the file it points at (robot.py:170)
+    cmd rig_cal_verify   (control)  after it ends: read that arm's registers and compare them to its
+                               file; pushes rig_cal_verified
+    cmd rig_cal_from_motors (control)  write that arm's file from its registers, only when they hold
+                               a finished calibration (identity.unfinished)
     cmd rig_apply   (control)  rescan, check the chosen roles and sides, write any missing
                                calibration file from the arm's own registers, replace robot: and
                                teleop: in robot-config.yaml (backup first, every other line kept),
@@ -30,7 +37,13 @@ from typing import TYPE_CHECKING, Any
 
 from phi_studio import configedit, detect, rigspec
 from phi_studio.errors import Refusal
-from phi_studio.identity import Calibration, load_calibration, save_calibration
+from phi_studio.identity import (
+    Calibration,
+    load_calibration,
+    match_fingerprint,
+    save_calibration,
+    unfinished,
+)
 from phi_studio.onboard_api import HOLDING_STATES, STEP_LIMIT, config_target
 from phi_studio.setup_api import BACKUPS, data_dir, lerobot_busy
 
@@ -296,6 +309,78 @@ class RigApi:
                 client.push({"type": "rig_motion", "watching": False})
         client.push({"type": "rig_motion", "watching": False, "moved": moved, "at": time.time()})
 
+    # -- calibration in the terminal, one arm at a time -------------------------------------------
+    def _arm(self, msg: dict[str, Any]) -> tuple[rigspec.ArmSpec, Path]:
+        """The arm `msg["arm"]` names in robot-config.yaml, and its calibration file."""
+        try:
+            spec = rigspec.parse(config_target(self.studio).read_text())
+        except (OSError, ValueError) as e:
+            raise RigError(f"Could not read robot-config.yaml: {e}", "Set up the rig first.") from e
+        arm = next((a for a in spec.arms if a.key == msg.get("arm")), None)
+        if arm is None:
+            raise RigError(f"robot-config.yaml has no arm {msg.get('arm')!r}.")
+        path = arm.calibration_path(self.cal_root)
+        if path is None or not arm.port:
+            name = arm.key.replace("_", " ")
+            raise RigError(f"{name} has no id or no port in robot-config.yaml.",
+                           "Run Detect arms on the Rig setup page.")  # fmt: skip
+        return arm, path
+
+    async def cal_prepare(self, client: Client, msg: dict[str, Any]) -> None:
+        arm, path = self._arm(msg)
+        unlinked, kept = await asyncio.to_thread(_own_copy, path)
+        client.push({"type": "rig_cal_prepared", "arm": arm.key, "path": str(path),
+                     "unlinked": unlinked, "backup": str(kept) if kept else None})  # fmt: skip
+
+    def _verdict(self, arm: rigspec.ArmSpec, path: Path, f: detect.Found) -> dict[str, Any]:
+        out: dict[str, Any] = {"type": "rig_cal_verified", "arm": arm.key, "path": str(path),
+                               "file": path.is_file(), "exact": False, "max_deg": None,
+                               "worst_joint": None, "problem": f.problem,
+                               "unfinished": None, "at": time.time()}  # fmt: skip
+        if f.registers is None:
+            out["problem"] = out["problem"] or "Could not read its calibration registers."
+            return out
+        out["unfinished"] = unfinished(f.registers)
+        if out["file"]:
+            try:
+                d = match_fingerprint(f.registers, {"file": load_calibration(path)})[0].distance
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                out["problem"] = f"Its file cannot be read: {e}"
+                return out
+            out |= {"exact": d.exact, "max_deg": round(d.max_deg, 2), "worst_joint": d.worst_joint}
+        return out
+
+    async def _read_arm(self, arm: rigspec.ArmSpec) -> detect.Found:
+        await self._may_open_ports()
+        ports = dict(await asyncio.to_thread(detect.serial_ports))
+        if arm.port not in ports:
+            raise RigError(f"Nothing is plugged in at {arm.port}.",
+                           "Plug the arm in, or run Detect arms to find its port.")  # fmt: skip
+        found = await asyncio.to_thread(detect.scan, [(arm.port, ports[arm.port])], self.cal_root,
+                                        holders=self._holders)  # fmt: skip
+        if not found:
+            raise RigError(f"No motor answers at {arm.port}.", "Check the arm's power.")
+        return found[0]
+
+    async def cal_verify(self, client: Client, msg: dict[str, Any]) -> None:
+        arm, path = self._arm(msg)
+        async with self.lock:
+            f = await self._read_arm(arm)
+        client.push(self._verdict(arm, path, f))
+
+    async def cal_from_motors(self, client: Client, msg: dict[str, Any]) -> None:
+        arm, path = self._arm(msg)
+        async with self.lock:
+            f = await self._read_arm(arm)
+            if f.problem or f.registers is None:
+                raise RigError(f"Did not save: {f.problem or 'its registers could not be read'}")
+            why = unfinished(f.registers)
+            if why:
+                raise RigError(f"Did not save: {why}.", "Calibrate this arm again.")
+            regs = f.registers
+            await asyncio.to_thread(_save_own, regs, path)
+        client.push(self._verdict(arm, path, f))
+
     async def apply(self, client: Client, msg: dict[str, Any]) -> None:
         async with self.lock:
             state = (self.studio.last.get("state") or {}).get("state", "DISCONNECTED")
@@ -304,6 +389,12 @@ class RigApi:
             await self._may_open_ports()
             await self._scan()  # the registers as they are now, not at the first scan
             arms = check_assignment(msg.get("arms"), self.found)
+            for a in arms:  # before any write: a file from unfinished registers is a wrong zero
+                regs = self.found[a["port"]].registers
+                why = unfinished(regs) if regs is not None else None
+                if why:
+                    raise RigError(f"{detect_name(a)}: {why}.",
+                                   "Calibrate this arm on the Calibrate page, then apply again.")
             library = await asyncio.to_thread(detect.calibration_library, self.cal_root)
             ids = self._config_view()["ids"]
             for role in ("follower", "leader"):
@@ -381,6 +472,34 @@ class RigApi:
         return out
 
 
+def detect_name(a: dict[str, Any]) -> str:
+    """'Left follower' for an assigned arm."""
+    return (f"{a['side']} {a['role']}" if a.get("side") else str(a["role"])).capitalize()
+
+
+def _own_copy(path: Path) -> tuple[bool, Path | None]:
+    """Make `path` a file of its own and back it up. Returns (was a link, backup). WHY: LeRobot
+    saves with open(path, "w") (robot.py:170), which writes through a symlink into the file it
+    points at, so recalibrating phi_bi_left.json would rewrite phi_follower.json too."""
+    unlinked = path.is_symlink()
+    if unlinked:
+        data = path.read_bytes() if path.exists() else None
+        path.unlink()
+        if data is not None:
+            path.write_bytes(data)
+    kept = None
+    if path.is_file():
+        kept = path.with_name(f"{path.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+        kept.write_bytes(path.read_bytes())
+    return unlinked, kept
+
+
+def _save_own(cal: Calibration, path: Path) -> Path | None:
+    if path.is_symlink():
+        path.unlink()  # replace the link itself, never the file it points at
+    return save_calibration(cal, path, backup=True)
+
+
 def register(studio: Studio) -> None:
     api = RigApi(studio)
     studio.rig_api = api  # type: ignore[attr-defined]
@@ -390,3 +509,6 @@ def register(studio: Studio) -> None:
     studio.handle("rig_stop", api.stop_holder, control=True)
     studio.handle("rig_check", api.check, control=True)
     studio.handle("rig_apply", api.apply, control=True)
+    studio.handle("rig_cal_prepare", api.cal_prepare, control=True)
+    studio.handle("rig_cal_verify", api.cal_verify, control=True)
+    studio.handle("rig_cal_from_motors", api.cal_from_motors, control=True)

@@ -170,7 +170,7 @@ export interface LeRobotArm {
   port: string | null; line: number | null; calibration: string | null; calibrated: boolean;
   use_degrees: boolean; max_relative_target: number | Record<string, number> | null;
 }
-export interface LeRobotCommand { step: string; id: string; title: string; why: string; cmd: string }
+export interface LeRobotCommand { step: string; id: string; title: string; why: string; cmd: string; arm?: string } // arm: one arm's calibrate
 export interface LeRobotView {
   file: { root: string; path: string }; error?: string; bimanual: boolean; arms: LeRobotArm[];
   cameras: { key: string; side: string | null; feature: string; type: unknown; source: unknown; hardware?: string | null }[];

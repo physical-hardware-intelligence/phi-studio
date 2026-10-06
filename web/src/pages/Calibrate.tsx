@@ -1,6 +1,7 @@
 import { ArrowLeft, ArrowRight, CircleAlert, CircleCheck, CircleX, Check, Hand, Hourglass, Pause, Play, Power, RotateCcw, Undo2, Wand2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Notices } from "../components/Notices";
+import { TerminalCalibrate } from "../components/TerminalCalibrate";
 import { label, labels } from "../lib/labels";
 import { Segmented } from "../scene/ViewSwitch";
 import {
@@ -40,6 +41,7 @@ export function Calibrate() {
           <button className="btn btn-ghost btn-sm notice-x" onClick={() => setHidden(done.at)} aria-label="Dismiss"><X aria-hidden /></button>
         </div>
       )}
+      {!cal && !autos && <TerminalCalibrate />}
       <div className="cal-grid">
         <ArmPicker active={autos ? autos.map((r) => r.arm) : cal ? [cal.arm] : []} />
         {autos ? <AutoWizard runs={autos} /> : cal ? <Wizard cal={cal} /> : <HowItWorks />}

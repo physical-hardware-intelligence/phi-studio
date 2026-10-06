@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Camera, Check, CircleAlert, Plug, Search, Unplug, Wand2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Camera, Check, CircleAlert, Plug, Search, SquareTerminal, Unplug, Wand2 } from "lucide-react";
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { ActionBar } from "../components/ActionBar";
 import { Boundary } from "../components/Boundary";
@@ -226,8 +226,8 @@ function CalibrationStep({ d, set, rig, onBack, onNext }: { d: Draft; set: (d: D
       </div>
       <Foot onBack={onBack} onNext={save} next="Save rig" busy={busy} disabled={!control}
         extra={<>
-          <button className="btn" onClick={() => go("calibrate")} title="Every arm finds its own end stops"><Wand2 aria-hidden />Auto-calibrate</button>
-          <button className="btn btn-ghost" onClick={() => go("calibrate")}>By hand</button>
+          <button className="btn" onClick={() => go("calibrate")} title="LeRobot's lerobot-calibrate, one arm at a time, in Studio's terminal"><SquareTerminal aria-hidden />Calibrate in the terminal</button>
+          <button className="btn btn-ghost" onClick={() => go("calibrate")} title="Every arm finds its own end stops"><Wand2 aria-hidden />Auto-calibrate</button>
         </>} />
       {!control && <p className="faint t-sm">Take control (top right) to save.</p>}
     </>

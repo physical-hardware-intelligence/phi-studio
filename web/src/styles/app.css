@@ -228,6 +228,9 @@ fieldset.form { border: 0; margin: 0; min-width: 0; }
 .pick-row.is-active { background: var(--bg-selected); }
 .pick-text { flex: 1; min-width: 0; }
 .pick-name { display: flex; align-items: baseline; gap: var(--space-2); font-weight: 600; }
+/* WHY wrap: a row with three actions squeezed its name to an ellipsis in a narrow window. */
+.pick-row.pick-wrap { flex-wrap: wrap; }
+.pick-wrap .pick-text { flex: 1 1 14rem; }
 .pick-role { flex: none; font-size: var(--text-sm); font-weight: 500; color: var(--text-tertiary); }
 .pick-meta { display: flex; align-items: center; gap: 6px; margin-top: 2px; font-size: var(--text-base); line-height: 1.5rem; }
 .pick-meta svg { width: 15px; height: 15px; flex: none; }

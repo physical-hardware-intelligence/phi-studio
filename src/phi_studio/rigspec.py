@@ -424,8 +424,24 @@ def lerobot_commands(spec: RigSpec) -> list[dict[str, str]]:
                     "Enter keeps it and c redoes it.")  # fmt: skip
             if len(arms) > 1:
                 why += " It does the left arm, then the right."
-            out.append(_cmd("calibrate", f"calibrate_{dev}", f"Calibrate the {noun}", why,
-                            "lerobot-calibrate", _device_args(dev, arms, sec)))  # fmt: skip
+            c = _cmd("calibrate", f"calibrate_{dev}", f"Calibrate the {noun}", why,
+                     "lerobot-calibrate", _device_args(dev, arms, sec))  # fmt: skip
+            if len(arms) == 1:
+                c["arm"] = arms[0].key
+            out.append(c)
+    for a in [a for a in robots + teleops if a.side and a.lerobot_id]:
+        # WHY one arm at a time too: a bimanual run cannot redo one arm, and the Calibrate page
+        # checks each arm's registers against its file when its run ends. The single-arm type
+        # with the sided id writes the very file the bimanual type reads (bi_so_follower.py:56).
+        dev = "robot" if a.section == "robot" else "teleop"
+        args = [f"--{dev}.type={a.single_type}", f"--{dev}.port={a.port or '<port>'}",
+                f"--{dev}.id={a.lerobot_id}"]  # fmt: skip
+        if a.calibration_dir:
+            args.append(f"--{dev}.calibration_dir={a.calibration_dir}")
+        c = _cmd("calibrate", f"calibrate_{a.key}", f"Calibrate the {a.key.replace('_', ' ')}",
+                 f"Writes {a.lerobot_id}.json for this arm only.", "lerobot-calibrate", args)
+        c["arm"] = a.key
+        out.append(c)
     if robots and teleops:
         # lerobot_teleoperate.py:140: 60 fps by default
         out.append(_cmd("teleop", "teleoperate", "Teleoperate",
