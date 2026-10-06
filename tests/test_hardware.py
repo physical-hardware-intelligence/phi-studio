@@ -33,6 +33,7 @@ class FakeBus:
         self.goals: list[dict[str, float]] = []
         self.normalized: list[bool] = []
         self.retries: list[int] = []
+        self.deaf: set[str] = set()
         self.regs = {
             j: {
                 "Present_Load": -250,
@@ -80,11 +81,20 @@ class FakeBus:
     def write(self, name: str, motor: str, value: int, *, normalize: bool = True) -> None:
         self.writes.append((name, motor, value))
 
-    def enable_torque(self, motors: Any = None) -> None:
-        self.torque = {j: 1 for j in JOINTS}
+    def _which(self, motors: Any) -> list[str]:
+        return list(JOINTS) if motors is None else [motors] if isinstance(motors, str) else motors
 
-    def disable_torque(self, motors: Any = None) -> None:
-        self.torque = {j: 0 for j in JOINTS}
+    def enable_torque(self, motors: Any = None, num_retry: int = 0) -> None:
+        self.retries.append(num_retry)
+        for j in self._which(motors):
+            self.torque[j] = 1
+
+    def disable_torque(self, motors: Any = None, num_retry: int = 0) -> None:
+        self.retries.append(num_retry)
+        for j in self._which(motors):
+            if j in self.deaf:  # a motor whose reply never arrives, as LeRobot raises it
+                raise RuntimeError(f"Failed to write Torque_Enable on {j}")
+            self.torque[j] = 0
 
     def configure_motors(self) -> None:
         self.writes.append(("configure_motors", "*", 0))
@@ -560,3 +570,55 @@ def test_an_arm_is_matched_to_its_own_file_when_another_role_shares_its_name(tmp
     w.handle({"cmd": "connect"})
     fol = next(a for a in w.identity if a["role"] == "follower")
     assert fol["match"] == "f" and fol["ok"], fol
+
+
+def test_torque_off_reaches_every_motor_past_one_that_fails() -> None:
+    """LeRobot's disable loop stops at the first motor that fails, leaving the rest powered."""
+    a = arm()
+    bus = FakeBus.instances[-1]
+    a.set_torque(True)
+    assert all(bus.torque.values()) and bus.retries[-1] == H.WRITE_RETRIES
+    bus.deaf = {"shoulder_lift"}
+    with pytest.raises(RuntimeError, match="torque did not turn off on shoulder_lift"):
+        a.set_torque(False)
+    assert [j for j, t in bus.torque.items() if t] == ["shoulder_lift"]  # every other motor is off
+    assert a._bus is bus  # a motor that does not answer is not a lost port
+
+
+def test_health_reads_retry_like_position_reads() -> None:
+    a = arm()
+    bus = FakeBus.instances[-1]
+    bus.retries.clear()
+    a.read_health()
+    assert bus.retries and set(bus.retries) == {H.READ_RETRIES}
+
+
+def test_a_stricter_step_limit_in_robot_config_is_used_and_a_looser_one_is_not() -> None:
+    from phi_studio.worker import DEFAULT_MAX_STEP, RigWorker
+
+    f, lead = arm("follower"), arm("leader")
+    w = RigWorker(type("R", (), {"arms": [f, lead]})(), lambda m: None, clock=lambda: 0.0,
+                  calibrations={})  # fmt: skip
+    present = {j: 0.0 for j in JOINTS}
+    far = {j: 50.0 for j in JOINTS}
+    assert w._clip(far, present, f) == {j: DEFAULT_MAX_STEP[j] for j in JOINTS}
+    f.max_step = 3.0
+    assert set(w._clip(far, present, f).values()) == {3.0}
+    f.max_step = {"gripper": 1.0, "shoulder_pan": 100.0}
+    got = w._clip(far, present, f)
+    assert got["gripper"] == 1.0 and got["shoulder_pan"] == DEFAULT_MAX_STEP["shoulder_pan"]
+
+
+def test_one_silent_arm_does_not_fault_the_connect_and_is_named(tmp_path: Any) -> None:
+    from phi_studio.session import State
+
+    _, w, sent = _rig_without_follower_file(tmp_path)
+    leader = next(a for a in w.rig.arms if a.role == "leader")
+    leader.read_calibration = lambda: (_ for _ in ()).throw(ConnectionError("no status packet"))
+    w.handle({"cmd": "connect"})
+    assert w.session.state is State.IDENTIFIED
+    entry = next(a for a in w.identity if a["role"] == "leader")
+    assert entry["error"] == "no status packet" and "leader" in w.dead
+    from phi_studio.worker import _identity_problem
+
+    assert _identity_problem(entry)[0] == "Leader is not answering: no status packet"

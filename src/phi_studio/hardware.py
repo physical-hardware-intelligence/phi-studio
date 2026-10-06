@@ -36,13 +36,14 @@ from typing import Any
 from phi_studio import rigspec
 from phi_studio.files import lerobot_calibration_dir
 from phi_studio.identity import Calibration, JointCal, load_calibration
-from phi_studio.rig import JOINTS, JointHealth
+from phi_studio.rig import JOINTS, JointHealth, label
 
 RECONNECT_S = 2.0  # how often a lost bus is tried again
 # WHY retries: one lost status packet on a long USB run must not fault a recording; LeRobot's
 # sync_read retries in place (motors_bus.py sync_read num_retry). A bus that misses three in a row
 # is down, and the worker faults it as before.
 READ_RETRIES = 2
+WRITE_RETRIES = 2  # torque writes: LeRobot's default is none (feetech.py:291-305)
 MOTOR_IDS = {j: i + 1 for i, j in enumerate(JOINTS)}  # motor_table's ids, without importing LeRobot
 FULL_TICKS = 4095  # the STS3215's last encoder tick: reset_calibration's Max_Position_Limit
 GRIPPER_LIMITS = {"Max_Torque_Limit": 500, "Protection_Current": 250, "Overload_Torque": 25}
@@ -124,6 +125,7 @@ class FeetechArm:
     configured: bool = False
     last_error: str | None = None
     cal_path: Path | None = None  # the file `calibration` came from; Identify re-reads it
+    max_step: float | dict[str, float] | None = None  # robot-config.yaml's max_relative_target
 
     # -- connection ------------------------------------------------------------------------------
     def connect(self) -> None:
@@ -138,7 +140,7 @@ class FeetechArm:
             except Exception:
                 pass
             if isinstance(e, (OSError, RuntimeError)):
-                raise type(e)(explain(e, self.name, self.port)) from e
+                raise type(e)(explain(e, label(self.name), self.port)) from e
             raise
         self._bus = bus
         self.configured = False
@@ -289,7 +291,22 @@ class FeetechArm:
         self._call(run)
 
     def set_torque(self, on: bool) -> None:
-        self._call(lambda b: b.enable_torque() if on else b.disable_torque())
+        def run(b: Any) -> None:
+            if on:
+                b.enable_torque(num_retry=WRITE_RETRIES)
+                return
+            # WHY motor by motor: LeRobot's loop stops at the first motor that fails, which left
+            # every motor after a flaky one powered (right follower motor 2, 2026-10-05).
+            failed = []
+            for j in JOINTS:
+                try:
+                    b.disable_torque(j, num_retry=WRITE_RETRIES)
+                except (OSError, RuntimeError):
+                    failed.append(j)
+            if failed:
+                raise RuntimeError(f"torque did not turn off on {', '.join(failed)}")
+
+        self._call(run)
 
     def read_torque(self) -> bool:
         """True when any servo holds torque: one holding joint is enough to make the arm unsafe to
@@ -304,15 +321,16 @@ class FeetechArm:
 
     def read_health(self) -> dict[str, JointHealth]:
         def read(b: Any) -> dict[str, JointHealth]:
+            n = READ_RETRIES  # WHY: one garbled health packet faulted a moving rig
             pos = (
-                b.sync_read("Present_Position")
+                b.sync_read("Present_Position", num_retry=n)
                 if self.calibration is not None
                 else {j: float("nan") for j in JOINTS}
             )
-            load = b.sync_read("Present_Load", normalize=False)  # sign-magnitude decoded: per mille
-            temp = b.sync_read("Present_Temperature", normalize=False)  # deg C
-            volt = b.sync_read("Present_Voltage", normalize=False)  # 0.1 V
-            status = b.sync_read("Status", normalize=False)
+            load = b.sync_read("Present_Load", normalize=False, num_retry=n)  # per mille
+            temp = b.sync_read("Present_Temperature", normalize=False, num_retry=n)  # deg C
+            volt = b.sync_read("Present_Voltage", normalize=False, num_retry=n)  # 0.1 V
+            status = b.sync_read("Status", normalize=False, num_retry=n)
             return {
                 j: JointHealth(
                     float(pos[j]),
@@ -387,7 +405,7 @@ def build_rig(
         cal = load_calibration(path) if path and path.is_file() else None
         arm = FeetechArm(
             a.key, a.role, a.port, a.lerobot_id or a.key, cal, side=a.side,
-            bus_factory=bus_factory, cal_path=path,
+            bus_factory=bus_factory, cal_path=path, max_step=a.max_relative_target,
         )  # fmt: skip
         try:
             arm.connect()

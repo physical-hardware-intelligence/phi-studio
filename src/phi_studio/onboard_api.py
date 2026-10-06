@@ -45,6 +45,16 @@ NAME_MAX = 60
 STEP_LIMIT = 8.0
 # Session states in which an arm may hold torque: no switching rigs then (rig_use).
 HOLDING_STATES = ("ARMED", "MOVING", "STOPPED", "FAULT", "CALIBRATING")
+
+
+def may_hold_torque(studio: Any) -> bool:
+    """True when switching rigs would drop a powered arm. WHY telemetry too: an arm can hold torque
+    in IDENTIFIED or READY, left on by an earlier session (worker.py _cmd_confirm)."""
+    st = (studio.last.get("state") or {}).get("state", "DISCONNECTED")
+    if st in HOLDING_STATES:
+        return True
+    arms = (studio.telemetry or {}).get("arms") or {}
+    return any(isinstance(a, dict) and a.get("torque") for a in arms.values())
 SLOTS = {
     "single": ("leader", "follower"),
     "bimanual": ("left_leader", "left_follower", "right_leader", "right_follower"),
@@ -418,7 +428,7 @@ class OnboardAPI:
         restart. Refused while any arm may hold torque; a connected rig is disconnected first."""
         hardware = msg.get("hardware") is True
         st = (self.studio.last.get("state") or {}).get("state", "DISCONNECTED")
-        if st in HOLDING_STATES:
+        if may_hold_torque(self.studio):
             raise Refusal("An arm may be holding torque.", "Release torque, then disconnect.")
         rec = (self.studio.telemetry or {}).get("recording") or {}
         if rec and not rec.get("finished", True):

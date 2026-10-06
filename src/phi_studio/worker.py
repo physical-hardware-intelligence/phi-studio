@@ -161,6 +161,9 @@ def _calibrated(a: ArmBus) -> bool:
 def _identity_problem(a: dict[str, Any]) -> tuple[str, str]:
     """(message, fix) for an arm whose registers do not match its own calibration file."""
     name, match = label(a["name"]), a["match"]
+    if a.get("error"):
+        return (f"{name} is not answering: {a['error']}",
+                "Check its power and USB cable, then Connect again.")  # fmt: skip
     if match is None:
         return (f"{name}: no calibration files to compare with",
                 "Calibrate the arm, or point Studio at the calibration directory.")  # fmt: skip
@@ -348,7 +351,7 @@ class RigWorker:
             r.chunk_ms.append((time.perf_counter() - t) * 1e3)
         r.action = r.queue.popleft()
         r.step += 1
-        return [(f, self._clip(r.action[f.name], pos[f.name])) for f in self.followers]
+        return [(f, self._clip(r.action[f.name], pos[f.name], f)) for f in self.followers]
 
     # -- recording (recorder.py): episodes of teleop into a LeRobot dataset ------------------------
     def _cmd_rec_start(self, msg: dict[str, Any]) -> None:
@@ -928,8 +931,20 @@ class RigWorker:
             self.calibrations = reload()
         out = []
         for a in self.arms:
-            regs = a.read_calibration()
-            self.torque[a.name] = a.read_torque()  # the servo's word, not what Studio last sent
+            try:
+                regs = a.read_calibration()
+                self.torque[a.name] = a.read_torque()  # the servo's word, not what Studio sent
+            except BUS_ERRORS as e:
+                # WHY go on: one unplugged arm used to fault the connect, so the page could not
+                # say which of four arms was the silent one.
+                self.dead.add(a.name)
+                out.append({"name": a.name, "role": a.role, "port": getattr(a, "port", None),
+                            "serial": getattr(a, "serial", None), "expected": a.calibration_id,
+                            "file": calibration_file(a), "match": None, "max_deg": None,
+                            "worst_joint": None, "exact": False, "calibrated": _calibrated(a),
+                            "error": str(e), "ok": False})  # fmt: skip
+                continue
+            self.dead.discard(a.name)
             cals = dict(self.calibrations)
             own = getattr(a, "calibration", None)
             if own is not None:
@@ -1005,11 +1020,21 @@ class RigWorker:
         self._cal_abort()
         self._autocal_abort()
 
-    def _clip(self, goal: dict[str, float], present: dict[str, float]) -> dict[str, float]:
-        return {
-            j: present[j] + max(-self.max_step[j], min(self.max_step[j], goal[j] - present[j]))
-            for j in goal
-        }
+    def _limit(self, arm: ArmBus | None) -> dict[str, float]:
+        """Per joint, the largest step one tick may take: Studio's own, or robot-config.yaml's
+        max_relative_target where that is stricter. WHY never looser: Studio's step is per 30 Hz
+        tick, LeRobot's per 60 fps step, so a config value is already twice as fast here."""
+        cfg = getattr(arm, "max_step", None)
+        if isinstance(cfg, (int, float)) and not isinstance(cfg, bool):
+            return {j: min(v, float(cfg)) for j, v in self.max_step.items()}
+        if isinstance(cfg, dict):
+            return {j: min(v, float(cfg.get(j, v))) for j, v in self.max_step.items()}
+        return self.max_step
+
+    def _clip(self, goal: dict[str, float], present: dict[str, float],
+              arm: ArmBus | None = None) -> dict[str, float]:  # fmt: skip
+        step = self._limit(arm)
+        return {j: present[j] + max(-step[j], min(step[j], goal[j] - present[j])) for j in goal}
 
     def tick(self) -> None:
         """One control cycle: heartbeat, read, act, health, publish."""
@@ -1033,7 +1058,7 @@ class RigWorker:
             if self.session.may_move and self.session.activity == "teleop":
                 for lead, fol in self.pairs:
                     current = fol
-                    fol.write_goals(self._clip(pos[lead.name], pos[fol.name]))
+                    fol.write_goals(self._clip(pos[lead.name], pos[fol.name], fol))
                 if self.rec is not None and self.rec.phase != "done":
                     self._rec_tick(now, pos)
             elif self.session.may_move and self.session.activity == "policy" and self.run:
@@ -1058,7 +1083,10 @@ class RigWorker:
         except BUS_ERRORS as e:
             if current is not None:
                 self.dead.add(current.name)
-            self._fault(f"{current.name if current else 'A bus'} is not answering: {e}")
+            where = "A bus"
+            if current is not None:
+                where = f"{label(current.name)} on {getattr(current, 'port', 'its port')}"
+            self._fault(f"{where} is not answering: {e}")
         except Exception as e:  # a bug: stop the rig and say so, do not kill the worker
             self._fault(f"Studio hit an internal error in the control loop: {e!r}")
         self._cost_ms.append((time.perf_counter() - t_start) * 1e3)

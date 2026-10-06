@@ -38,7 +38,7 @@ export function ArmsPanel() {
                 <div className="arm-meta mono faint">{a.port}</div>
                 <div className="arm-check">
                   {!online ? (
-                    <span className="check tone-danger"><Unplug aria-hidden />Not answering</span>
+                    <span className="check tone-danger" title={a.error}><Unplug aria-hidden />Not answering</span>
                   ) : a.ok ? (
                     <span className="check tone-ok"><CircleCheck aria-hidden />Matches {a.match}.json</span>
                   ) : a.exact ? (
@@ -46,6 +46,8 @@ export function ArmsPanel() {
                       <TriangleAlert aria-hidden />
                       Has {a.match}.json, expected {a.expected}.json. Cables swapped?
                     </span>
+                  ) : a.calibrated === false ? (
+                    <span className="check tone-warn"><TriangleAlert aria-hidden />No {a.expected}.json yet. Calibrate this arm.</span>
                   ) : a.match === null ? (
                     <span className="check tone-warn"><TriangleAlert aria-hidden />No calibration files to compare</span>
                   ) : (

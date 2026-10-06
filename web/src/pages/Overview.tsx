@@ -126,6 +126,7 @@ function RigHealth() {
                       : faults.length ? <Badge tone="danger">{faults[0]}</Badge>
                       : a.ok ? <Badge tone="ok">Matches</Badge>
                       : a.exact ? <Badge tone="danger">Swapped</Badge>
+                      : a.calibrated === false ? <Badge tone="warn">No file</Badge>
                       : <Badge tone="warn">{a.match ? `${a.max_deg?.toFixed(1)}° off` : "No file"}</Badge>}
                   </td>
                   <td>{t?.torque ? <Badge tone="warn">On</Badge> : <span className="faint">Off</span>}</td>

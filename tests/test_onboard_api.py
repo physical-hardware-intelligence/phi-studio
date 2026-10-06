@@ -297,7 +297,7 @@ def test_switching_to_real_arms_starts_the_hardware_worker_even_with_nothing_plu
 ) -> None:
     """The whole --hardware start in the worker process: robot-config.yaml -> FeetechArms over
     LeRobot's bus. The ports do not exist here, so every arm is unreachable, and the rig must come
-    up anyway, say it is real, and fail Connect with a reason, not crash."""
+    up anyway, say it is real, and name each silent arm with a reason on Connect, not crash."""
     import asyncio
     import json
 
@@ -320,11 +320,11 @@ def test_switching_to_real_arms_starts_the_hardware_worker_even_with_nothing_plu
             rig = await until(a, lambda d: d["type"] == "rig", timeout=20)
             assert rig["mock"] is False and len(rig["arms"]) == 4
             await a.send_str(json.dumps({"cmd": "connect"}))
-            got = await until(a, lambda d: d["type"] in ("error", "state")
-                              and (d["type"] == "error" or d["state"] == "FAULT"),
-                              timeout=20)  # fmt: skip
-            text = got.get("message") or got.get("fault") or ""
-            assert "usbmodem" in text or "not answering" in text or "port" in text.lower(), got
+            got = await until(a, lambda d: d["type"] == "identity", timeout=20)
+            assert len(got["arms"]) == 4 and not any(x["ok"] for x in got["arms"])
+            for x in got["arms"]:  # WHY each: one silent arm must not hide which of four it is
+                text = x.get("error") or ""
+                assert "usbmodem" in text or "not answering" in text or "port" in text.lower(), x
         finally:
             await session.close()
             await server.close()
@@ -348,3 +348,16 @@ def test_with_no_flag_studio_picks_real_arms_only_when_a_board_and_a_config_are_
     assert rig_spec(None, 1, [cfg], boards=board) == {"kind": "lerobot", "config": str(cfg)}
     assert "real arms (1 SO-101 driver board plugged in)" in capsys.readouterr().out
     assert rig_spec("mock", 1, [cfg], boards=board) == {"kind": "mock", "pairs": 1}
+
+
+def test_an_arm_holding_torque_blocks_a_rig_switch_in_any_state() -> None:
+    from types import SimpleNamespace
+
+    from phi_studio.onboard_api import may_hold_torque
+
+    s = SimpleNamespace(last={"state": {"state": "READY"}}, telemetry=None)
+    assert not may_hold_torque(s)
+    s.telemetry = {"arms": {"left_follower": {"torque": True}, "left_leader": {"torque": False}}}
+    assert may_hold_torque(s)  # left on by an earlier session, while READY
+    s.telemetry, s.last = None, {"state": {"state": "ARMED"}}
+    assert may_hold_torque(s)

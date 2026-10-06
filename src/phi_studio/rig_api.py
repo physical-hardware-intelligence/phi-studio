@@ -44,7 +44,7 @@ from phi_studio.identity import (
     save_calibration,
     unfinished,
 )
-from phi_studio.onboard_api import HOLDING_STATES, STEP_LIMIT, config_target
+from phi_studio.onboard_api import STEP_LIMIT, config_target, may_hold_torque
 from phi_studio.setup_api import BACKUPS, data_dir, lerobot_busy
 
 if TYPE_CHECKING:
@@ -384,7 +384,7 @@ class RigApi:
     async def apply(self, client: Client, msg: dict[str, Any]) -> None:
         async with self.lock:
             state = (self.studio.last.get("state") or {}).get("state", "DISCONNECTED")
-            if state in HOLDING_STATES:
+            if may_hold_torque(self.studio):
                 raise RigError("An arm may be holding torque.", "Release torque, then disconnect.")
             await self._may_open_ports()
             await self._scan()  # the registers as they are now, not at the first scan

@@ -29,6 +29,8 @@ export interface ArmIdentity {
   worst_joint: string | null;
   exact: boolean;
   ok: boolean; // exact, and the match is this arm's own file
+  calibrated?: boolean; // false: a real arm with no calibration file of its own yet
+  error?: string; // the arm did not answer while Studio read it
 }
 
 export interface JointHealth { load: number; temp: number; volt: number; faults: string[] }

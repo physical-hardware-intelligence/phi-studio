@@ -52,6 +52,7 @@ export function Calibrate() {
 
 function blockedReason(a: ArmIdentity, st: SessionState | undefined, control: boolean, holding: string[]): string | null {
   if (!control) return "Another window has control";
+  if (a.error) return "This arm is not answering";
   if (st === "CALIBRATING") return "Another calibration is running";
   if (st === "FAULT") return "Clear the fault first";
   if (holding.length) return `Turn torque off first: ${labels(holding)} ${holding.length === 1 ? "holds" : "hold"} torque`;
@@ -131,9 +132,10 @@ function ArmPicker({ active }: { active: string[] }) {
 // One line under the arm's name: does the calibration on its servos match the file Studio expects?
 function CalBadge({ a }: { a: ArmIdentity }) {
   const [tone, Icon, text] =
-    a.ok ? ["ok", CircleCheck, `Matches ${a.expected}.json`]
+    a.error ? ["danger", CircleX, `Not answering: ${a.error}`]
+    : a.ok ? ["ok", CircleCheck, `Matches ${a.expected}.json`]
     : a.exact ? ["danger", CircleX, `Holds ${a.match}.json: cables swapped?`]
-    : a.match === null ? ["warn", CircleAlert, "No calibration file"]
+    : a.calibrated === false || a.match === null ? ["warn", CircleAlert, `No ${a.expected}.json yet`]
     : ["warn", CircleAlert, `${a.max_deg?.toFixed(1)}° off ${a.expected}.json`];
   return <div className={`pick-meta text-${tone}`}><Icon aria-hidden /><span className="ellipsis">{text}</span></div>;
 }
