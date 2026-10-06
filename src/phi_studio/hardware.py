@@ -123,6 +123,7 @@ class FeetechArm:
     _next_try: float = 0.0
     configured: bool = False
     last_error: str | None = None
+    cal_path: Path | None = None  # the file `calibration` came from; Identify re-reads it
 
     # -- connection ------------------------------------------------------------------------------
     def connect(self) -> None:
@@ -202,6 +203,22 @@ class FeetechArm:
             for reg, val in GRIPPER_LIMITS.items():
                 bus.write(reg, "gripper", val)
         self.configured = True
+
+    def reload_calibration(self) -> None:
+        """Re-read this arm's file. WHY: lerobot-calibrate in Studio's terminal writes it after
+        Studio loaded it once at start. LeRobot normalises with the bus's own copy, so that is
+        replaced too."""
+        if self.cal_path is None:
+            return
+        try:
+            cal = load_calibration(self.cal_path) if self.cal_path.is_file() else None
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            cal = None  # a broken file is no calibration: positions are not read from it
+        if cal == self.calibration:
+            return
+        self.calibration = cal
+        if self._bus is not None:
+            self._bus.calibration = to_motor_calibration(cal) if cal else {}
 
     # -- rig.ArmBus --------------------------------------------------------------------------------
     def read_calibration(self) -> Calibration:
@@ -328,6 +345,12 @@ class HardwareRig:
         for a in self.arms:
             a.close()
 
+    def reload_calibrations(self) -> dict[str, Calibration]:
+        """Every arm's own file and every file by id, read again from disk."""
+        for a in self.arms:
+            a.reload_calibration()
+        return self.calibration_files()
+
     def calibration_files(self) -> dict[str, Calibration]:
         """Every calibration file under LeRobot's folder, by id: identity matches an arm's registers
         against all of them, so an arm on another arm's cable is caught (worker.py _identify)."""
@@ -363,8 +386,9 @@ def build_rig(
         path = a.calibration_path(root)
         cal = load_calibration(path) if path and path.is_file() else None
         arm = FeetechArm(
-            a.key, a.role, a.port, a.lerobot_id or a.key, cal, side=a.side, bus_factory=bus_factory
-        )
+            a.key, a.role, a.port, a.lerobot_id or a.key, cal, side=a.side,
+            bus_factory=bus_factory, cal_path=path,
+        )  # fmt: skip
         try:
             arm.connect()
         except (

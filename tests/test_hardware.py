@@ -392,7 +392,9 @@ def test_calibrating_by_hand_on_a_real_bus_keeps_positions_flowing(tmp_path) -> 
     w.handle({"cmd": "cal_finish"})
     w.handle({"cmd": "cal_save"})
     saved = next(m for m in sent if m.get("type") == "calibrated")
-    assert saved["path"] and w.session.state.name != "FAULT"
+    assert saved["path"] == str(root / "robots/so_follower/f.json")  # the file Identify re-reads
+    assert list((root / "robots/so_follower").glob("f.json.bak-*"))  # the old file is kept
+    assert w.session.state.name != "FAULT"
     new = follower.calibration
     assert new["elbow_flex"].range_min == 1547 and new["elbow_flex"].range_max == 2647
     assert new["wrist_roll"].range_min == 0 and new["wrist_roll"].range_max == 4095
@@ -477,3 +479,59 @@ def test_the_ports_are_closed_whenever_the_rig_is_disconnected(tmp_path) -> None
     assert all(a._bus is None for a in rig.arms) and not any(b.connected for b in FakeBus.instances)
     w.tick()  # a disconnected tick must not reopen them
     assert all(a._bus is None for a in rig.arms)
+
+
+def _dump(cal: dict[str, JointCal]) -> str:
+    return json.dumps({j: c._asdict() for j, c in cal.items()})
+
+
+def _rig_without_follower_file(tmp_path: Any) -> tuple[Any, Any, list[dict[str, Any]]]:
+    """A real-arm rig whose leader has its file and whose follower has none yet."""
+    from phi_studio.worker import RigWorker
+
+    root = tmp_path / "cal"
+    lead = {j: c._replace(homing_offset=c.homing_offset + 300) for j, c in CAL.items()}
+    (root / "teleoperators/so_leader").mkdir(parents=True)
+    (root / "robots/so_follower").mkdir(parents=True)
+    (root / "teleoperators/so_leader/l.json").write_text(_dump(lead))
+    cfg = tmp_path / "robot-config.yaml"
+    cfg.write_text("robot: {type: so101_follower, id: f, port: /dev/a}\n"
+                   "teleop: {type: so101_leader, id: l, port: /dev/b}\n")  # fmt: skip
+    FakeBus.fail_connect = 0
+    bus = lambda p, c: FakeBus(p, H.to_motor_calibration(c) if c else None)  # noqa: E731
+    rig = H.build_rig(cfg, bus_factory=bus, cal_root=root, cameras=False)
+    sent: list[dict[str, Any]] = []
+    return root, RigWorker(rig, sent.append, clock=lambda: 0.0), sent
+
+
+def test_an_arm_with_no_calibration_file_does_not_fault_the_rig(tmp_path: Any) -> None:
+    """A new arm has no file until it is calibrated. Reading it faulted the whole rig on the first
+    tick, so the Calibrate page could never be reached (2026-10-05 audit)."""
+    from phi_studio.session import State
+
+    _, w, sent = _rig_without_follower_file(tmp_path)
+    w.handle({"cmd": "connect"})
+    for _ in range(12):  # past a health poll too
+        w.tick()
+    assert w.session.state is State.IDENTIFIED, w.session.snapshot()
+    fol = next(a for a in w.identity if a["role"] == "follower")
+    assert fol["calibrated"] is False and fol["ok"] is False
+    tele = [m for m in sent if m["type"] == "telemetry"][-1]["arms"]
+    assert tele["follower"]["pos"] == {} and tele["leader"]["pos"] and tele["follower"]["online"]
+    w.handle({"cmd": "confirm"})
+    assert "has no calibration file (robots/so_follower/f.json)" in sent[-1]["message"]
+
+
+def test_identify_reads_a_file_written_after_studio_started(tmp_path: Any) -> None:
+    """lerobot-calibrate in Studio's terminal writes the file; Identify must see it without a
+    restart, and LeRobot's bus must normalise with it."""
+    root, w, _ = _rig_without_follower_file(tmp_path)
+    w.handle({"cmd": "connect"})
+    (root / "robots/so_follower/f.json").write_text(_dump(CAL))
+    w.handle({"cmd": "identify"})
+    fol = next(a for a in w.identity if a["role"] == "follower")
+    assert fol["ok"] and fol["calibrated"], fol
+    arm = next(a for a in w.rig.arms if a.role == "follower")
+    assert arm.calibration == CAL and arm._bus.calibration == H.to_motor_calibration(CAL)
+    w.tick()
+    assert set(arm.read_positions()) == set(JOINTS)

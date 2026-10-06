@@ -151,6 +151,13 @@ def calibration_file(a: ArmBus) -> str:
     return f"{kind}/{folder}/{a.calibration_id}.json"
 
 
+def _calibrated(a: ArmBus) -> bool:
+    """False for a real arm with no calibration file: it has no degrees to read (hardware.py
+    read_positions), so the loop skips it instead of faulting the whole rig. Mock arms always
+    have one."""
+    return getattr(a, "calibration", True) is not None
+
+
 def _identity_problem(a: dict[str, Any]) -> tuple[str, str]:
     """(message, fix) for an arm whose registers do not match its own calibration file."""
     name, match = label(a["name"]), a["match"]
@@ -161,6 +168,9 @@ def _identity_problem(a: dict[str, Any]) -> tuple[str, str]:
         return (f"{name} holds the calibration in {match}.json: are the cables swapped?",
                 f"Swap the USB cables of {name} and the arm {match}.json belongs to, then read "
                 "again.")  # fmt: skip
+    if not a.get("calibrated", True):
+        return (f"{name} has no calibration file ({a['file']})",
+                "Calibrate this arm. Until then Studio does not read its position.")  # fmt: skip
     return (f"{name} does not match its calibration file exactly",
             f"Nearest is {match}.json, {a['max_deg']:.1f} deg off on {label(a['worst_joint'])}. "
             "Calibrate this arm, or connect the arm that file belongs to.")  # fmt: skip
@@ -183,6 +193,7 @@ class RigWorker:
         self.followers = [a for a in self.arms if a.role == "follower"]
         self.pairs = pair_arms(self.arms)
         self.calibrations = calibrations if calibrations is not None else rig.calibration_files()
+        self._reload_files = calibrations is None  # tests hand in fixed calibrations
         self.health_every = health_every
         self.max_step = dict(DEFAULT_MAX_STEP)
         self.cal_dir = cal_dir
@@ -779,12 +790,17 @@ class RigWorker:
         self.calibrations[c.arm.calibration_id] = c.new
         path = None
         if self.cal_dir is not None:
-            path = self.cal_dir / calibration_file(c.arm)
+            # WHY the arm's own file first: Identify re-reads that one (hardware.py
+            # reload_calibration), so a save anywhere else would be undone by the next Identify.
+            path = getattr(c.arm, "cal_path", None) or self.cal_dir / calibration_file(c.arm)
             try:
-                save_calibration(c.new, path)
+                # WHY a backup for a real arm: the file it replaces may be the only record of a
+                # calibration someone made by hand.
+                save_calibration(c.new, path, backup=not self.mock)
             except OSError as e:  # not a bus error: the registers are written
                 self.error(f"Wrote {c.arm.name}'s registers but could not save {path}: {e}",
-                           "Studio uses the new calibration until it restarts.")  # fmt: skip
+                           "Fix the folder's space or permissions, then calibrate again: the next "
+                           "Identify reads the old file.")  # fmt: skip
                 path = None
         self.send({"type": "calibrated", "arm": c.arm.name, "path": str(path) if path else None})
 
@@ -905,6 +921,11 @@ class RigWorker:
 
     # -- internals --------------------------------------------------------------------------------
     def _identify(self) -> None:
+        reload = getattr(self.rig, "reload_calibrations", None)
+        if self._reload_files and reload is not None:
+            # WHY every Identify: lerobot-calibrate in the terminal writes files after Studio read
+            # them at start, and a stale copy would call a freshly calibrated arm a mismatch.
+            self.calibrations = reload()
         out = []
         for a in self.arms:
             regs = a.read_calibration()
@@ -921,6 +942,7 @@ class RigWorker:
                 "max_deg": round(best.distance.max_deg, 2) if best else None,
                 "worst_joint": best.distance.worst_joint if best else None,
                 "exact": exact,
+                "calibrated": _calibrated(a),
                 "ok": exact and best is not None and best.name == a.calibration_id,
             })  # fmt: skip
         self.identity = out
@@ -995,7 +1017,7 @@ class RigWorker:
         current = None
         try:
             for a in self.arms:
-                if a.name not in self.dead:
+                if a.name not in self.dead and _calibrated(a):
                     current = a
                     pos[a.name] = a.read_positions()
             if self.session.may_move and self.session.activity == "teleop":
