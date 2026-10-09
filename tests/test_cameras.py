@@ -281,10 +281,49 @@ def test_probe_reports_good_and_bad_devices_without_raising(
 
     monkeypatch.setattr(cameras, "_open", opener)
     good, bad = probe([0, "7"])
-    assert good["ok"] and (good["width"], good["height"], good["fps"]) == (640, 480, 30.0)
+    assert good["ok"] and (good["width"], good["height"], good["fps"]) == (640, 480, 30)
     assert good["error"] is None and good["thumbnail"].startswith(JPEG)
     assert bad["source"] == 7 and not bad["ok"] and "Failed to open" in bad["error"]
     assert src.live == []  # every probe releases
+
+
+def test_a_frame_rate_is_saved_whole_when_lerobot_would_accept_it() -> None:
+    """2026-10-09: macOS reported 30.00003 for two 30 fps cameras and onboarding refused to save
+    them; a rate LeRobot could not set exactly is left to the camera (None)."""
+    from phi_studio.cameras import whole_fps
+
+    assert whole_fps(30.00003) == 30 and whole_fps(5.0) == 5 and whole_fps(15) == 15
+    assert whole_fps(29.97) is None  # 0.1 % off 30: LeRobot's set-and-check would fail
+    assert whole_fps(0.0) is None and whole_fps(None) is None and whole_fps(-1) is None
+
+
+def test_probe_asks_for_the_recording_rate_and_reports_what_the_camera_gives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-10-09: opened without a rate, a side camera came up at 5 fps and onboarding saved 5;
+    asked for 30 it gave 29.9. A camera that refuses the rate is listed at its own."""
+
+    def camera(refuses: bool) -> Any:
+        src = FakeSource(fps=5.0, shape=(480, 640, 3))
+
+        def opener(fields: dict[str, Any]) -> Any:
+            if refuses and "fps" in fields:
+                raise RuntimeError(f"failed to set fps={fields['fps']} (actual_fps=5.0)")
+            dev = src.open(fields)
+            dev.fps = fields.get("fps", 5.0)  # a camera that takes the rate it is asked for
+            return dev
+
+        return src, opener
+
+    obeys, opener = camera(refuses=False)
+    monkeypatch.setattr(cameras, "_open", opener)
+    (r,) = probe([1])
+    assert r["ok"] and r["fps"] == 30 and obeys.opens[0]["fps"] == 30
+    stubborn, opener = camera(refuses=True)
+    monkeypatch.setattr(cameras, "_open", opener)
+    (r,) = probe([1])
+    assert r["ok"] and r["fps"] == 5 and "fps" not in stubborn.opens[-1]
+    assert obeys.live == [] and stubborn.live == []  # every probe releases
 
 
 def test_probe_falls_back_to_the_native_size(monkeypatch: pytest.MonkeyPatch) -> None:
