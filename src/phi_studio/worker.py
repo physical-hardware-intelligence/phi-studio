@@ -1015,7 +1015,8 @@ class RigWorker:
         for a in self.arms:
             regs = a.read_calibration()
             self.torque[a.name] = a.read_torque()  # the servo's word, not what Studio last sent
-            best = match_fingerprint(regs, self.calibrations)[0] if self.calibrations else None
+            best = (match_fingerprint(regs, self.calibrations, prefer=a.calibration_id)[0]
+                    if self.calibrations else None)  # fmt: skip
             exact = bool(best and best.distance.exact)
             out.append({
                 "name": a.name, "role": a.role,

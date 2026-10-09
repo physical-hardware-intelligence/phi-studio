@@ -55,6 +55,18 @@ def test_match_names_the_exact_file_first() -> None:
     assert matches[1].name == "yash_follower" and not matches[1].distance.exact
 
 
+def test_among_equally_near_files_the_arms_own_comes_first_never_over_a_nearer_one() -> None:
+    """2026-10-09: phi_follower.json and phi_bi_follower_left.json hold the same numbers on
+    purpose; the arm matched both exactly and the other name came first."""
+    twins = {"phi_bi_follower_left": load_calibration(cal(0)),
+             "phi_follower": load_calibration(cal(0))}
+    regs = load_calibration(cal(0))
+    assert match_fingerprint(regs, twins)[0].name == "phi_bi_follower_left"  # as listed
+    assert match_fingerprint(regs, twins, prefer="phi_follower")[0].name == "phi_follower"
+    near = {"own": load_calibration(cal(300)), "other": load_calibration(cal(0))}
+    assert match_fingerprint(regs, near, prefer="own")[0].name == "other"  # nearer still wins
+
+
 def test_match_reports_nearest_when_nothing_is_exact() -> None:
     files = {"a": load_calibration(cal(0)), "b": load_calibration(cal(500))}
     matches = match_fingerprint(load_calibration(cal(20)), files)

@@ -100,11 +100,16 @@ class Match:
     distance: Distance
 
 
-def match_fingerprint(registers: Calibration, files: dict[str, Calibration]) -> list[Match]:
-    """Every candidate file, nearest first. The caller shows the first and how far it is."""
+def match_fingerprint(registers: Calibration, files: dict[str, Calibration],
+                      prefer: str | None = None) -> list[Match]:  # fmt: skip
+    """Every candidate file, nearest first. The caller shows the first and how far it is.
+    `prefer`: the arm's own file, first among equally near ones. WHY: two files can hold the same
+    numbers on purpose (phi_follower.json is phi_bi_follower_left.json under the name checkpoints
+    use); 2026-10-09 the arm matched both exactly, the other name came first, and Studio said the
+    arm did not match its own file."""
     return sorted(
         (Match(n, fingerprint_distance(registers, c)) for n, c in files.items()),
-        key=lambda m: m.distance.max_deg,
+        key=lambda m: (m.distance.max_deg, m.name != prefer),
     )
 
 
