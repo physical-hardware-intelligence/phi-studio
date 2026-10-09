@@ -245,3 +245,8 @@
 .rec-take.tone-ok svg { color: var(--ok-text); }
 .rec-take.tone-warn svg { color: var(--warn-text); }
 .rec-take.tone-danger svg { color: var(--danger-text); }
+.onb-picks { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: var(--space-3); margin-top: var(--space-3); }
+.onb-picks > p { grid-column: 1 / -1; margin: 0; }
+.onb-pick { display: grid; gap: 4px; font-size: var(--text-sm); color: var(--text-secondary); }
+.onb-real { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: 10px 12px; margin-bottom: var(--space-3);
+  border-radius: var(--radius-lg); background: var(--info-subtle, var(--accent-subtle)); font-size: var(--text-sm); }
