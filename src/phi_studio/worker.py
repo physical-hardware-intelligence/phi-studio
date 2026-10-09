@@ -30,7 +30,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -54,6 +54,51 @@ STOP_REASONS = {"user", "window closed", "control moved"}  # what a stop message
 # LeRobot records no range for wrist_roll and fixes it at 0..4095 (so_follower.py:135-143).
 FULL_TURN = "wrist_roll"
 FULL_RANGE = (0, 4095)
+# A leader's voltage dip is said once per this many seconds, however often the health read sees it.
+DIP_REPEAT_S = 5.0
+# A joint pushing at STRAIN_PCT or more for STRAIN_S while Studio only holds the arm (a fault, a
+# stop, armed, a paused or failed calibration) gets its torque limit lowered to RELAX_LIMIT.
+# WHY: 2026-10-05 a fault froze the right follower with its shoulder pressed into a jam at 70 %
+# for two minutes, and the servo was damaged. [UNVERIFIED] first values: the arm's own weight
+# needs 21 % at worst (simulation), and auto-calibration's limits are 35-40 %.
+STRAIN_PCT = 45.0
+STRAIN_S = 10.0
+RELAX_LIMIT = 200
+# Health reads (load, temperature, voltage, status) missed in a row before an arm counts as gone.
+# WHY not 1: they are diagnostics, every tenth tick; a burst of bus noise while motors start
+# lost one on the right follower and faulted a sweep (2026-10-05). Position reads, every tick and
+# retried, still fault at once.
+HEALTH_MISSES = 3
+# How far past its stored range a joint may stand and still start a sweep there: a hand
+# calibration stops short of the stops, and an arm at rest leans on one.
+START_SLACK_DEG = 15.0
+
+
+def starts_anywhere(old: Calibration, raw: dict[str, int], joints: Sequence[str]) -> bool:
+    """Can auto-calibration start from the pose the arm is in, with no middle pose and no homing?
+    Yes when the calibration in its servos already keeps every swept joint off the encoder's wrap:
+    the stored range sits inside the edges, and the joint stands within it. WHY both: a new servo
+    holds 0..4095, and registers that disagree with where the joint stands (another arm's, or a
+    homing changed by hand) would put a stop past the wrap."""
+    edge_lo, edge_hi = autocal.EDGE_TICKS, autocal.TICKS - 1 - autocal.EDGE_TICKS
+    slack = round(START_SLACK_DEG * autocal.TICKS_PER_DEG)
+    least = autocal.MIN_TRAVEL_DEG * autocal.TICKS_PER_DEG
+    for j in joints:
+        if j == FULL_TURN:
+            continue
+        c, p = old[j], raw[j]
+        if not edge_lo < c.range_min < c.range_max < edge_hi or c.range_max - c.range_min < least:
+            return False
+        if not max(edge_lo, c.range_min - slack) <= p <= min(edge_hi, c.range_max + slack):
+            return False
+    return True
+
+
+def previous_travel(old: Calibration) -> dict[str, float]:
+    """Each joint's stored range in degrees, where it is a real one (not a new servo's 0..4095)."""
+    full = FULL_RANGE[1] - FULL_RANGE[0]
+    return {j: (c.range_max - c.range_min) / autocal.TICKS_PER_DEG for j, c in old.items()
+            if j != FULL_TURN and 0 < c.range_max - c.range_min < full}  # fmt: skip
 POLICY_LIMIT_S = (1.0, 600.0)
 REC_LIMITS = {"episodes": (1, 500), "episode_s": (1.0, 600.0), "reset_s": (0.0, 300.0)}
 FULL_TORQUE = 1000  # Torque_Limit's top: what a swept joint goes back to
@@ -77,8 +122,10 @@ class CalRun:
     joints: list[str] = field(default_factory=list)  # auto: the joints asked for
     auto: autocal.AutoCal | None = None
     limited: str | None = None  # auto: the joint whose torque limit is lowered now
+    limit: tuple[str, int] | None = None  # auto: (that joint, its Torque_Limit)
     torque: int | None = None  # auto: Torque_Limit for a swept joint; None: autocal.sweep_limit
     waiting: bool = False  # auto: holding for another arm's shoulder-pan turn
+    anywhere: bool = False  # auto: starts where it stands; its servos' calibration is usable
 
     def view(self) -> dict[str, Any]:
         joints = {}
@@ -92,7 +139,8 @@ class CalRun:
                 "new": ({j: c._asdict() for j, c in self.new.items()}
                         if self.new else None),
                 "auto": ({**self.auto.view(), "waiting": self.waiting}
-                         if self.auto else None)}  # fmt: skip
+                         if self.auto else None),
+                "anywhere": self.anywhere}  # fmt: skip
 
 
 @dataclass
@@ -154,6 +202,9 @@ def calibration_file(a: ArmBus) -> str:
 def _identity_problem(a: dict[str, Any]) -> tuple[str, str]:
     """(message, fix) for an arm whose registers do not match its own calibration file."""
     name, match = label(a["name"]), a["match"]
+    if not a.get("has_file", True):  # a new arm, or a new calibration id: nothing to compare yet
+        return (f"{name} has no calibration file yet ({a['expected']}.json)",
+                "Calibrate it: Calibrate, then Auto-calibrate.")  # fmt: skip
     if match is None:
         return (f"{name}: no calibration files to compare with",
                 "Calibrate the arm, or point Studio at the calibration directory.")  # fmt: skip
@@ -202,6 +253,10 @@ class RigWorker:
         self.dead: set[str] = set()  # arms whose bus stopped answering
         self.torque: dict[str, bool] = {a.name: False for a in self.arms}
         self.health: dict[str, dict[str, JointHealth]] = {}
+        self._dips: dict[str, float] = {}  # leader -> when its last voltage dip was said
+        self._health_misses: dict[str, int] = {}  # arm -> health reads missed in a row
+        self._strain: dict[tuple[str, str], float] = {}  # (arm, joint) -> since when it strains
+        self._relaxed: set[tuple[str, str]] = set()  # joints whose limit the watchdog lowered
         self.identity: list[dict[str, Any]] = []
         self._ticks: deque[float] = deque(maxlen=int(loop_hz * 2))
         self._cost_ms: deque[float] = deque(maxlen=int(loop_hz * 10))
@@ -581,7 +636,9 @@ class RigWorker:
         runs = []
         for a in arms:
             a.set_torque(False)
-            runs.append(CalRun(a, old=a.read_calibration(), step="auto-middle"))
+            c = CalRun(a, old=a.read_calibration(), step="auto-middle")
+            c.anywhere = starts_anywhere(c.old, a.read_raw_positions(), JOINTS)
+            runs.append(c)
         self.autos = runs
 
     def _cmd_autocal_go(self, msg: dict[str, Any]) -> None:
@@ -617,15 +674,43 @@ class RigWorker:
         for c in self.autos:
             c.joints, c.torque = order, torque
             c.written = True  # before the write: one that fails halfway still changed registers
-            c.homings = c.arm.set_half_turn_homings(homed)
+            # WHY every joint, whatever is swept: registers that fit the pose on all five are
+            # likely this arm's own calibration; one or two can fit by chance. WHY also its own by
+            # identity: 2026-10-05 the right follower held the left one's calibration (LeRobot
+            # writes the file into the servos on a mismatch), and it fitted well enough.
+            c.anywhere = (starts_anywhere(c.old, c.arm.read_raw_positions(), JOINTS)
+                          and self._owns_registers(c.arm))  # fmt: skip
+            if c.anywhere:
+                # WHY no homing: the servos' calibration already keeps every swept joint off the
+                # wrap. Writing it back changes no register; it lets an arm with no file read in
+                # degrees meanwhile.
+                c.arm.write_calibration(c.old)
+                c.homings = {j: c.old[j].homing_offset for j in homed}
+            else:
+                c.homings = c.arm.set_half_turn_homings(homed)
             raw = c.arm.read_raw_positions()
+            # The middle of each joint: its stored range's, or where a person posed it (homed).
+            mid = ({j: (c.old[j].range_min + c.old[j].range_max) // 2 for j in JOINTS}
+                   if c.anywhere else dict(raw))  # fmt: skip
             c.pos = raw
             c.arm.write_raw_goals(raw)  # goal = present before torque, as for teleop (_cmd_arm)
             self._set_torque(c.arm, True)
-            c.auto = autocal.AutoCal([j for j in order if j != FULL_TURN], raw, now,
-                                     expected_deg=autocal.expected_travel())  # fmt: skip
+            swept = [j for j in order if j != FULL_TURN]
+            trusted = set(JOINTS) if c.anywhere else set(homed)
+            # WHY a program: the moves the simulation checked collision-free (autocal.POSE_ORDER,
+            # SWEEP_POSES); an arm that starts anywhere also folds back to where it began.
+            c.auto = autocal.AutoCal(swept, raw, now, expected_deg=autocal.expected_travel(),
+                                     previous_deg=previous_travel(c.old),
+                                     program=autocal.program(swept, raw, mid, unfold=c.anywhere,
+                                                             trusted=trusted),
+                                     step_through=msg.get("step") is True)  # fmt: skip
             c.step = "auto"
         self.last_heartbeat = now
+
+    def _owns_registers(self, a: ArmBus) -> bool:
+        """Its servos hold its own calibration, or no other arm's file matches them exactly."""
+        mine = next((x for x in self.identity if x["name"] == a.name), None)
+        return mine is None or not mine["exact"] or mine["match"] == a.calibration_id
 
     def _cmd_autocal_resume(self, msg: dict[str, Any]) -> None:
         paused = [c for c in self.autos if c.auto is not None and c.auto.state == "paused"]
@@ -639,9 +724,15 @@ class RigWorker:
 
     def _cmd_autocal_save(self, msg: dict[str, Any]) -> None:
         """Write what every arm found, torque off first. An arm that failed gets its old
-        registers back instead."""
+        registers back instead, and so does one with a note (a joint came up short) unless the
+        person accepted it: accept, the names of those arms."""
         if not self.autos or any(c.step not in ("auto-review", "auto-failed") for c in self.autos):
             self.error("Auto-calibration has not finished.")
+            return
+        accept = msg.get("accept") or []
+        names = {c.arm.name for c in self.autos}
+        if not isinstance(accept, list) or any(a not in names for a in accept):
+            self.error("accept: the names of arms being calibrated.")
             return
         runs, self.autos, self.pan_turn = self.autos, [], None
         for c in runs:
@@ -649,7 +740,11 @@ class RigWorker:
                 # WHY torque off first: a new homing written under torque moves the goal the servo
                 # holds by the homing's change, and the arm jumps. The page asks to support it.
                 self._set_torque(c.arm, False)
-            if c.step == "auto-failed" or c.new is None:
+            # WHY a note keeps the old one: 2026-10-08 the gripper's jaw met the table at 63 %
+            # open; saved, its 100 % would have been 63 % for good, and a stop missed on an arm
+            # joint moves its zero by half the miss.
+            noted = c.auto is not None and bool(c.auto.notes) and c.arm.name not in accept
+            if c.step == "auto-failed" or c.new is None or noted:
                 self._restore(c)
                 continue
             self._save_run(c)
@@ -701,13 +796,29 @@ class RigWorker:
             wait = panning and self.pan_turn != c.arm.name
             c.waiting = wait
             c.arm.write_raw_goals(e.step(c.pos, now, advance=not wait))
-            j = e.current.joint if e.state == "running" and e.current and not wait else None
-            if j != c.limited:
+            # WHY again after the step: it may have moved on to the shoulder pan, which waits its
+            # turn from this tick on (its goal has not moved yet).
+            if e.state == "running" and e.current is not None and e.current.joint == "shoulder_pan":
+                self.pan_turn = self.pan_turn or c.arm.name
+                wait = c.waiting = self.pan_turn != c.arm.name
+            cur = e.current if e.state == "running" and e.current and not wait else None
+            # WHY a limit while moving between poses too: POSE_LIMIT bounds a push on anything in
+            # the way, and is over the arm's weight (21 % at worst, simulation).
+            want = None
+            if e.state in ("paused", "failed"):
+                # WHY keep it: full strength on a joint that just met something is how a stall
+                # overheats a servo (2026-10-05). Save, Cancel or a release puts it back.
+                want = c.limit
+            elif cur is not None:
+                lim = (autocal.POSE_LIMIT if cur.phase in ("pose", "rest")
+                       else autocal.sweep_limit(cur.joint, c.torque))  # fmt: skip
+                want = (cur.joint, lim)
+            if want != c.limit:
                 limits = {c.limited: FULL_TORQUE} if c.limited else {}
-                if j:
-                    limits[j] = autocal.sweep_limit(j, c.torque)
+                if want:
+                    limits[want[0]] = want[1]
                 c.arm.set_torque_limits(limits)
-                c.limited = j
+                c.limited, c.limit = (want[0] if want else None), want
             still_panning = e.state in ("running", "paused") and e.current is not None \
                 and e.current.joint == "shoulder_pan"  # fmt: skip
             if self.pan_turn == c.arm.name and not still_panning:
@@ -911,6 +1022,7 @@ class RigWorker:
                 "port": getattr(a, "port", f"mock://{a.name}"),
                 "serial": getattr(a, "serial", f"MOCK-{a.name}"),
                 "expected": a.calibration_id,
+                "has_file": a.calibration_id in self.calibrations,
                 "file": calibration_file(a),
                 "match": best.name if best else None,
                 "max_deg": round(best.distance.max_deg, 2) if best else None,
@@ -941,6 +1053,13 @@ class RigWorker:
             for c in [c for c in self.restores if c.arm is a]:
                 self.restores.remove(c)
                 self._restore(c)
+            relaxed = {j: FULL_TORQUE for n, j in self._relaxed if n == a.name}
+            if relaxed:  # torque is off: the watchdog's lowered limits go back to full
+                try:
+                    a.set_torque_limits(relaxed)
+                    self._relaxed -= {(a.name, j) for j in relaxed}
+                except BUS_ERRORS:
+                    pass  # stays lowered; the next release tries again
         return silent
 
     def _freeze(self) -> None:
@@ -955,7 +1074,10 @@ class RigWorker:
             if f.name in self.dead or not self.torque[f.name]:
                 continue
             try:
-                f.write_goals(f.read_positions())
+                if f.calibrated:
+                    f.write_goals(f.read_positions())
+                else:  # no degrees without a calibration: hold it in raw ticks
+                    f.write_raw_goals(f.read_raw_positions())
             except BUS_ERRORS as e:
                 self.dead.add(f.name)
                 lost = lost or f"{label(f.name)} is not answering: {e}"
@@ -990,7 +1112,10 @@ class RigWorker:
         current = None
         try:
             for a in self.arms:
-                if a.name not in self.dead:
+                # WHY skip an arm with no calibration: it cannot read in degrees, and that is
+                # not a dead bus (a new arm, before its first calibration). Confirm refuses it,
+                # so nothing drives it; calibration reads it raw.
+                if a.name not in self.dead and a.calibrated:
                     current = a
                     pos[a.name] = a.read_positions()
             if self.session.may_move and self.session.activity == "teleop":
@@ -1014,10 +1139,19 @@ class RigWorker:
                     c.mins[j], c.maxes[j] = min(c.mins[j], c.pos[j]), max(c.maxes[j], c.pos[j])
             if self._n % self.health_every == 0:
                 for a in self.arms:
-                    if a.name not in self.dead:
-                        current = a
+                    if a.name in self.dead:
+                        continue
+                    current = a
+                    try:
                         self.health[a.name] = a.read_health()
+                        self._health_misses[a.name] = 0
+                    except BUS_ERRORS:
+                        missed = self._health_misses.get(a.name, 0) + 1
+                        self._health_misses[a.name] = missed
+                        if missed >= HEALTH_MISSES:
+                            raise  # gone, not noise: the handler below faults
                 self._check_health()
+                self._check_strain(now)
         except BUS_ERRORS as e:
             if current is not None:
                 self.dead.add(current.name)
@@ -1030,11 +1164,63 @@ class RigWorker:
     def _check_health(self) -> None:
         if self.session.state is State.FAULT:
             return
+        roles = {a.name: a.role for a in self.arms}
         for name, joints in self.health.items():
             for j, h in joints.items():
-                if h.faults:
-                    self._fault(f"{label(name)} {label(j)}: {', '.join(h.faults)}")
-                    return
+                if not h.faults:
+                    continue
+                if roles.get(name) == "leader" and h.faults == ["voltage"]:
+                    self._leader_dip(name, j, h)
+                    continue
+                self._fault(f"{label(name)} {label(j)}: {', '.join(h.faults)}")
+                return
+
+    def _check_strain(self, now: float) -> None:
+        """While Studio only holds an arm, a joint that keeps pushing hard is pressed into
+        something: lower its torque so it cannot overheat, and say so. Teleop and policy runs
+        (MOVING) are driven moves, watched by a person; this is for the holds nobody drives."""
+        if self.session.state is State.MOVING:
+            self._strain.clear()
+            return
+        for a in self.arms:
+            for j, h in self.health.get(a.name, {}).items():
+                key = (a.name, j)
+                if not self.torque.get(a.name) or abs(h.load_pct) < STRAIN_PCT:
+                    self._strain.pop(key, None)
+                    continue
+                since = self._strain.setdefault(key, now)
+                if now - since < STRAIN_S or key in self._relaxed:
+                    continue
+                try:
+                    a.set_torque_limits({j: RELAX_LIMIT})
+                except BUS_ERRORS:
+                    continue  # the next health read tries again
+                self._relaxed.add(key)
+                self.error(f"{label(a.name)} {label(j)} pushed against something at "
+                           f"{abs(h.load_pct):.0f} % for {STRAIN_S:.0f} s, so Studio lowered its "
+                           f"torque to {RELAX_LIMIT // 10} %.",
+                           "Support the arm, then turn torque off.")  # fmt: skip
+
+    def _leader_dip(self, name: str, joint: str, h: JointHealth) -> None:
+        """A leader's supply fell below what its servos accept (Status bit 0). WHY not a fault: a
+        leader carries nothing, and a 5 V adapter sags when a joint presses into a stop (2026-10-05:
+        the right leader, 4.9 V at rest, under its servos' 4.0 V cutoff mid-sweep). While
+        auto-calibration drives it, every arm pauses where it is; otherwise it is only said."""
+        now = self.clock()
+        if now - self._dips.get(name, -DIP_REPEAT_S) < DIP_REPEAT_S:
+            return
+        self._dips[name] = now
+        why = f"{label(name)}'s supply dipped below what its servos accept"
+        driven = any(c.arm.name == name and c.auto is not None and c.auto.state == "running"
+                     for c in self.autos)  # fmt: skip
+        if driven:
+            for c in self.autos:
+                if c.auto is not None:
+                    c.auto.pause(why)
+        self.error(f"{why} ({label(joint)} read {h.voltage_v:.1f} V)"
+                   + (": the sweep paused." if driven else "."),
+                   "Use a stronger 5 V supply or a lower sweep torque (Advanced), then Resume."
+                   if driven else "Check its 5 V supply and cable.")  # fmt: skip
 
     def _publish(self, pos: dict[str, dict[str, float]]) -> None:
         span = self._ticks[-1] - self._ticks[0] if len(self._ticks) > 1 else 0.0
@@ -1045,6 +1231,7 @@ class RigWorker:
             arms[a.name] = {
                 "role": a.role,
                 "online": a.name not in self.dead,
+                "calibrated": a.calibrated,
                 "torque": self.torque[a.name],
                 "pos": {j: round(v, 2) for j, v in pos.get(a.name, {}).items()},
                 "health": {j: {"load": round(x.load_pct, 1), "temp": round(x.temperature_c, 1),

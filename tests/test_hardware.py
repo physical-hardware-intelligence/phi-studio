@@ -432,9 +432,10 @@ def test_homing_some_joints_keeps_the_others_calibration() -> None:
     g = a.calibration["gripper"]
     assert (g.homing_offset, g.range_min, g.range_max) == (2000 - 2047, 0, 4095)
     a.read_positions()  # normalises: the bus has a calibration for every joint again
-    bare = arm(cal=None)
-    with pytest.raises(RuntimeError, match="home every joint"):
-        bare.set_half_turn_homings(["gripper"])
+    bare = arm(cal=None)  # no file: the joints not homed read through the servos' registers
+    bare.set_half_turn_homings(["gripper"])
+    assert bare.calibrated and bare.calibration["elbow_flex"] == CAL["elbow_flex"]
+    bare.read_positions()
 
 
 def test_connect_errors_name_the_arm_the_port_and_what_to_check() -> None:

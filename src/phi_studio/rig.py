@@ -75,6 +75,9 @@ class ArmBus(Protocol):
     name: str
     role: str  # leader | follower
     calibration_id: str  # the calibration file this arm is registered with
+    # A calibration to read degrees with: the arm's file, or the one a calibration is writing. A
+    # new arm has none: read_positions raises until it is calibrated.
+    calibrated: bool
 
     def read_calibration(self) -> Calibration: ...
     def read_positions(self) -> dict[str, float]: ...

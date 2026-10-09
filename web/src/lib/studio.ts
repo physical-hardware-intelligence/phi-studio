@@ -29,6 +29,7 @@ export interface ArmIdentity {
   worst_joint: string | null;
   exact: boolean;
   ok: boolean; // exact, and the match is this arm's own file
+  has_file?: boolean; // false: no calibration file yet (a new arm, or a new calibration id)
 }
 
 export interface JointHealth { load: number; temp: number; volt: number; faults: string[] }
@@ -47,7 +48,7 @@ export interface AutoView {
   why: string | null;
   joints: string[];
   joint: string | null;
-  phase: "out" | "back" | "home" | null;
+  phase: "pose" | "rest" | "out" | "back" | "home" | null;
   found: Record<string, { lo: number; hi: number; deg: number }>;
   notes: Record<string, string>;
   waiting?: boolean; // holding for another arm's shoulder-pan turn
@@ -74,6 +75,7 @@ export interface CalView {
   old: Record<string, JointCal>;
   new: Record<string, JointCal> | null;
   auto?: AutoView | null;
+  anywhere?: boolean; // auto: starts where it stands; its servos already hold a usable calibration
 }
 export interface PolicyView {
   id: string;

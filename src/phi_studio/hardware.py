@@ -241,6 +241,10 @@ class FeetechArm:
                     raise
         raise AssertionError("unreachable")
 
+    @property
+    def calibrated(self) -> bool:
+        return self.calibration is not None
+
     def read_positions(self) -> dict[str, float]:
         if self.calibration is None:
             # WHY refuse: without a calibration LeRobot cannot normalise, and a raw
@@ -270,12 +274,16 @@ class FeetechArm:
         0..4095 range, the others what they held; normalising with the same values, as the mock
         does, keeps positions flowing (degrees from the middle pose)."""
         which = list(joints) if joints is not None else list(JOINTS)
-        if self.calibration is None and len(which) < len(JOINTS):
-            raise RuntimeError(f"{self.name} has no calibration file: home every joint")
+        # WHY the registers for an arm with no file: the joints not homed now still need a
+        # calibration to read in degrees while the others sweep, and the servos hold the one
+        # LeRobot last wrote (a new servo: its factory 0..4095).
+        base = self.calibration
+        if base is None and len(which) < len(JOINTS):
+            base = self.read_calibration()
 
         def run(b: Any) -> dict[str, int]:
             homings = {j: int(v) for j, v in b.set_half_turn_homings(which).items()}
-            cal = dict(self.calibration or {})
+            cal = dict(base or {})
             cal |= {j: JointCal(MOTOR_IDS[j], 0, homings[j], 0, FULL_TICKS) for j in homings}
             b.calibration = to_motor_calibration(cal)
             self.calibration = cal
@@ -360,15 +368,16 @@ class FeetechArm:
 
     def read_health(self) -> dict[str, JointHealth]:
         def read(b: Any) -> dict[str, JointHealth]:
+            n = READ_RETRIES  # WHY: one lost packet among four reads faulted a sweep (2026-10-05)
             pos = (
-                b.sync_read("Present_Position")
+                b.sync_read("Present_Position", num_retry=n)
                 if self.calibration is not None
                 else {j: float("nan") for j in JOINTS}
             )
-            load = b.sync_read("Present_Load", normalize=False)  # sign-magnitude decoded: per mille
-            temp = b.sync_read("Present_Temperature", normalize=False)  # deg C
-            volt = b.sync_read("Present_Voltage", normalize=False)  # 0.1 V
-            status = b.sync_read("Status", normalize=False)
+            load = b.sync_read("Present_Load", normalize=False, num_retry=n)  # per mille, signed
+            temp = b.sync_read("Present_Temperature", normalize=False, num_retry=n)  # deg C
+            volt = b.sync_read("Present_Voltage", normalize=False, num_retry=n)  # 0.1 V
+            status = b.sync_read("Status", normalize=False, num_retry=n)
             return {
                 j: JointHealth(
                     float(pos[j]),
