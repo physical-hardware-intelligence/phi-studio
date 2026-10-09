@@ -174,6 +174,34 @@ def test_closing_the_controlling_window_stops_motion() -> None:
     run(go())
 
 
+def test_between_workers_a_window_keeps_its_link_and_a_closed_one_frees_control() -> None:
+    """2026-10-09, a rig reload after onboarding saved: while switch_rig had no worker, a window's
+    heartbeat raised in to_worker and closed its socket, and the same raise in that socket's
+    cleanup left control pinned to the closed window, so no window could control the rig."""
+
+    async def go() -> None:
+        studio, server, session = await started()
+        saved = studio.conn
+        try:
+            a = await ws(session, server.port)
+            assert (await until(a, lambda d: d["type"] == "hello"))["control"]
+            studio.conn = None  # the gap inside switch_rig
+            for _ in range(3):
+                await a.send_str(json.dumps({"cmd": "heartbeat"}))
+            await asyncio.sleep(0.3)
+            assert not a.closed and studio.controller is not None
+            await a.close()
+            await asyncio.sleep(0.2)
+            b = await ws(session, server.port)
+            assert (await until(b, lambda d: d["type"] == "hello"))["control"]  # control was freed
+        finally:
+            studio.conn = saved
+            await session.close()
+            await server.close()
+
+    run(go())
+
+
 def test_worker_death_is_reported_to_every_window() -> None:
     async def go() -> None:
         studio, server, session = await started()

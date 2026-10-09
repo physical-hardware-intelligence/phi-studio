@@ -266,8 +266,15 @@ class Studio:
 
     def to_worker(self, msg: dict[str, Any]) -> None:
         with self._send_lock:
+            conn = self.conn
+            # WHY: between workers (switch_rig) there is none. 2026-10-09 a window's heartbeat then
+            # raised here, which closed its socket, and the same raise in the socket's cleanup left
+            # control pinned to the closed window: no window could control the rig. Nothing to
+            # tell: the next worker starts disconnected, so a stop is already true.
+            if conn is None:
+                return
             try:
-                self.conn.send(msg)
+                conn.send(msg)
             except (BrokenPipeError, OSError):
                 pass
 
