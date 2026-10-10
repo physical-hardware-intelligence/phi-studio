@@ -1,7 +1,7 @@
 // What onboarding pre-selects (src/lib/onboard.ts). Run: npm test (Node's own runner).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { configIds, defaultIds, idChoices, seedPorts } from "../src/lib/onboard.ts";
+import { configIds, defaultIds, idChoices, initialChoice, seedPorts } from "../src/lib/onboard.ts";
 import type { RigStatus } from "../src/lib/rig.ts";
 
 const k = (...ids: string[]) => ids.map((id, i) => ({ id, mtime: 100 - i }));
@@ -69,4 +69,17 @@ test("switching a bimanual config to one arm seeds the single slots from ports.l
   // the config's own ports come first when it already has that layout
   const moved = mac({ hint: { ports: { left_leader: "/dev/tty.usbmodemOLD" }, ids: {} } });
   assert.equal(seedPorts(moved, "bimanual", ["left_leader", "left_follower"]).left_leader, L);
+});
+
+test("no calibration files at all while the config names some: nothing is chosen, never New", () => {
+  // 2026-10-09: an empty calibration folder made the step default to New, and saving replaced the
+  // rig's working ids.
+  const none = { follower: [], leader: [], bi_follower: [], bi_leader: [] };
+  const single = mac({ layout: "single", known: none, arms: [
+    { key: "follower", role: "follower", side: null, port: F, id: "phi_follower", calibration: null, calibrated: false, calibrated_at: null },
+    { key: "leader", role: "leader", side: null, port: L, id: "phi_leader", calibration: null, calibrated: false, calibrated_at: null },
+  ] });
+  assert.equal(initialChoice(single, "single"), "unset");
+  assert.equal(initialChoice(mac({ layout: null, arms: [], known: none }), "single"), "new"); // a fresh Mac
+  assert.equal(initialChoice(mac(), "single"), "existing");
 });

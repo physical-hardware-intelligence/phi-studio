@@ -250,3 +250,4 @@
 .onb-pick { display: grid; gap: 4px; font-size: var(--text-sm); color: var(--text-secondary); }
 .onb-real { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: 10px 12px; margin-bottom: var(--space-3);
   border-radius: var(--radius-lg); background: var(--info-subtle, var(--accent-subtle)); font-size: var(--text-sm); }
+.onb-warn { padding: 10px 12px; margin-bottom: var(--space-3); border-radius: var(--radius-lg); background: var(--warn-subtle); color: var(--warn-text); font-size: var(--text-sm); }

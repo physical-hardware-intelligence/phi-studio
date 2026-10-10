@@ -5,7 +5,7 @@ import { Boundary } from "../components/Boundary";
 import { ArmsGlyph } from "../components/data/bits";
 import { Notices } from "../components/Notices";
 import { RigSwitch } from "../components/RigSwitch";
-import { configIds, defaultIds, idChoices, seedPorts } from "../lib/onboard";
+import { configIds, defaultIds, idChoices, initialChoice, seedPorts } from "../lib/onboard";
 import { advance, portKey, type Wizard } from "../lib/portfinder";
 import { SLOTS, refreshRig, shortPort, slotLabel, slug, useRig, type Layout, type RigStatus } from "../lib/rig";
 import { go, studio, useStudio } from "../lib/studio";
@@ -23,7 +23,7 @@ const ROLES: Record<Layout, string[]> = { single: ["top", "front", "wrist"], bim
 interface Cam { source: number | string; width?: number; height?: number; fps?: number; fourcc?: string | null }
 interface Draft {
   name: string; layout: Layout; ports: Record<string, string>;
-  ids: "existing" | "new"; existing: { follower: string; leader: string } | null;
+  ids: "existing" | "new" | "unset"; existing: { follower: string; leader: string } | null;
 }
 interface Probe { source: number | string; ok: boolean; width?: number; height?: number; fps?: number; fourcc?: string | null; picture?: string | null; error?: string | null }
 
@@ -35,9 +35,7 @@ function initial(rig: RigStatus): Draft {
 
 /** A draft for `layout`: its ports and calibration ids seeded again, as a layout change needs. */
 function withLayout(d: Draft, rig: RigStatus, layout: Layout): Draft {
-  const existing = defaultIds(rig, layout);
-  const any = idChoices(rig, layout).follower.length > 0;
-  return { ...d, layout, ports: seedPorts(rig, layout, SLOTS[layout]), existing, ids: existing || any ? "existing" : "new" };
+  return { ...d, layout, ports: seedPorts(rig, layout, SLOTS[layout]), existing: defaultIds(rig, layout), ids: initialChoice(rig, layout) };
 }
 
 export function Onboard() {
@@ -187,7 +185,8 @@ function CalibrationStep({ d, set, rig, onBack, onNext }: { d: Draft; set: (d: D
   const choices = idChoices(rig, d.layout);
   const picked = d.existing ?? { follower: "", leader: "" };
   const ids = d.ids === "existing" ? picked : fresh;
-  const ready = d.ids === "new" || (!!picked.follower && !!picked.leader);
+  const ready = d.ids === "new" || (d.ids === "existing" && !!picked.follower && !!picked.leader);
+  const cfg = configIds(rig);
   const files = (x: { follower: string; leader: string }) => SLOTS[d.layout].map((slot) => {
     const role = slot.endsWith("leader") ? "leader" : "follower";
     const side = slot.startsWith("left_") ? "_left" : slot.startsWith("right_") ? "_right" : "";
@@ -209,6 +208,13 @@ function CalibrationStep({ d, set, rig, onBack, onNext }: { d: Draft; set: (d: D
   return (
     <>
       <h2 className="onb-title">Calibration</h2>
+      {d.ids === "unset" && (
+        <p className="onb-warn">
+          Studio found no calibration files in <span className="mono">{rig.calibration_root}</span>, yet this rig uses{" "}
+          <span className="mono">{cfg.follower} · {cfg.leader}</span>. If the arms are calibrated, Studio is looking in the wrong
+          folder: check HF_LEROBOT_CALIBRATION. Pick New only to calibrate the arms again.
+        </p>
+      )}
       <div className="onb-choices" role="radiogroup" aria-label="Calibration">
         {choices.follower.length > 0 && (
           <button role="radio" aria-checked={d.ids === "existing"} className={`onb-choice ${d.ids === "existing" ? "is-on" : ""}`}

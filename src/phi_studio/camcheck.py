@@ -89,7 +89,7 @@ def load_refs(data_dir: Path) -> list[dict[str, Any]] | None:
 
 def resolve(refs: list[dict[str, Any]], live: dict[Any, np.ndarray]) -> dict[str, Any]:
     """Match each role's reference to one live camera. Returns {"assign": {role: source}, "detail":
-    {role: {"source", "score", "how"}}, "missing": [roles]}."""
+    {role: {"source", "score", "how"}}, "missing": [roles], "scores": {role: {source: score}}}."""
     roles = [r for r in refs if r.get("role")]
     others = [r for r in refs if not r.get("role")]
     srcs = list(live)
@@ -116,7 +116,8 @@ def resolve(refs: list[dict[str, Any]], live: dict[Any, np.ndarray]) -> dict[str
             assign[role] = left[0]
             detail[role] = {"source": left[0], "score": round(score[role][left[0]], 2),
                             "how": "elimination"}  # fmt: skip
-    return {"assign": assign, "detail": detail, "missing": missing}
+    table = {role: {str(src): round(v, 2) for src, v in row.items()} for role, row in score.items()}
+    return {"assign": assign, "detail": detail, "missing": missing, "scores": table}
 
 
 Probe = Callable[[Iterable[int]], list[dict[str, Any]]]
@@ -156,7 +157,9 @@ def check(config: Path, data_dir: Path, probe: Probe | None = None) -> dict[str,
     res = resolve(refs, live)
     unknown = [c.key for c in cams if not any(r.get("role") == c.key for r in refs)]
     missing = sorted(set(res["missing"]) | set(unknown))
-    out: dict[str, Any] = {"detail": res["detail"], "seen": sorted(live, key=str)}
+    # WHY the whole table: an unsure check must show why (every role against every camera)
+    out: dict[str, Any] = {"detail": res["detail"], "seen": sorted(live, key=str),
+                           "scores": res["scores"]}  # fmt: skip
     if missing:
         return {**out, "status": "unsure",
                 "message": f"Studio could not tell which camera is the {', '.join(missing)} one.",

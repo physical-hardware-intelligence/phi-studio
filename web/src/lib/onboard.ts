@@ -47,3 +47,14 @@ export function seedPorts(rig: RigStatus, layout: Layout, slots: string[]): Reco
   for (const [k, v] of Object.entries(rig.hint.ports)) if (!out[k] && slots.includes(k)) out[k] = v;
   return out;
 }
+
+/** What the calibration step starts on. "unset": nothing chosen, Save waits. WHY: 2026-10-09 Studio
+ *  read an empty calibration folder (a moved HF_LEROBOT_HOME), the step defaulted to "new", and
+ *  saving replaced the rig's working ids with ids that had no files. No files at all while the
+ *  config names some means the folder is wrong, not that the arms need calibrating. */
+export function initialChoice(rig: RigStatus, layout: Layout): "existing" | "new" | "unset" {
+  const c = idChoices(rig, layout);
+  if (c.follower.length || c.leader.length) return "existing";
+  const cfg = rig.layout === layout ? configIds(rig) : {};
+  return cfg.follower || cfg.leader ? "unset" : "new";
+}
