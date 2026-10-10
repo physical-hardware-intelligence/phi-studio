@@ -8,6 +8,12 @@ import { fmtAgo } from "../lib/data";
 import { studio, useStudio } from "../lib/studio";
 import { AlignStep } from "./Setup";
 
+/** #/align/<dataset>: Run and Evaluate send the policy's training dataset (Preflight.tsx). */
+function wanted(): string {
+  const part = location.hash.replace(/^#\/?/, "").split("/").slice(1).join("/");
+  try { return decodeURIComponent(part); } catch { return ""; }
+}
+
 export function Align() {
   const link = useStudio((s) => s.link);
   const index = useStudio((s) => s.files.index);
@@ -30,7 +36,7 @@ export function Align() {
         </div>
       )}
       {mock && <p className="faint t-sm">Uses the cameras plugged into this Mac, even with simulated arms.</p>}
-      {!lr ? <div className="empty">Loading</div> : <AlignStep lr={lr} intro={false} initialRoot={last?.root ?? ""} />}
+      {!lr ? <div className="empty">Loading</div> : <AlignStep lr={lr} intro={false} initialRoot={wanted() || last?.root || ""} />}
     </div>
   );
 }

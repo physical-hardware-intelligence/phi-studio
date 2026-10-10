@@ -39,7 +39,8 @@ export function usePreflight(policy: PolicyInfo | undefined) {
       state: cam.block && skip ? "skipped for this run" : cam.state,
       action: cam.tone === "neutral" && !skip ? undefined : (
         <span className="row-gap">
-          <a className="btn btn-sm" href="#/align"><ScanSearch aria-hidden />Align</a>
+          {/* the policy's own training data, when known: what its cameras must match */}
+          <a className="btn btn-sm" href={policy?.dataset ? `#/align/${encodeURIComponent(policy.dataset)}` : "#/align"}><ScanSearch aria-hidden />Align</a>
           {cam.block && (
             <button type="button" className="link-btn t-sm" onClick={() => setSkip(!skip)}>{skip ? "Check again" : "Run without"}</button>
           )}
