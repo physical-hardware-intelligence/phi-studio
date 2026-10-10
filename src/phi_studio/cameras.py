@@ -93,6 +93,19 @@ def _open(fields: dict[str, Any]) -> Any:
 PROBE_FPS = 30  # the rate recordings run at (the worker's 30 Hz loop): asked for first
 
 
+def _fourcc(cam: Any) -> str | None:
+    """The pixel format the camera really runs, as four letters, or None. WHY ask the device:
+    LeRobot only warns when a format is refused, and macOS's AVFoundation backend takes no format
+    at all (reports 0, 2026-10-09), so asking for MJPG there changes nothing."""
+    vc = getattr(cam, "videocapture", None)
+    try:
+        v = int(vc.get(6)) if vc is not None else 0  # cv2.CAP_PROP_FOURCC
+    except Exception:
+        return None
+    code = "".join(chr((v >> 8 * i) & 0xFF) for i in range(4))
+    return code if v and code.isalnum() else None
+
+
 def whole_fps(fps: float | None) -> int | None:
     """A camera's frame rate as robot-config.yaml takes it: a whole number, when the camera's is
     within LeRobot's own tolerance of one (camera_opencv.py _validate_fps: math.isclose, rel_tol
@@ -116,17 +129,22 @@ def _thumbnail(frame: np.ndarray) -> bytes:
 
 def _probe_one(src: Any, deadline: float) -> dict[str, Any]:
     out: dict[str, Any] = {"source": src, "ok": False, "width": None, "height": None,
-                           "fps": None, "error": None, "thumbnail": None}  # fmt: skip
+                           "fps": None, "fourcc": None, "error": None,
+                           "thumbnail": None}  # fmt: skip
     cam = None
     try:
         # WHY ask for PROBE_FPS first: 2026-10-09 a side camera opened without a rate came up in a
         # 5 fps mode, onboarding saved fps 5, and recordings would have repeated each frame six
         # times; asked for 30 it gave 29.9. A camera that refuses the rate (camera_opencv.py
         # _validate_fps) or 640x480 (camera_opencv.py:276-289) is still listed, at what it gives.
-        for size in ({"width": 640, "height": 480, "fps": PROBE_FPS}, {"width": 640, "height": 480},
-                     {}):  # fmt: skip
+        # WHY MJPG first: recordings open the cameras in MJPG (onboard_api writes fourcc), and
+        # uncompressed YUY2 overruns USB 2.0 once more than two cameras share a bus (phi
+        # 02-setup.md 5c).
+        mode = {"width": 640, "height": 480, "fps": PROBE_FPS}
+        for size in ({**mode, "fourcc": "MJPG"}, mode, {"width": 640, "height": 480}, {}):
             try:
                 cam = _open({"type": "opencv", "index_or_path": src, **size})
+                out["fourcc"] = _fourcc(cam) if size.get("fourcc") else None
                 break
             except RuntimeError:
                 if not size:

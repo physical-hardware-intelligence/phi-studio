@@ -340,6 +340,9 @@ class SetupApi:
                                      "at": time.time()})  # fmt: skip
                 raise
         out = []
+        # What onboarding saves as each camera's reference (camcheck.save_refs): this probe's view.
+        self.last_probe = {r["source"]: r["thumbnail"]
+                           for r in rows if r.get("ok") and r.get("thumbnail")}  # fmt: skip
         for r in rows:
             thumb = r.pop("thumbnail", None)
             url = "data:image/jpeg;base64," + base64.b64encode(thumb).decode() if thumb else None

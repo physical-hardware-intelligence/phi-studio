@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from phi_studio import rigspec
+from phi_studio import camcheck, rigspec
 from phi_studio.errors import Refusal
 from phi_studio.files import lerobot_calibration_dir, root_order
 
@@ -288,7 +288,12 @@ def check_answers(a: Any) -> dict[str, Any]:
                 ):
                     raise Refusal(f"Camera {role}: {k} must be a whole number from {lo} to {hi}.")
                 dims[k] = v
-            clean_cams[role] = {"source": src, **dims}
+            fourcc = c.get("fourcc")
+            if fourcc is not None and not (
+                isinstance(fourcc, str) and re.fullmatch(r"[A-Z0-9]{4}", fourcc)
+            ):
+                raise Refusal(f"Camera {role}: fourcc must be four capitals or digits, like MJPG.")
+            clean_cams[role] = {"source": src, **dims, **({"fourcc": fourcc} if fourcc else {})}
     return {
         "name": name.strip(),
         "layout": layout,
@@ -335,6 +340,8 @@ def build_yaml(ans: dict[str, Any], keep_cameras: str | None = None) -> str:
             for k in ("width", "height", "fps"):
                 if c.get(k) is not None:
                     lines.append(f"      {k}: {c[k]}")
+            if c.get("fourcc"):
+                lines.append(f"      fourcc: {_q(c['fourcc'])}")
     elif keep_cameras:
         lines.append(keep_cameras.rstrip())
     lines += [
@@ -405,6 +412,11 @@ class OnboardAPI:
         async with self.studio.config_lock:
             backup = await asyncio.to_thread(write, path, ans, self.data_dir() / BACKUPS)
         self.studio._note("state", f"Onboarding wrote {path.name} for {ans['name']}")
+        thumbs = getattr(getattr(self.studio, "setup_api", None), "last_probe", None)
+        if ans.get("cameras") and thumbs:
+            # WHY now: the reload below checks the cameras against these (camcheck.check)
+            roles = {role: c["source"] for role, c in ans["cameras"].items()}
+            await asyncio.to_thread(camcheck.save_refs, self.data_dir(), thumbs, roles)
         client.push(
             {
                 "type": "rig_saved",
@@ -445,6 +457,14 @@ class OnboardAPI:
                 raise Refusal("The rig did not disconnect.", "Disconnect it, then try again.")
         await asyncio.to_thread(self.studio.switch_rig, new)
 
+    async def camera_check(self, client: Client, msg: dict[str, Any]) -> None:
+        """Look again at which camera is which: the real arms restart, and camcheck runs before
+        the new worker opens the cameras."""
+        if self.studio.spec.get("kind") != "lerobot":
+            raise Refusal("Studio is driving the simulated arms.", "Use the real arms first.")
+        self._free("Turn torque off, then check the cameras.")
+        await self._reload({"kind": "lerobot", "config": self.studio.spec["config"]})
+
     async def rig_use(self, client: Client, msg: dict[str, Any]) -> None:
         """Switch between the simulated arms and the real ones in robot-config.yaml without a
         restart. Refused while any arm may hold torque; a connected rig is disconnected first."""
@@ -474,4 +494,5 @@ def register(studio: Studio) -> None:
     api = OnboardAPI(studio)
     studio.handle("rig_status", api.rig_status, control=False)
     studio.handle("rig_write", api.rig_write, control=True)
+    studio.handle("camera_check", api.camera_check, control=True)
     studio.handle("rig_use", api.rig_use, control=True)

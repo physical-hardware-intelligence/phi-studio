@@ -59,6 +59,7 @@ function RigCard() {
   const identity = useStudio((s) => s.identity);
   const tel = useStudio((s) => s.telemetry);
   const live = useStudio((s) => s.cameras);
+  const control = useStudio((s) => s.control);
   const layout: Layout = rig.layout ?? "single";
   // WHY the session too: telemetry calls an arm online when its bus has not failed, which a disconnected rig
   // also satisfies. Green means read this session.
@@ -108,6 +109,11 @@ function RigCard() {
           )) : <span className="faint t-sm"><Camera aria-hidden className="ico-inline" />No cameras yet</span>}
         </span>
         <span className="grow" />
+        {/* camcheck.py: macOS renumbers cameras at restarts; Studio checks at each start, and here on demand */}
+        {!mock && rig.cameras.length > 0 && (
+          <button className="btn btn-ghost btn-sm" disabled={!control} title={control ? "Look again at which camera is which" : "Take control first"}
+            onClick={() => studio.send({ cmd: "camera_check" })}><Camera aria-hidden />Check cameras</button>
+        )}
         <RigSwitch />
         <button className="btn btn-ghost btn-sm" onClick={() => go("onboard")}><Pencil aria-hidden />Edit rig</button>
       </div>

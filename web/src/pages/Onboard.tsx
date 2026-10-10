@@ -20,12 +20,12 @@ const STEPS: { id: Step; label: string }[] = [
 const REC_FPS = 30; // recordings take the control loop's rate (worker.py loop_hz, 30 Hz)
 const ROLES: Record<Layout, string[]> = { single: ["top", "front", "wrist"], bimanual: ["top", "front", "left_wrist", "right_wrist"] };
 
-interface Cam { source: number | string; width?: number; height?: number; fps?: number }
+interface Cam { source: number | string; width?: number; height?: number; fps?: number; fourcc?: string | null }
 interface Draft {
   name: string; layout: Layout; ports: Record<string, string>;
   ids: "existing" | "new"; existing: { follower: string; leader: string } | null;
 }
-interface Probe { source: number | string; ok: boolean; width?: number; height?: number; fps?: number; picture?: string | null; error?: string | null }
+interface Probe { source: number | string; ok: boolean; width?: number; height?: number; fps?: number; fourcc?: string | null; picture?: string | null; error?: string | null }
 
 /** Where onboarding starts: the config if there is one, else ports.local.sh (lib/onboard.ts). */
 function initial(rig: RigStatus): Draft {
@@ -293,7 +293,7 @@ function CamerasStep({ d, rig, onBack, onNext }: { d: Draft; rig: RigStatus; onB
     for (const [r, src] of Object.entries(roles)) {
       const m = meta.current[String(src)];
       const old = rig.cameras.find((c) => c.key === r);
-      cams[r] = { source: src, width: m?.width ?? old?.width, height: m?.height ?? old?.height, fps: m?.fps ?? old?.fps };
+      cams[r] = { source: src, width: m?.width ?? old?.width, height: m?.height ?? old?.height, fps: m?.fps ?? old?.fps, fourcc: m ? m.fourcc : undefined };
     }
     setBusy(true);
     const cur = configIds(rig);

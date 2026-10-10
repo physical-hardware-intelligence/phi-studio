@@ -509,6 +509,9 @@ class Studio {
       case "control":
         if ("control" in m) this.set({ control: m.control });
         break;
+      case "camera_check": // camcheck.py: which camera is which, after each start of the real arms
+        if (m.message) this.localError(m.message, m.fix ?? "");
+        break;
       case "state": {
         const prev = this.snap.state;
         const changed = !prev || prev.state !== m.state || prev.fault !== m.fault;

@@ -326,6 +326,25 @@ def test_probe_asks_for_the_recording_rate_and_reports_what_the_camera_gives(
     assert obeys.live == [] and stubborn.live == []  # every probe releases
 
 
+def test_probe_reports_the_pixel_format_the_camera_runs_not_the_one_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LeRobot only warns when MJPG is refused, and macOS's AVFoundation takes no format at all
+    (reports 0, 2026-10-09): the config must not claim MJPG there."""
+    mjpg = sum(ord(c) << 8 * i for i, c in enumerate("MJPG"))
+    for reported, want in ((mjpg, "MJPG"), (0, None)):
+        src = FakeSource(fps=30.0, shape=(480, 640, 3))
+
+        def opener(fields: dict[str, Any], src: FakeSource = src, reported: int = reported) -> Any:
+            dev = src.open(fields)
+            dev.videocapture = type("VC", (), {"get": lambda self, prop: reported})()
+            return dev
+
+        monkeypatch.setattr(cameras, "_open", opener)
+        (r,) = probe([0])
+        assert r["ok"] and r["fourcc"] == want
+
+
 def test_probe_falls_back_to_the_native_size(monkeypatch: pytest.MonkeyPatch) -> None:
     src = FakeSource(shape=(240, 320, 3))
 

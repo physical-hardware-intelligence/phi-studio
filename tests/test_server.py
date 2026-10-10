@@ -202,6 +202,34 @@ def test_between_workers_a_window_keeps_its_link_and_a_closed_one_frees_control(
     run(go())
 
 
+def test_unrecognised_cameras_hold_recording_and_policies_but_not_teleop() -> None:
+    """camcheck: a recording or a policy on the wrong camera is worse than none."""
+
+    async def go() -> None:
+        studio, server, session = await started()
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            studio.camcheck = {"status": "unsure", "message": "Which is the top camera?",
+                               "fix": "Open Rig setup, Cameras."}  # fmt: skip
+            for c in ("connect", "confirm", "arm"):
+                await a.send_str(json.dumps({"cmd": c}))
+            await until(a, lambda d: d.get("state") == "ARMED", beat=True)
+            await a.send_str(json.dumps({"cmd": "start", "activity": "policy"}))
+            err = await until(a, lambda d: d["type"] == "error", beat=True)
+            assert err["message"] == "Which is the top camera?" and "Rig setup" in err["fix"]
+            await a.send_str(json.dumps({"cmd": "start", "activity": "teleop"}))
+            await until(a, lambda d: d.get("state") == "MOVING", beat=True)
+            await a.send_str(json.dumps({"cmd": "rec_start", "repo_id": "local/x", "task": "t"}))
+            err = await until(a, lambda d: d["type"] == "error", beat=True)
+            assert err["message"] == "Which is the top camera?"
+        finally:
+            await session.close()
+            await server.close()
+
+    run(go())
+
+
 def test_worker_death_is_reported_to_every_window() -> None:
     async def go() -> None:
         studio, server, session = await started()

@@ -389,3 +389,51 @@ def test_saving_the_rig_reloads_real_arms_never_while_holding_torque(tmp_path) -
             studio.stop_worker()
 
     asyncio.run(go())
+
+
+def test_cameras_are_written_with_the_format_the_probe_got_and_remembered(tmp_path) -> None:
+    """MJPG only where the camera took it (cameras.probe), and every probed camera's view kept,
+    so the next start can tell which is which (camcheck)."""
+    import asyncio
+    import json
+
+    from test_camcheck import scene
+    from test_server import until, ws
+
+    from phi_studio import camcheck
+
+    ans = O.check_answers({"name": "Phi Left Pair", "layout": "single",
+                           "ids": {"follower": "phi_follower", "leader": "phi_leader"},
+                           "ports": {"leader": "/dev/tty.usbmodemL1",
+                                     "follower": "/dev/tty.usbmodemF1"},
+                           "cameras": {"top": {"source": 2, "fps": 30, "fourcc": "MJPG"},
+                                       "wrist": {"source": 0, "fps": 30}}})  # fmt: skip
+    text = O.build_yaml(ans)
+    top = 'top:\n      type: opencv\n      index_or_path: 2\n      fps: 30\n      fourcc: "MJPG"'
+    assert top in text
+    assert "wrist:\n      type: opencv\n      index_or_path: 0\n      fps: 30\n" in text
+    with pytest.raises(Refusal):
+        O.check_answers({**ans, "cameras": {"top": {"source": 2, "fourcc": "mjpeg!"}}})
+
+    async def go() -> None:
+        studio, server, session = _studio(tmp_path)
+        await server.start_server()
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            studio.setup_api.last_probe = {0: scene(1), 2: scene(3), 3: scene(4)}  # type: ignore[attr-defined]
+            rig = {"name": "Phi Left Pair", "layout": "single",
+                   "ids": {"follower": "phi_follower", "leader": "phi_leader"},
+                   "ports": {"leader": "/dev/tty.usbmodemL1", "follower": "/dev/tty.usbmodemF1"},
+                   "cameras": {"top": {"source": 2}, "wrist": {"source": 0}}}  # fmt: skip
+            await a.send_str(json.dumps({"cmd": "rig_write", "rig": rig}))
+            await until(a, lambda d: d["type"] == "rig_saved")
+            refs = camcheck.load_refs(tmp_path / "data")
+            assert refs is not None
+            assert {(r["source"], r["role"]) for r in refs} == {(0, "wrist"), (2, "top"), (3, None)}
+        finally:
+            await session.close()
+            await server.close()
+            studio.stop_worker()
+
+    asyncio.run(go())
