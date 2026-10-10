@@ -20,6 +20,7 @@ which is safe on every platform whatever the answer.
 from __future__ import annotations
 
 import io
+import math
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -89,6 +90,33 @@ def _open(fields: dict[str, Any]) -> Any:
     return cam
 
 
+PROBE_FPS = 30  # the rate recordings run at (the worker's 30 Hz loop): asked for first
+
+
+def _fourcc(cam: Any) -> str | None:
+    """The pixel format the camera really runs, as four letters, or None. WHY ask the device:
+    LeRobot only warns when a format is refused, and macOS's AVFoundation backend takes no format
+    at all (reports 0, 2026-10-09), so asking for MJPG there changes nothing."""
+    vc = getattr(cam, "videocapture", None)
+    try:
+        v = int(vc.get(6)) if vc is not None else 0  # cv2.CAP_PROP_FOURCC
+    except Exception:
+        return None
+    code = "".join(chr((v >> 8 * i) & 0xFF) for i in range(4))
+    return code if v and code.isalnum() else None
+
+
+def whole_fps(fps: float | None) -> int | None:
+    """A camera's frame rate as robot-config.yaml takes it: a whole number, when the camera's is
+    within LeRobot's own tolerance of one (camera_opencv.py _validate_fps: math.isclose, rel_tol
+    1e-3), else None, so LeRobot runs the camera at its native rate. WHY: macOS reports 30.00003
+    for 30 fps cameras, and onboarding refused to save them (2026-10-09)."""
+    if not fps or fps <= 0:
+        return None
+    n = round(fps)
+    return n if n >= 1 and math.isclose(n, fps, rel_tol=1e-3) else None
+
+
 def _thumbnail(frame: np.ndarray) -> bytes:
     from PIL import Image
 
@@ -101,21 +129,33 @@ def _thumbnail(frame: np.ndarray) -> bytes:
 
 def _probe_one(src: Any, deadline: float) -> dict[str, Any]:
     out: dict[str, Any] = {"source": src, "ok": False, "width": None, "height": None,
-                           "fps": None, "error": None, "thumbnail": None}  # fmt: skip
+                           "fps": None, "fourcc": None, "error": None,
+                           "thumbnail": None}  # fmt: skip
     cam = None
     try:
-        try:
-            cam = _open({"type": "opencv", "index_or_path": src, "width": 640, "height": 480})
-        except RuntimeError:
-            # WHY: it opened but refused 640x480 (camera_opencv.py:276-289); at its own size it is
-            # still a camera worth listing.
-            cam = _open({"type": "opencv", "index_or_path": src})
+        # WHY ask for PROBE_FPS first: 2026-10-09 a side camera opened without a rate came up in a
+        # 5 fps mode, onboarding saved fps 5, and recordings would have repeated each frame six
+        # times; asked for 30 it gave 29.9. A camera that refuses the rate (camera_opencv.py
+        # _validate_fps) or 640x480 (camera_opencv.py:276-289) is still listed, at what it gives.
+        # WHY MJPG first: recordings open the cameras in MJPG (onboard_api writes fourcc), and
+        # uncompressed YUY2 overruns USB 2.0 once more than two cameras share a bus (phi
+        # 02-setup.md 5c).
+        mode = {"width": 640, "height": 480, "fps": PROBE_FPS}
+        for size in ({**mode, "fourcc": "MJPG"}, mode, {"width": 640, "height": 480}, {}):
+            try:
+                cam = _open({"type": "opencv", "index_or_path": src, **size})
+                out["fourcc"] = _fourcc(cam) if size.get("fourcc") else None
+                break
+            except RuntimeError:
+                if not size:
+                    raise
+        assert cam is not None
         # WHY only what is left: the opens spent part of the budget, and a frame that comes after
         # the deadline would be reported as a hang instead of as LeRobot's own timeout.
         frame = cam.async_read(timeout_ms=max(0.0, deadline - time.monotonic()) * 1000)
         fps = getattr(cam, "fps", None)
         out.update(ok=True, width=int(frame.shape[1]), height=int(frame.shape[0]),
-                   fps=float(fps) if fps else None, thumbnail=_thumbnail(frame))  # fmt: skip
+                   fps=whole_fps(fps), thumbnail=_thumbnail(frame))  # fmt: skip
     except Exception as e:
         out["error"] = str(e) or type(e).__name__
     finally:

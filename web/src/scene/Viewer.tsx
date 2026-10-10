@@ -189,7 +189,7 @@ export default function Viewer({ compact = false, onSettings, mode }: { compact?
 
       {/* WHY a tooltip, not a footnote: the caveats matter, but three sentences under the arms crowd them. */}
       <span className="scene-info" tabIndex={0}
-        title={`${LEGEND[settings.mode](policy)} Joint angles go through an assumed mapping, not yet checked on a physical arm.`}>
+        title={`${LEGEND[settings.mode](policy)} Joint angles map one to one onto the model (directions checked on a physical arm, 2026-10-09).`}>
         <Info aria-hidden />
       </span>
 

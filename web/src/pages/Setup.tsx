@@ -600,7 +600,9 @@ export function AlignStep({ lr, intro = true, initialRoot = "" }: { lr: LeRobotV
   const [root, setRoot] = useState(initialRoot);
   const [episode, setEpisode] = useState("0");
   useEffect(() => { if (link === "open") setup.loadDatasets(); }, [link]);
-  const ds = datasets?.find((d) => d.root === root) ?? datasets?.[0];
+  // `root` may be a path or a repo id (a policy knows the repo id it was trained on)
+  const ds = datasets?.find((d) => d.root === root)
+    ?? datasets?.find((d) => !!root && (d.repo_id === root || d.root.endsWith(`/${root}`))) ?? datasets?.[0];
   const ep = Number(episode);
   const epOk = /^\d+$/.test(episode) && (!ds || ep < ds.episodes);
 

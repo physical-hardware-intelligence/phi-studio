@@ -583,3 +583,57 @@ def test_align_records_its_verdict_for_every_window_and_the_next_start(tmp_path:
             await server.close()
 
     asyncio.run(go())
+
+
+def test_align_uses_the_recognised_cameras_and_the_workers_frames(tmp_path: Path,
+                                                                  monkeypatch: Any) -> None:
+    """2026-10-09 on the rig: matching live pictures against a dataset recorded on another day
+    took the Mac's own camera for the wrist, and opening cameras the worker already streamed lost
+    frames. With the real arms streaming, align takes the config's pairs (camcheck recognised
+    them) and the worker's frames, and opens no camera."""
+    from phi_studio import cameras
+
+    root = str(tmp_path / "ds")
+    align_fakes(monkeypatch, root, sources={4: "observation.images.front",
+                                           5: "observation.images.top"})  # the wrong guess
+    probed: list[Any] = []
+    monkeypatch.setattr(cameras, "probe", lambda *a, **k: probed.append(a) or [])
+
+    async def go() -> None:
+        studio, server, session = await started(tmp_path, cameras=())
+        cfg = tmp_path / "rig" / "robot-config.yaml"
+        cfg.write_text(CONFIG.replace("index_or_path: TBD", "index_or_path: 1")
+                       .replace("index_or_path: 2", "index_or_path: 0"))  # fmt: skip
+        studio.spec = {**studio.spec, "kind": "lerobot", "config": str(cfg)}
+
+        async def stream() -> None:  # the worker's frames, front grey 30, top grey 60
+            while True:
+                for name, g in (("front", 30), ("top", 60)):
+                    studio.latest_frame[name] = {"type": "frame", "key": name, "seq": 1,
+                                                 "t": 0.0, "w": 160, "h": 120,
+                                                 "jpeg": jpeg((g, g, g))}  # fmt: skip
+                    studio.frame_clock[name] = (time.monotonic(), 1 / 15)
+                await asyncio.sleep(0.1)
+
+        feed = asyncio.get_running_loop().create_task(stream())
+        try:
+            await asyncio.sleep(0.2)
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            await a.send_str(json.dumps({"cmd": "align_start", "root": root, "episode": 0}))
+            s = await until(a, lambda d: d["type"] == "align_session")
+            assert {(x["live"], x["key"]) for x in s["assignment"]} == {
+                (1, "observation.images.front"), (0, "observation.images.top")}
+            res = await until(a, lambda d: d["type"] == "align_result", timeout=10)
+            assert res["aligned"] and set(res["cameras"]) == {"observation.images.front",
+                                                              "observation.images.top"}  # fmt: skip
+            assert FakeCam.opened == [] and probed == []  # no camera opened, none probed
+            await a.send_str(json.dumps({"cmd": "align_stop"}))
+            await until(a, lambda d: d["type"] == "align_stopped")
+            assert {"front", "top"} <= set(studio.latest_frame)  # the worker's frames stay
+        finally:
+            feed.cancel()
+            await session.close()
+            await server.close()
+
+    asyncio.run(go())

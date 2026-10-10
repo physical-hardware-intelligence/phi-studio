@@ -41,7 +41,8 @@ from aiohttp import WSMsgType, web
 from phi_studio.assistant import ClaudeCLI, Conversation
 from phi_studio.checks import Inputs, run_checks
 from phi_studio.errors import Refusal
-from phi_studio.evals import EvalError, EvalStore
+from phi_studio.evals import EvalStore, RunHealth, next_slot, summarize
+from phi_studio.evals import public as eval_public
 from phi_studio.files import FileError, Files, default_roots, list_ports
 from phi_studio.terminal import Terminal
 
@@ -52,6 +53,7 @@ Handler = Callable[["Client", dict[str, Any]], Awaitable[None]]
 # feature can land on its own.
 FEATURES = (
     "setup_api", "hub_api", "train_api", "scene_api", "recon_api", "data_api", "onboard_api",
+    "eval_api",
 )
 
 COMMANDS = {"heartbeat", "connect", "identify", "confirm", "arm", "start", "stop", "resume",
@@ -59,7 +61,6 @@ COMMANDS = {"heartbeat", "connect", "identify", "confirm", "arm", "start", "stop
             "cal_start", "cal_middle", "cal_finish", "cal_save", "cal_cancel",
             "autocal_start", "autocal_go", "autocal_resume", "autocal_save",
             "autocal_cancel", "rec_start", "rec_next", "rec_redo", "rec_stop"}  # fmt: skip
-EVAL_COMMANDS = {"eval_begin", "eval_mark", "eval_undo", "eval_end"}  # answered by the server
 ANYONE = {"stop", "take_control"}  # allowed from a window without control
 # Answered by the server, from any window: they read, and none reaches the worker.
 READ_ONLY = {"assist_status", "assist_context", "assist_ask", "assist_stop", "assist_reset",
@@ -68,7 +69,7 @@ CODE_ROOT = Path(__file__).resolve().parents[2]  # src/phi_studio/server.py -> t
 LOG_SIZE = 200
 WORKER_EXIT_S = 16.0  # a closing worker may finalize a recording first (worker.FINISH_S = 15)
 # newest of each, sent to a new window
-REPLAYED = ("rig", "state", "identity", "worker_exit", "align_result")
+REPLAYED = ("rig", "state", "identity", "worker_exit", "align_result", "camera_check")
 
 
 def frame_packet(msg: dict[str, Any]) -> bytes:
@@ -143,11 +144,14 @@ class Studio:
         self.port = port
         self.data_dir = Path(data_dir) if data_dir else None
         self.evals = EvalStore(self.data_dir) if self.data_dir else None
+        self.eval_health = RunHealth()  # what the servos and cameras did in the current trial
+        self._run_key: tuple[Any, bool] = (None, False)  # (run_id, running) of the newest run
         self.token = token or secrets.token_urlsafe(24)
         self.allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
         self.allowed_origins = {f"http://{h}" for h in self.allowed_hosts}
         self.clients: set[Client] = set()
         self.controller: Client | None = None
+        self.camcheck: dict[str, Any] | None = None  # the last camcheck.check result
         self.last: dict[
             str, dict[str, Any]
         ] = {}  # newest state / identity, replayed to new windows
@@ -220,6 +224,16 @@ class Studio:
         if kind == "telemetry":
             self.telemetry, self.telemetry_at = msg, time.monotonic()
             self.run = msg.get("policy")  # the newest policy run: the only one an eval can judge
+            self.eval_health.feed(msg)
+            run = self.run or {}
+            key = (run.get("run_id"), bool(run.get("running")))
+            if key != self._run_key:
+                self._run_key = key
+                if self.evals is not None and self.evals.current is not None and self.loop:
+                    # WHY: a trial that just ended waits for its score, and the eval message is
+                    # what tells windows so (awaiting). Built on the loop: it reads files.
+                    self.loop.call_soon_threadsafe(lambda: self._fanout(self._eval_msg()))
+            msg = self._blinded(msg)  # windows see a blind eval's policy as a letter
         elif kind == "state":
             why = msg.get("fault") or msg.get("stop_reason")
             self._note("state", f"{msg.get('label')}" + (f": {why}" if why else ""))
@@ -234,6 +248,7 @@ class Studio:
             self._frame(msg["key"])
         elif kind == "camera":
             self.cameras[msg["key"]] = {"online": msg.get("online"), "message": msg.get("message")}
+            self.eval_health.camera(msg["key"], msg.get("online"))
         if self.loop is not None:
             self.loop.call_soon_threadsafe(self._fanout, msg)
 
@@ -266,8 +281,15 @@ class Studio:
 
     def to_worker(self, msg: dict[str, Any]) -> None:
         with self._send_lock:
+            conn = self.conn
+            # WHY: between workers (switch_rig) there is none. 2026-10-09 a window's heartbeat then
+            # raised here, which closed its socket, and the same raise in the socket's cleanup left
+            # control pinned to the closed window: no window could control the rig. Nothing to
+            # tell: the next worker starts disconnected, so a stop is already true.
+            if conn is None:
+                return
             try:
-                self.conn.send(msg)
+                conn.send(msg)
             except (BrokenPipeError, OSError):
                 pass
 
@@ -293,9 +315,34 @@ class Studio:
         self.latest_frame.clear()
         data = self.spec.get("data_dir")
         self.spec = {**spec, "data_dir": data} if data else dict(spec)
+        self.check_cameras()
         self.start_worker()
         if self.loop is not None:
             self.loop.call_soon_threadsafe(self._hello_all)
+
+    def check_cameras(self) -> None:
+        """Before a worker opens the real cameras: recognise them and fix their numbers if macOS
+        moved them (camcheck). Blocks for the probe, so call it off the loop. Every window gets
+        the result, and new ones get it replayed."""
+        self.last.pop("camera_check", None)
+        self.camcheck = None
+        if self.spec.get("kind") != "lerobot" or self.data_dir is None:
+            return
+        from phi_studio import camcheck
+
+        try:
+            res = camcheck.check(Path(self.spec["config"]), self.data_dir)
+        except Exception as e:  # never keep the arms from starting; say why it could not look
+            res = {"status": "unsure", "message": f"Studio could not check the cameras: {e}",
+                   "fix": "Open Rig setup, Cameras: check the pictures and save."}  # fmt: skip
+        self.camcheck = res
+        msg = {"type": "camera_check", **res}
+        self.last["camera_check"] = msg
+        if res.get("message"):
+            kind = "state" if res["status"] == "renumbered" else "error"
+            self._note(kind, res["message"], res.get("fix"))
+        if self.loop is not None:
+            self.loop.call_soon_threadsafe(self._fanout, msg)
 
     def _hello_all(self) -> None:
         """A hello as on connect, then what a new window gets replayed: a new worker's first
@@ -334,6 +381,7 @@ class Studio:
     async def _on_startup(self, app: web.Application) -> None:
         self.loop = asyncio.get_running_loop()
         if self.proc is None:
+            await asyncio.to_thread(self.check_cameras)
             self.start_worker()
 
     async def _on_shutdown(self, app: web.Application) -> None:
@@ -562,7 +610,7 @@ class Studio:
         if cmd in READ_ONLY:
             asyncio.get_running_loop().create_task(self._read_only(client, cmd, msg))
             return
-        if cmd not in COMMANDS and cmd not in EVAL_COMMANDS:
+        if cmd not in COMMANDS:
             self._tell(client, f"unknown command {cmd!r}")
             return
         if client is not self.controller and cmd not in ANYONE:
@@ -570,20 +618,24 @@ class Studio:
                 self._tell(client, "Another window has control.",
                            "Take control to operate the rig here.")  # fmt: skip
             return
-        if cmd in EVAL_COMMANDS:
-            self._eval(client, cmd, msg)
+        unsure = (self.camcheck or {}).get("status") == "unsure"
+        if unsure and (cmd == "rec_start" or (cmd == "start" and msg.get("activity") == "policy")):
+            # WHY: a recording or a policy on the wrong camera is worse than none (camcheck)
+            self._tell(client, (self.camcheck or {}).get("message") or "The cameras are not "
+                       "recognised.", (self.camcheck or {}).get("fix", ""), cmd)  # fmt: skip
             return
-        if cmd == "start" and msg.get("activity") == "policy" and self._unjudged():
-            # A new run replaces the last one, and the unjudged episode could never be judged.
-            self._tell(client, "The last eval episode is not judged yet.",
-                       "Judge it on the Evaluate page, or end the eval.")  # fmt: skip
+        if cmd == "start" and msg.get("activity") == "policy" and self.evals and self.evals.current:
+            # WHY: a run started by hand would not follow the schedule, could unblind the eval, and
+            # would replace a trial waiting for its score (eval_api.run starts trials).
+            self._tell(client, "An eval is running.", "Run its trials from the Evaluate page, or "
+                       "end the eval.", cmd)  # fmt: skip
             return
         self.to_worker({k: v for k, v in msg.items() if isinstance(k, str)})
 
     def handle(self, cmd: str, fn: Handler, *, control: bool) -> None:
         """Answer `cmd` with `fn(client, msg)`. control=True: only the window with control may
         send it (it changes files, the rig or a job); False: any window (it only reads)."""
-        if cmd in self.handlers or cmd in COMMANDS or cmd in READ_ONLY or cmd in EVAL_COMMANDS:
+        if cmd in self.handlers or cmd in COMMANDS or cmd in READ_ONLY:
             raise ValueError(f"{cmd} is already a command")
         self.handlers[cmd] = (fn, control)
 
@@ -598,37 +650,47 @@ class Studio:
             client.push({"type": "error", "cmd": cmd, "fix": fix,
                          "message": f"Studio could not answer {cmd}: {type(e).__name__}: {e}"})
 
-    # -- evals ----------------------------------------------------------------------------------
+    # -- evals (the commands are in eval_api.py) -------------------------------------------------
     def _unjudged(self) -> bool:
         return self.evals is not None and self.evals.awaiting(self.run)
 
+    def _blind_alias(self, pid: Any) -> str | None:
+        rec = self.evals.current if self.evals else None
+        if not rec or not rec.get("blind") or not isinstance(pid, str):
+            return None
+        return next((p["alias"] for p in rec["policies"] if p["id"] == pid), None)
+
+    def _blinded(self, telemetry: dict[str, Any]) -> dict[str, Any]:
+        p = telemetry.get("policy")
+        if not isinstance(p, dict):
+            return telemetry
+        alias = self._blind_alias(p.get("id"))
+        if not alias:
+            return telemetry
+        return {**telemetry, "policy": {**p, "id": f"policy-{alias}", "name": f"Policy {alias}"}}
+
     def _eval_msg(self) -> dict[str, Any]:
         assert self.evals is not None
-        return {"type": "eval", "current": self.evals.current, "past": self.evals.list(20),
-                "dir": str(self.evals.dir)}  # fmt: skip
-
-    def _eval(self, client: Client, cmd: str, msg: dict[str, Any]) -> None:
-        if self.evals is None:
-            self._tell(client, "Evals need a data directory.", "Start Studio with --data-dir.")
-            return
         e = self.evals
-        try:
-            if cmd == "eval_begin":
-                e.begin(msg.get("policy"), msg.get("task", ""), msg.get("planned"),
-                        msg.get("limit_s"))  # fmt: skip
-            elif cmd == "eval_mark":
-                e.mark(msg.get("outcome"), msg.get("note", ""), self.run, msg.get("run_id"))
-            elif cmd == "eval_undo":
-                e.undo()
-            else:
-                e.end()
-        except EvalError as err:
-            self._tell(client, str(err))
-            return
-        except OSError as err:  # the judgement is not saved, so do not show it as saved
-            self._tell(client, f"Could not save the eval: {err}", f"Check {e.dir} is writable.")
-            return
-        self._fanout(self._eval_msg())
+        cur = e.current
+        slot = next_slot(cur) if cur else None
+        nxt = None
+        if cur and slot:
+            cond = next((c for c in cur["card"]["conditions"] if c["id"] == slot["c"]), None)
+            # WHY the live card's pictures: an eval keeps a frozen copy of its card, but reference
+            # pictures are staging aids that may be added after the card is locked (save_ref).
+            live = e.card(cur["card"].get("id")) or {}
+            refs = next((c["refs"] for c in live.get("conditions", [])
+                         if c["id"] == slot["c"]), None)  # fmt: skip
+            if cond is not None and refs:
+                cond = {**cond, "refs": {**cond.get("refs", {}), **refs}}
+            nxt = {**slot, "condition": cond}
+        api = getattr(self, "eval_api", None)
+        club = api.club_csv() if api else None
+        return {"type": "eval", "current": eval_public(cur) if cur else None,
+                "summary": summarize(cur) if cur else None, "next": nxt,
+                "awaiting": self._unjudged(), "cards": e.cards(), "past": e.past(20),
+                "dir": str(e.dir), "club_csv": str(club) if club else None}  # fmt: skip
 
     # -- assistant and files ----------------------------------------------------------------------
     async def _read_only(self, client: Client, cmd: str, msg: dict[str, Any]) -> None:
@@ -752,8 +814,11 @@ class Studio:
                           "faults": {j: x["faults"] for j, x in h.items() if x["faults"]},
                           "position_deg": a.get("pos")}  # fmt: skip
         cur = self.evals.current if self.evals else None
-        ev = cur and {**{k: v for k, v in cur.items() if k != "episodes"},
-                      "last_episodes": cur["episodes"][-5:]}  # fmt: skip
+        ev = None
+        if cur:
+            pub = eval_public(cur)
+            ev = {**{k: v for k, v in pub.items() if k not in ("trials", "schedule")},
+                  "last_trials": cur["trials"][-5:], "summary": summarize(cur)}
         ctx = {
             "now": time.strftime("%Y-%m-%d %H:%M:%S"),
             "page": page if isinstance(page, str) else None,
@@ -766,7 +831,7 @@ class Studio:
             "arms": arms,
             "loop": t.get("loop"),
             "calibration_in_progress": t.get("calibration"),
-            "policy_run": t.get("policy"),
+            "policy_run": self._blinded(t).get("policy"),
             "eval": ev,
             "checks": self._checks_summary(),
             "log": list(self.log)[-40:],

@@ -135,3 +135,14 @@ def test_names_from_v2_dict_form(tmp_path) -> None:
     info["features"]["action"]["names"] = {"motors": info["features"]["action"]["names"]}
     (root / "meta" / "info.json").write_text(json.dumps(info))
     assert Dataset(root).names("action")[0] == "shoulder_pan.pos"
+
+
+def test_tasks_read_without_pandas(tmp_path, monkeypatch) -> None:
+    """Studio's own install has pyarrow, not pandas (LeRobot brings pandas; CI has neither)."""
+    import sys
+
+    from phi_studio.datasets import Dataset
+
+    write_v3(tmp_path / "u" / "d", n_eps=2, cameras=("top",), tasks=("a", "b"))
+    monkeypatch.setitem(sys.modules, "pandas", None)  # any import of pandas now fails
+    assert Dataset(tmp_path / "u" / "d").tasks() == ["a", "b"]

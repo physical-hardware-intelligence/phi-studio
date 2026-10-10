@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TypeGuard
 
 from phi_studio.rig import JOINTS
 
@@ -116,5 +116,5 @@ def catalog(mock: bool) -> list[PolicyInfo]:
     ]  # fmt: skip
 
 
-def is_finite_number(x: object) -> bool:
+def is_finite_number(x: object) -> TypeGuard[int | float]:
     return isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x)

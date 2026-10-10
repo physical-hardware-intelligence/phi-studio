@@ -112,7 +112,7 @@ def columns(pairs: list[tuple[Any, Any]]) -> tuple[list[str], Cols, Cols]:
     return names, state, action
 
 
-def features(names: list[str], cameras: dict[str, tuple[int, int, int]]) -> dict[str, Any]:
+def features(names: list[str], cameras: dict[str, tuple[int, ...]]) -> dict[str, Any]:
     """LeRobot's features for these joints and cameras (feature_utils.hw_to_dataset_features)."""
     from lerobot.utils.feature_utils import hw_to_dataset_features
 
