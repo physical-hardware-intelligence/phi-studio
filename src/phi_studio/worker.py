@@ -569,8 +569,13 @@ class RigWorker:
             except ConnectionError:  # reopening (RealCamera retries): its last picture, if fresh
                 img, t = r.seen.get(cam.key, (None, -1e9))
             if img is None or now - t > recorder.CAMERA_GRACE_S:
+                # WHY the replug note: macOS's camera framework learns of a replugged camera
+                # only in a fresh process (2026-10-09: the top camera, unplugged mid-take and
+                # plugged back, never delivered again until Studio restarted its cameras).
                 self._rec_pause(f"Camera {cam.key} has had no picture for "
-                                f"{recorder.CAMERA_GRACE_S:g} s.")  # fmt: skip
+                                f"{recorder.CAMERA_GRACE_S:g} s. Check its cable, then Resume. "
+                                "Unplugged and plugged back? Studio sees it again after Check "
+                                "cameras on Home (stop and turn torque off first).")  # fmt: skip
                 return
             if now - t > recorder.LATE_S:
                 r.take.late += 1
