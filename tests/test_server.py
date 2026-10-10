@@ -380,59 +380,78 @@ def test_the_rig_description_reaches_every_window(tmp_path: Any) -> None:
     run(go())
 
 
-def test_evals_are_kept_by_the_server_saved_and_shown_to_every_window(tmp_path: Any) -> None:
+CARD = {"name": "Cube to box", "task": "cube in box", "success": "The cube ends in the box",
+        "limit_s": 1, "rubric": [{"label": "Reached it", "points": 0.5},
+                                 {"label": "In the box", "points": 1.0}],
+        "failures": ["Missed the grasp"], "conditions": [{"label": "Spot 1", "axis": "train"}]}
+
+
+def test_an_eval_runs_blind_on_the_rig_and_is_saved_for_every_window(tmp_path: Any) -> None:
     async def go() -> None:
         studio, server, session = await started_with_data(tmp_path)
         try:
             a = await ws(session, server.port)
-            await until(a, lambda d: d["type"] == "hello")
+            await until(a, lambda d: d["type"] == "rig")  # the worker has said what can run
             send = lambda m: a.send_str(json.dumps(m))  # noqa: E731
-            await send({"cmd": "eval_begin", "policy": "mock-reach", "task": "cube in box",
-                        "planned": 2, "limit_s": 1})  # fmt: skip
+            await send({"cmd": "eval_card_save", "card": CARD})
+            cid = (await until(a, lambda d: d["type"] == "eval_card_saved"))["id"]
+            await send({"cmd": "eval_begin", "card": cid, "policies": ["mock-reach"], "reps": 1,
+                        "blind": True, "alpha": 0.05})  # fmt: skip
             ev = await until(a, lambda d: d["type"] == "eval" and d["current"] is not None)
             rid = ev["current"]["id"]
-            await send({"cmd": "eval_mark", "outcome": "success", "run_id": "made-up"})
+            assert ev["current"]["policies"] == [{"alias": "A"}]  # blind: a letter, no name
+            assert ev["next"]["alias"] == "A" and ev["next"]["condition"]["label"] == "Spot 1"
+            assert ev["current"]["stamps"]["camera_check"] in (None, "none", "unverified", "same")
+            await send({"cmd": "eval_score", "stage": 2, "run_id": "made-up"})
             err = await until(a, lambda d: d["type"] == "error")
-            assert "no policy run" in err["message"]  # the server judges only runs it saw
+            assert "no policy run" in err["message"]  # the server scores only runs it saw
 
             for c in ("connect", "confirm", "arm"):
                 await send({"cmd": c})
             await until(a, lambda d: d["type"] == "state" and d["state"] == "ARMED", beat=True)
             await send({"cmd": "start", "activity": "policy", "policy": "mock-reach",
                         "task": "cube in box", "limit_s": 1})  # fmt: skip
-            t = await until(a, lambda d: d["type"] == "telemetry" and d["policy"]
-                            and not d["policy"]["running"], beat=True)  # fmt: skip
-            run_id = t["policy"]["run_id"]
-
-            await send({"cmd": "resume"})  # a new run now would replace the unjudged one
-            await until(a, lambda d: d["type"] == "state" and d["state"] == "ARMED", beat=True)
-            await send({"cmd": "start", "activity": "policy", "policy": "mock-reach",
-                        "task": "cube in box", "limit_s": 1})  # fmt: skip
             err = await until(a, lambda d: d["type"] == "error", beat=True)
-            assert "not judged" in err["message"]
-            await send({"cmd": "disconnect"})  # resetting the scene must not lose the episode
+            assert "eval is running" in err["message"]  # trials start from the schedule only
+            await send({"cmd": "eval_run"})
+            t = await until(a, lambda d: d["type"] == "telemetry" and d["policy"]
+                            and d["policy"]["running"], beat=True)  # fmt: skip
+            assert t["policy"]["name"] == "Policy A" and t["policy"]["id"] == "policy-A"
+            # The eval update leaves just before the telemetry that shows the run ended.
+            ev = await until(a, lambda d: d["type"] == "eval" and d["awaiting"], beat=True)
+            assert ev["next"]["alias"] == "A"  # windows learn the trial ended without a reload
+            assert studio.run is not None and not studio.run["running"]
+            run_id = studio.run["run_id"]
+            await send({"cmd": "eval_run"})  # the trial waits for its score
+            err = await until(a, lambda d: d["type"] == "error", beat=True)
+            assert "not scored" in err["message"]
+            await send({"cmd": "disconnect"})  # resetting the scene must not lose the trial
             await until(a, lambda d: d["type"] == "state" and d["state"] == "DISCONNECTED",
                         beat=True)  # fmt: skip
 
-            await send({"cmd": "eval_mark", "outcome": "success", "note": "ok", "run_id": run_id})
-            ev = await until(a, lambda d: d["type"] == "eval" and d["current"]["n"] == 1, beat=True)
-            assert ev["current"]["ci95"][1] == 1.0
-            assert ev["current"]["episodes"][0]["duration_s"] == pytest.approx(1.0, abs=0.1)
-            assert (tmp_path / "evals" / f"{rid}.json").exists()
+            await send({"cmd": "eval_score", "stage": 2, "failures": [], "note": "ok",
+                        "run_id": run_id})  # fmt: skip
+            ev = await until(a, lambda d: d["type"] == "eval" and d["current"] is None
+                             or (d["type"] == "eval" and d["summary"]
+                                 and d["summary"]["valid_trials"] == 1), beat=True)  # fmt: skip
+            trial = json.loads((tmp_path / "evals" / f"{rid}.json").read_text())["trials"][0]
+            assert trial["success"] and trial["duration_s"] == pytest.approx(1.0, abs=0.1)
+            assert trial["metrics"]["ended"] == "time limit" and "clipped" in trial["metrics"]
 
             b = await ws(session, server.port)  # view-only window
             ev_b = await until(b, lambda d: d["type"] == "eval")
             assert ev_b["current"]["id"] == rid
-            await b.send_str(json.dumps({"cmd": "eval_mark", "outcome": "failure"}))
+            await b.send_str(json.dumps({"cmd": "eval_undo"}))
             err = await until(b, lambda d: d["type"] == "error")
             assert "control" in err["message"]
 
-            await send({"cmd": "eval_mark", "outcome": "success", "run_id": run_id})
-            err = await until(a, lambda d: d["type"] == "error", beat=True)
-            assert "already judged" in err["message"]
             await send({"cmd": "eval_end"})
             ev = await until(a, lambda d: d["type"] == "eval" and d["current"] is None, beat=True)
-            assert ev["past"][0]["id"] == rid and ev["past"][0]["n"] == 1
+            assert ev["past"][0]["id"] == rid
+            assert ev["past"][0]["results"][0]["policy"] == "Scripted reach and place"
+            await b.send_str(json.dumps({"cmd": "eval_export", "id": rid, "format": "md"}))
+            md = await until(b, lambda d: d["type"] == "eval_export")
+            assert "Scripted reach and place" in md["text"] and md["name"].endswith(".md")
         finally:
             await session.close()
             await server.close()
@@ -471,10 +490,10 @@ def test_evals_without_a_data_directory_say_so() -> None:
         try:
             a = await ws(session, server.port)
             await until(a, lambda d: d["type"] == "hello")
-            await a.send_str(json.dumps({"cmd": "eval_begin", "policy": "p", "task": "t",
-                                         "planned": 1, "limit_s": 5}))  # fmt: skip
+            await a.send_str(json.dumps({"cmd": "eval_begin", "card": "x", "policies": ["p"],
+                                         "reps": 1, "blind": False}))  # fmt: skip
             err = await until(a, lambda d: d["type"] == "error")
-            assert "data directory" in err["message"]
+            assert "data folder" in err["message"]
         finally:
             await session.close()
             await server.close()

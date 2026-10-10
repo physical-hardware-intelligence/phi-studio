@@ -1,6 +1,7 @@
 // Connection to the Studio server and the app state it feeds.
 // One WebSocket: JSON for state, identity, telemetry and errors; binary for camera frames.
 import { useRef, useSyncExternalStore } from "react";
+import type { EvalState } from "./evalcore";
 
 export type Tone = "neutral" | "info" | "ok" | "warn" | "danger";
 export type SessionState =
@@ -118,24 +119,7 @@ export interface RigInfo {
   cal_dir: string | null;
 }
 
-export interface Episode {
-  n: number; outcome: "success" | "failure"; note: string; duration_s: number | null; run_id: string | null; at: number;
-}
-export interface EvalSummary {
-  id: string;
-  policy: string;
-  task: string;
-  planned: number;
-  limit_s: number;
-  started_at: number;
-  ended_at: number | null;
-  successes: number;
-  n: number;
-  rate: number | null;
-  ci95: [number, number];
-}
-export interface EvalRecord extends EvalSummary { episodes: Episode[] }
-export interface EvalState { current: EvalRecord | null; past: EvalSummary[]; dir: string }
+export type { EvalState } from "./evalcore";
 
 export interface StudioError { id: number; message: string; fix: string; at: number }
 export interface ActivityEntry { id: number; at: number; tone: Tone; text: string; detail?: string; ask?: boolean } // ask: a problem Claude can help with
@@ -530,7 +514,8 @@ class Studio {
       case "telemetry": this.set({ telemetry: m }); break;
       case "align_result": this.set({ align: { root: m.root, episode: m.episode, at: m.at, aligned: !!m.aligned, cameras: m.cameras ?? {} } }); break;
       case "rig": this.set({ rig: { mock: m.mock, bimanual: !!m.bimanual, arms: m.arms, policies: m.policies, cal_dir: m.cal_dir } }); break;
-      case "eval": this.set({ evals: { current: m.current, past: m.past, dir: m.dir } }); break;
+      case "eval": this.set({ evals: { current: m.current, summary: m.summary, next: m.next, awaiting: !!m.awaiting,
+        cards: m.cards ?? [], past: m.past ?? [], dir: m.dir, club_csv: m.club_csv ?? null } }); break;
       case "calibrated":
         this.set({
           calibrated: { arm: m.arm, path: m.path, at: Date.now() },

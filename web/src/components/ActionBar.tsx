@@ -9,13 +9,14 @@ interface Props {
   activity: "teleop" | "policy";
   startLabel?: string;
   startMsg?: Record<string, unknown>; // extra fields for the start command (policy config)
+  startCmd?: Record<string, unknown>; // the whole message Start sends instead, e.g. { cmd: "eval_run" }
   canStart?: boolean;
   startBlocked?: string; // why Start is disabled, shown as its title
 }
 
 // One primary action at a time, following the session state machine. Motion starts only after a
 // cancellable countdown; both torque-off actions ask first, because the followers drop.
-export function ActionBar({ activity, startLabel, startMsg, canStart = true, startBlocked }: Props) {
+export function ActionBar({ activity, startLabel, startMsg, startCmd, canStart = true, startBlocked }: Props) {
   const s = useStudio((x) => x.state);
   const control = useStudio((x) => x.control);
   const identity = useStudio((x) => x.identity);
@@ -23,7 +24,7 @@ export function ActionBar({ activity, startLabel, startMsg, canStart = true, sta
   const [count, setCount] = useState<number | null>(null);
   const [confirmOff, setConfirmOff] = useState<null | "release" | "disconnect">(null);
   const start = useRef(() => {});
-  start.current = () => studio.send({ cmd: "start", activity, ...startMsg });
+  start.current = () => studio.send(startCmd ?? { cmd: "start", activity, ...startMsg });
 
   const cancel = () => setCount(null);
   const startCountdown = () => setCount(COUNTDOWN_S);

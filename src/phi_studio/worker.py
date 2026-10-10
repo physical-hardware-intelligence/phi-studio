@@ -160,6 +160,14 @@ class PolicyRun:
     action: dict[str, dict[str, float]] = field(default_factory=dict)
     running: bool = True
     ended: str | None = None
+    # What the policy asked for, before the step limit (evals.suspect reads these). WHY measure
+    # before the clip: the MolmoAct2 sim run (phi experiments/2026-10-07) found new chunks starting
+    # up to 69.6° from where the last one ended. The clip hides that from the arm, not the eval.
+    clipped: int = 0  # ticks where the step limit cut at least one goal
+    max_jump_deg: float = 0.0  # the largest change between consecutive asked-for goals
+    max_jump_joint: str = ""
+    boundary_jump_deg: float = 0.0  # the same, at the first tick of each chunk
+    prev: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def view(self) -> dict[str, Any]:
         ms = sorted(self.chunk_ms)
@@ -170,6 +178,9 @@ class PolicyRun:
                 "chunk_ms": round(self.chunk_ms[-1], 3) if ms else 0.0,
                 "chunk_ms_p50": round(ms[len(ms) // 2], 3) if ms else 0.0,
                 "chunk_ms_max": round(ms[-1], 3) if ms else 0.0,
+                "clipped": self.clipped, "max_jump_deg": round(self.max_jump_deg, 2),
+                "max_jump_joint": self.max_jump_joint,
+                "boundary_jump_deg": round(self.boundary_jump_deg, 2),
                 "action": {f: {j: round(v, 2) for j, v in g.items()}
                            for f, g in self.action.items()}}  # fmt: skip
 
@@ -298,7 +309,7 @@ class RigWorker:
                 "arms": [{"name": a.name, "role": a.role, "side": getattr(a, "side", None),
                           "id": a.calibration_id, "file": calibration_file(a)} for a in self.arms],
                 "bimanual": any(getattr(a, "side", None) for a in self.arms),
-                "policies": [p.public() for p in self.policies.values()],
+                "policies": [p.public() for p in self.policies.values()], "hz": self.loop_hz,
                 "cal_dir": str(self.cal_dir) if self.cal_dir else None}  # fmt: skip
 
     def _cmd_heartbeat(self, msg: dict[str, Any]) -> None:
@@ -371,7 +382,7 @@ class RigWorker:
         self.session.started("policy")  # raises unless ARMED: after a stop, resume first
         start = {f.name: f.read_positions() for f in self.followers}
         policy.reset(start, task)
-        self.run = PolicyRun(info, policy, task, float(limit), t0=self.clock())
+        self.run = PolicyRun(info, policy, task, float(limit), t0=self.clock(), prev=start)
 
     def _policy_goals(
         self, now: float, pos: dict[str, dict[str, float]]
@@ -384,7 +395,8 @@ class RigWorker:
             self.session.stopped("time limit")
             self._freeze()
             return []
-        if not r.queue:
+        new_chunk = not r.queue
+        if new_chunk:
             # WHY inline: the mock policy takes microseconds. A real policy must not run here.
             t = time.perf_counter()
             state = {f.name: pos[f.name] for f in self.followers}
@@ -392,7 +404,21 @@ class RigWorker:
             r.chunk_ms.append((time.perf_counter() - t) * 1e3)
         r.action = r.queue.popleft()
         r.step += 1
-        return [(f, self._clip(r.action[f.name], pos[f.name])) for f in self.followers]
+        out, cut = [], False
+        for f in self.followers:
+            goal, before = r.action[f.name], r.prev.get(f.name, {})
+            for j, v in goal.items():
+                d = abs(v - before.get(j, v))  # the first tick compares with the start pose
+                if d > r.max_jump_deg:
+                    r.max_jump_deg, r.max_jump_joint = d, f"{f.name} {j}"
+                if new_chunk and d > r.boundary_jump_deg:
+                    r.boundary_jump_deg = d
+            clipped = self._clip(goal, pos[f.name])
+            cut = cut or any(abs(clipped[j] - goal[j]) > 1e-9 for j in goal)
+            out.append((f, clipped))
+        r.clipped += cut
+        r.prev = {f.name: dict(r.action[f.name]) for f in self.followers}
+        return out
 
     # -- recording (recorder.py): episodes of teleop into a LeRobot dataset ------------------------
     def _cmd_rec_start(self, msg: dict[str, Any]) -> None:
