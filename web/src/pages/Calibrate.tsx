@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, CircleAlert, CircleCheck, CircleX, Check, Hand, Hourglass, Pause, Play, Power, RotateCcw, Undo2, Wand2, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, CircleAlert, CircleCheck, CircleX, Check, Hand, Hourglass, Move, Pause, Play, Power, RotateCcw, Undo2, Wand2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Notices } from "../components/Notices";
 import { label, labels } from "../lib/labels";
@@ -130,6 +130,7 @@ function ArmPicker({ active }: { active: string[] }) {
 function CalBadge({ a }: { a: ArmIdentity }) {
   const [tone, Icon, text] =
     a.ok ? ["ok", CircleCheck, `Matches ${a.expected}.json`]
+    : a.has_file === false ? ["warn", CircleAlert, "No calibration file yet"]
     : a.exact ? ["danger", CircleX, `Holds ${a.match}.json: cables swapped?`]
     : a.match === null ? ["warn", CircleAlert, "No calibration file"]
     : ["warn", CircleAlert, `${a.max_deg?.toFixed(1)}° off ${a.expected}.json`];
@@ -315,7 +316,7 @@ const AUTO_STEPS: { key: CalStep; title: string }[] = [
   { key: "auto-middle", title: "Middle pose" }, { key: "auto", title: "Sweep" }, { key: "auto-review", title: "Save" },
 ];
 const SCOPES: { mode: "all" | "gripper"; text: string }[] = [{ mode: "all", text: "All joints" }, { mode: "gripper", text: "Gripper only" }];
-const PHASE = { out: [ArrowRight, "far stop"], back: [ArrowLeft, "near stop"], home: [Undo2, "back"] } as const;
+const PHASE = { pose: [Move, "moving"], rest: [Move, "to rest"], out: [ArrowRight, "far stop"], back: [ArrowLeft, "near stop"], home: [Undo2, "back"] } as const;
 const SWEEP_DEFAULT = 350; // autocal.SWEEP_LIMIT_DEFAULT, of 1000
 
 /** The SO-101 from the side in the middle pose: the model's zero pose (so101_new_calib), its body positions from the
@@ -383,21 +384,30 @@ function AutoMiddle({ runs }: { runs: CalView[] }) {
   const [keep, setKeep] = useState<string[]>(runs.map((r) => r.arm));
   const [scope, setScope] = useState<"all" | "gripper">("all");
   const [torque, setTorque] = useState(SWEEP_DEFAULT);
+  const [stepThrough, setStepThrough] = useState(false);
   const toggle = (arm: string) => setKeep(keep.includes(arm) ? keep.filter((a) => a !== arm) : [...keep, arm]);
+  // WHY also for the gripper alone: posed by hand, the pose is what keeps the jaw off the table
+  const middle = runs.filter((r) => keep.includes(r.arm) && !r.anywhere).map((r) => r.arm);
   const go = () => studio.send({
     cmd: "autocal_go", arms: keep, joints: scope === "gripper" ? ["gripper"] : undefined,
     torque: torque === SWEEP_DEFAULT ? undefined : torque,
+    step: stepThrough || undefined,
   });
   return (
     <div className="wizard-body">
-      <div className="auto-middle">
-        <MiddlePose />
+      <div className={`auto-middle ${middle.length ? "" : "is-solo"}`}>
+        {middle.length > 0 && <MiddlePose />}
         <div className="instr">
-          <p className="instr-lead">Put each arm in the middle pose, then Start: the arms hold themselves.</p>
+          <p className="instr-lead">{scope === "gripper" && middle.length === 0
+            ? "Start: the wrist lifts the jaw off the table, the gripper opens to one stop and closes to the other, then the wrist folds back. The rest of the arm holds still."
+            : middle.length === 0
+            ? "Start: each arm moves itself into the middle pose, then sweeps. Its servos already hold a calibration, so no one needs to pose it."
+            : `Put ${middle.length === keep.length ? "each arm" : labels(middle)} in the middle pose, then Start: the arms hold themselves.`}</p>
           <ul className="auto-tips">
-            <li>Roughly is enough</li>
-            <li>Wrist roll takes its zero here: gripper not twisted</li>
-            <li>Clear the workspace: the arms move</li>
+            {scope === "gripper" && middle.length === 0 ? <li>Keep fingers and objects out of the jaws</li>
+              : middle.length > 0 ? <><li>Roughly is enough</li><li>Wrist roll takes its zero here: gripper not twisted</li></>
+              : <li>The wrist turns to its middle for the sweeps, then back</li>}
+            {(scope !== "gripper" || middle.length > 0) && <li>Clear the workspace: the arms move</li>}
           </ul>
         </div>
       </div>
@@ -417,6 +427,10 @@ function AutoMiddle({ runs }: { runs: CalView[] }) {
             <span className="num">{Math.round(torque / 10)}%</span>
           </label>
           <p className="faint t-sm">How hard a joint may press into its stops. The gripper never goes over 20%.</p>
+          <label className="auto-step">
+            <input type="checkbox" checked={stepThrough} onChange={(e) => setStepThrough(e.target.checked)} />
+            <span>Pause after each unfold move</span>
+          </label>
         </details>
       </div>
       <div className="wizard-actions">
@@ -465,19 +479,38 @@ function AutoArm({ run }: { run: CalView }) {
 
 function AutoReview({ runs }: { runs: CalView[] }) {
   const control = useStudio((s) => s.control);
+  const [accept, setAccept] = useState<string[]>([]);
   const failed = runs.filter((r) => r.step === "auto-failed").map((r) => r.arm);
+  // An arm with a note (a joint came up short) keeps its old calibration unless the person accepts it
+  const noted = runs.filter((r) => r.step === "auto-review" && Object.keys(r.auto?.notes ?? {}).length).map((r) => r.arm);
+  const kept = [...failed, ...noted.filter((a) => !accept.includes(a))];
+  const flip = (arm: string) => setAccept(accept.includes(arm) ? accept.filter((a) => a !== arm) : [...accept, arm]);
   return (
     <div className="wizard-body">
       <div className="auto-arms">{runs.map((r) => <AutoArm key={r.arm} run={r} />)}</div>
+      {noted.length > 0 && (
+        <div className="auto-accept">
+          <p className="t-sm">Something may have been in the way. Clear it and run again, or save anyway if the arm really stops there.</p>
+          {noted.map((a) => (
+            <label key={a} className="auto-step">
+              <input type="checkbox" checked={accept.includes(a)} onChange={() => flip(a)} />
+              <span>Save {label(a)} anyway</span>
+            </label>
+          ))}
+        </div>
+      )}
       <details className="auto-adv">
         <summary>Registers, old and new</summary>
         {runs.filter((r) => r.new).map((r) => <div key={r.arm}><p className="strong t-sm">{label(r.arm)}</p><ReviewTable cal={r} /></div>)}
       </details>
       <div className="wizard-actions">
         <span className="wizard-hint">
-          Support the arms: Save turns their torque off.{failed.length ? ` ${labels(failed)} ${failed.length === 1 ? "keeps its" : "keep their"} old calibration.` : ""}
+          Support the arms: {kept.length === runs.length ? "Finish" : "Save"} turns their torque off.{kept.length ? ` ${labels(kept)} ${kept.length === 1 ? "keeps its" : "keep their"} old calibration.` : ""}
         </span>
-        <button className="btn btn-primary" disabled={!control} onClick={() => studio.send({ cmd: "autocal_save" })}>Save</button>
+        <button className="btn btn-primary" disabled={!control}
+          onClick={() => studio.send({ cmd: "autocal_save", accept: accept.filter((a) => noted.includes(a)) })}>
+          {kept.length === runs.length ? "Finish" : "Save"}
+        </button>
       </div>
     </div>
   );

@@ -177,6 +177,7 @@
 
 /* Auto-calibration (Calibrate page). */
 .auto-middle { display: grid; grid-template-columns: 9rem 1fr; gap: var(--space-4); align-items: center; }
+.auto-middle.is-solo { grid-template-columns: 1fr; }
 .mid-pose { width: 100%; height: auto; }
 .mp-base { fill: var(--text-tertiary); opacity: 0.5; }
 .mp-arm { fill: none; stroke: var(--text-primary); stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
@@ -194,6 +195,9 @@
 .auto-adv summary { cursor: pointer; color: var(--text-secondary); }
 .auto-torque { display: flex; align-items: center; gap: var(--space-3); margin-top: var(--space-2); }
 .auto-torque input { flex: 1; max-width: 16rem; accent-color: var(--accent); }
+.auto-step { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-2); cursor: pointer; }
+.auto-step input { accent-color: var(--accent); }
+.auto-accept { display: grid; gap: var(--space-1); margin-top: var(--space-3); color: var(--warn-text); }
 .auto-paused { display: flex; align-items: center; gap: var(--space-2); padding: 8px 12px; border-radius: var(--radius-lg);
   background: var(--warn-subtle); color: var(--warn-text); font-size: var(--text-sm); margin-bottom: var(--space-3); }
 .auto-paused > span { flex: 1; }
@@ -241,3 +245,9 @@
 .rec-take.tone-ok svg { color: var(--ok-text); }
 .rec-take.tone-warn svg { color: var(--warn-text); }
 .rec-take.tone-danger svg { color: var(--danger-text); }
+.onb-picks { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: var(--space-3); margin-top: var(--space-3); }
+.onb-picks > p { grid-column: 1 / -1; margin: 0; }
+.onb-pick { display: grid; gap: 4px; font-size: var(--text-sm); color: var(--text-secondary); }
+.onb-real { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: 10px 12px; margin-bottom: var(--space-3);
+  border-radius: var(--radius-lg); background: var(--info-subtle, var(--accent-subtle)); font-size: var(--text-sm); }
+.onb-warn { padding: 10px 12px; margin-bottom: var(--space-3); border-radius: var(--radius-lg); background: var(--warn-subtle); color: var(--warn-text); font-size: var(--text-sm); }

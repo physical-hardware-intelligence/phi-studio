@@ -77,13 +77,24 @@ class FakeBus:
         self.goals.append(dict(values))
         self.normalized.append(normalize)
 
-    def write(self, name: str, motor: str, value: int, *, normalize: bool = True) -> None:
+    def write(self, name: str, motor: str, value: int, *, normalize: bool = True,
+              num_retry: int = 0) -> None:  # fmt: skip
         self.writes.append((name, motor, value))
+        if name == "Torque_Enable":
+            self.torque[motor] = int(value)
 
-    def enable_torque(self, motors: Any = None) -> None:
-        self.torque = {j: 1 for j in JOINTS}
+    fail_enable_at: int | None = None  # LeRobot's enable_torque: servo by servo, stops at a fault
+    overload_id: int | None = None  # read_calibration reports this servo overloaded
 
-    def disable_torque(self, motors: Any = None) -> None:
+    def enable_torque(self, motors: Any = None, num_retry: int = 0) -> None:
+        for i, j in enumerate(JOINTS, start=1):
+            if i == FakeBus.fail_enable_at:
+                raise ConnectionError(f"Failed to write 'Torque_Enable' on id_={i} with '1' after "
+                                      f"{num_retry + 1} tries. [TxRxResult] There is no status "
+                                      "packet!")  # fmt: skip
+            self.torque[j] = 1
+
+    def disable_torque(self, motors: Any = None, num_retry: int = 0) -> None:
         self.torque = {j: 0 for j in JOINTS}
 
     def configure_motors(self) -> None:
@@ -94,6 +105,9 @@ class FakeBus:
         arm)."""
         from lerobot.motors import MotorCalibration
 
+        if FakeBus.overload_id is not None:
+            raise RuntimeError(f"Failed to read 'Min_Position_Limit' on id_={FakeBus.overload_id} "
+                               "after 1 tries. [RxPacketError] Overload error!")  # fmt: skip
         if self.calibration:
             return dict(self.calibration)
         return {
@@ -120,6 +134,8 @@ class FakeBus:
 def fresh():
     FakeBus.instances.clear()
     FakeBus.fail_connect = 0
+    FakeBus.fail_enable_at = None
+    FakeBus.overload_id = None
 
 
 def arm(role: str = "follower", cal=CAL) -> H.FeetechArm:
@@ -416,9 +432,10 @@ def test_homing_some_joints_keeps_the_others_calibration() -> None:
     g = a.calibration["gripper"]
     assert (g.homing_offset, g.range_min, g.range_max) == (2000 - 2047, 0, 4095)
     a.read_positions()  # normalises: the bus has a calibration for every joint again
-    bare = arm(cal=None)
-    with pytest.raises(RuntimeError, match="home every joint"):
-        bare.set_half_turn_homings(["gripper"])
+    bare = arm(cal=None)  # no file: the joints not homed read through the servos' registers
+    bare.set_half_turn_homings(["gripper"])
+    assert bare.calibrated and bare.calibration["elbow_flex"] == CAL["elbow_flex"]
+    bare.read_positions()
 
 
 def test_connect_errors_name_the_arm_the_port_and_what_to_check() -> None:
@@ -450,3 +467,46 @@ def test_position_reads_retry_a_lost_packet_before_the_bus_counts_as_down() -> N
     a.read_positions()
     a.read_raw_positions()
     assert bus.retries[-2:] == [H.READ_RETRIES, H.READ_RETRIES]
+
+
+def test_a_torque_on_that_fails_part_way_turns_every_servo_back_off() -> None:
+    """Seen on the rig: servo 3 missed its reply, servos 1 and 2 held torque while the worker
+    believed the arm limp. Now nothing is left holding, and the message names the servo."""
+    a = arm()
+    bus = FakeBus.instances[-1]
+    FakeBus.fail_enable_at = 3
+    with pytest.raises(ConnectionError, match="servo 3 did not confirm torque on") as got:
+        a.set_torque(True)
+    assert "turned every servo's torque back off" in str(got.value)
+    assert not any(bus.torque.values()) and not a.read_torque()
+
+
+def test_an_overloaded_gripper_is_released_and_said_plainly() -> None:
+    a = arm()
+    bus = FakeBus.instances[-1]
+    FakeBus.overload_id = 6
+    with pytest.raises(RuntimeError, match="gripper servo reported an overload") as got:
+        a.read_calibration()
+    assert "released the gripper" in str(got.value)
+    assert ("Torque_Enable", "gripper", 0) in bus.writes
+    FakeBus.overload_id = 3  # an arm joint keeps holding: releasing it would drop the arm
+    with pytest.raises(RuntimeError, match=r"servo 3 \(elbow_flex\) reports an overload"):
+        a.read_calibration()
+    assert ("Torque_Enable", "elbow_flex", 0) not in bus.writes
+
+
+def test_calibration_reads_retry_a_lost_packet() -> None:
+    a = arm()
+    bus = FakeBus.instances[-1]
+    real = bus.read_calibration
+    calls = {"n": 0}
+
+    def flaky() -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("Failed to read 'Homing_Offset' on id_=4: no status packet")
+        return real()
+
+    bus.read_calibration = flaky
+    a._bus = bus  # the first failure dropped nothing yet: keep the same fake
+    assert a.read_calibration()["elbow_flex"] == CAL["elbow_flex"] or calls["n"] >= 2

@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 PORT_RE = re.compile(r"^(/dev/[\w.\-]+|COM\d{1,3})$")
 PROBE_RANGE = range(6)  # macOS numbers cameras from 0; six covers a rig of three and spares
 ALIGN_PERIOD_S = 0.3  # one offset per camera about three times a second
+WORKER_FRESH_S = 3.0  # a worker camera that sent nothing for this long is not streaming
 ALIGN_IDLE_S = 120.0  # no window has shown the session for this long: free the cameras
 ALIGN_ALIVE_S = 30  # how often a window showing it says so (lib/setup.ts sends align_alive)
 IDLE_STOP = ("Stopped: no window showed camera align for two minutes, so the cameras are free "
@@ -340,6 +341,9 @@ class SetupApi:
                                      "at": time.time()})  # fmt: skip
                 raise
         out = []
+        # What onboarding saves as each camera's reference (camcheck.save_refs): this probe's view.
+        self.last_probe = {r["source"]: r["thumbnail"]
+                           for r in rows if r.get("ok") and r.get("thumbnail")}  # fmt: skip
         for r in rows:
             thumb = r.pop("thumbnail", None)
             url = "data:image/jpeg;base64," + base64.b64encode(thumb).decode() if thumb else None
@@ -411,24 +415,40 @@ class SetupApi:
                                           data_dir(self.studio) / "align-cache")  # fmt: skip
         except align.AlignError as e:
             raise SetupError(str(e)) from None
-        say("Looking for cameras")
-        rows = [r for r in await asyncio.to_thread(cameras.probe, PROBE_RANGE) if r["ok"]]
-        if not rows:
-            raise SetupError("No camera answered. Plug them in, and check that the app you "
-                             "started Studio from may use the camera (System Settings, "
-                             "Privacy).")  # fmt: skip
-        say("Matching each camera to the dataset by its picture")
-        live = {r["source"]: decode(r["thumbnail"]) for r in rows}
-        try:
-            match = await asyncio.to_thread(align.match_cameras, live, ref["images"])
-        except align.AlignError as e:
-            raise SetupError(str(e)) from None
         spec = None
         try:
             spec = load_spec(config_file(self.studio))
         except (SetupError, OSError, ValueError):
             pass
-        s = AlignSession(self, ref, match, spec)
+        worker = self._worker_cameras(spec)
+        if worker:
+            # WHY the worker's frames: it already owns these cameras, and a second opener lost
+            # frames ("no frame from 1 for 1.1 s", 2026-10-09). WHY its pairs: camcheck recognised
+            # each camera by its own view at this start; matching against a dataset recorded on
+            # another day picked the Mac's own camera as the wrist.
+            say("Using the cameras Studio recognised at start")
+            live = {src: decode(self.studio.latest_frame[name]["jpeg"])
+                    for src, (name, _) in worker.items()}  # fmt: skip
+        else:
+            say("Looking for cameras")
+            rows = [r for r in await asyncio.to_thread(cameras.probe, PROBE_RANGE) if r["ok"]]
+            if not rows:
+                raise SetupError("No camera answered. Plug them in, and check that the app you "
+                                 "started Studio from may use the camera (System Settings, "
+                                 "Privacy).")  # fmt: skip
+            live = {r["source"]: decode(r["thumbnail"]) for r in rows}
+        say("Matching each camera to the dataset by its picture")
+        try:
+            match = await asyncio.to_thread(align.match_cameras, live, ref["images"])
+        except align.AlignError as e:
+            raise SetupError(str(e)) from None
+        if worker:
+            pairs = {src: feat for src, (_, feat) in worker.items() if feat in ref["images"]}
+            left = [k for k in ref["images"] if k not in pairs.values()]
+            match = {**match, "assignment": pairs, "unsure": False, "why": None,
+                     "unmatched_refs": left}  # fmt: skip
+        s = AlignSession(self, ref, match, spec,
+                         worker={src: name for src, (name, _) in worker.items()})  # fmt: skip
         try:
             await asyncio.to_thread(s.open)
         except BaseException:
@@ -437,6 +457,23 @@ class SetupApi:
         self.align = s
         self.studio._fanout(s.summary())
         s.task = asyncio.get_running_loop().create_task(s.run())
+
+    def _worker_cameras(self, spec: rigspec.RigSpec | None) -> dict[Any, tuple[str, str]]:
+        """Source -> (the worker's frame name, dataset key) for every camera in the config, when
+        the real arms' worker is streaming every one of them now; else none."""
+        if spec is None or self.studio.spec.get("kind") != "lerobot":
+            return {}
+        now, out = time.monotonic(), {}
+        for c in spec.cameras:
+            if c.source is None:
+                continue
+            name = rig_name(c.feature)
+            last = self.studio.frame_clock.get(name, (None, None))[0]
+            stale = last is None or now - last > WORKER_FRESH_S
+            if name not in self.studio.latest_frame or stale:
+                return {}
+            out[c.source] = (name, c.feature)
+        return out
 
     async def stop_align(self, client: Client | None, msg: dict[str, Any]) -> None:
         async with self.cam_lock:
@@ -469,8 +506,12 @@ class AlignSession:
     """Live cameras against one dataset's resting frame: which way to move each one."""
 
     def __init__(self, api: SetupApi, ref: dict[str, Any], match: dict[str, Any],
-                 spec: rigspec.RigSpec | None) -> None:  # fmt: skip
+                 spec: rigspec.RigSpec | None,
+                 worker: dict[Any, str] | None = None) -> None:  # fmt: skip
         self.api = api
+        # source -> the worker's frame name: the session reads the worker's frames and opens no
+        # camera itself (_worker_cameras). Empty: it opens each camera, as on the simulated rig.
+        self.worker = dict(worker or {})
         self.ref = ref
         self.match = match
         self.spec = spec
@@ -481,6 +522,10 @@ class AlignSession:
         self.refs_sent = {k: picture(img) for k, img in ref["images"].items()}
         self.aligned: dict[str, bool] = {}  # dataset key -> the newest reading said in line
         self.reported: bool | None = None  # what record() last said for this session
+        # rig name -> the frame message this session put in Studio.latest_frame, so closing takes
+        # back only its own (a worker frame that replaced one stays).
+        self.published: dict[str, dict[str, Any]] = {}
+        self.sent: dict[str, tuple[Any, int]] = {}  # rig name -> (camera, seq) last published
 
     def _report(self) -> None:
         """Record the session's verdict when it changes: all cameras in line, or not. A camera
@@ -495,10 +540,6 @@ class AlignSession:
         self.api.record({"root": self.ref["root"], "episode": self.ref["episode"],
                          "at": time.time(), "aligned": ok,
                          "cameras": {k: self.aligned[k] for k in keys}})  # fmt: skip
-        # rig name -> the frame message this session put in Studio.latest_frame, so closing takes
-        # back only its own (a worker frame that replaced one stays).
-        self.published: dict[str, dict[str, Any]] = {}
-        self.sent: dict[str, tuple[Any, int]] = {}  # rig name -> (camera, seq) last published
 
     def _fields(self, key: str, source: Any) -> dict[str, Any]:
         """Open a live camera the way the rig's config does for that dataset key, at its size."""
@@ -512,6 +553,8 @@ class AlignSession:
     def open(self) -> None:
         from phi_studio.cameras import RealCamera
 
+        if self.worker:
+            return
         for src, key in self.assignment.items():
             self.cams[src] = RealCamera(str(key), self._fields(key, src))
 
@@ -562,17 +605,26 @@ class AlignSession:
                                     "cameras.")  # fmt: skip
                     return
                 for src, key in list(self.assignment.items()):
-                    cam = self.cams.get(src)
-                    if cam is None:
-                        continue
-                    try:
-                        frame, t, seq = cam.read_latest()
-                    except ConnectionError as e:
-                        studio._fanout({"type": "align_tick", "live": src, "key": key,
-                                        "error": str(e)})  # fmt: skip
-                        self.aligned[key] = False
-                        continue
-                    await self._publish(src, cam, frame, t, seq)
+                    if self.worker:
+                        frame = await self._worker_frame(src)
+                        if frame is None:
+                            studio._fanout({"type": "align_tick", "live": src, "key": key,
+                                            "error": f"no picture from camera {src} for "
+                                                     f"{WORKER_FRESH_S:.0f} s"})  # fmt: skip
+                            self.aligned[key] = False
+                            continue
+                    else:
+                        cam = self.cams.get(src)
+                        if cam is None:
+                            continue
+                        try:
+                            frame, t, seq = cam.read_latest()
+                        except ConnectionError as e:
+                            studio._fanout({"type": "align_tick", "live": src, "key": key,
+                                            "error": str(e)})  # fmt: skip
+                            self.aligned[key] = False
+                            continue
+                        await self._publish(src, cam, frame, t, seq)
                     m = await asyncio.to_thread(align.measure, frame, self.ref["images"][key])
                     self.aligned[key] = bool(m.get("aligned"))  # needs a trusted match
                     pic = await asyncio.to_thread(picture, frame)
@@ -584,6 +636,16 @@ class AlignSession:
             pass
         except Exception as e:  # WHY: a crash must still free the cameras and say why
             await self._end(f"Camera align stopped on an error: {type(e).__name__}: {e}")
+
+    async def _worker_frame(self, src: Any) -> np.ndarray | None:
+        """The worker's newest frame of camera `src`, or None when it has sent none lately."""
+        studio = self.api.studio
+        name = self.worker.get(src)
+        msg = studio.latest_frame.get(name) if name else None
+        last = studio.frame_clock.get(name, (None, None))[0] if name else None
+        if msg is None or last is None or time.monotonic() - last > WORKER_FRESH_S:
+            return None
+        return await asyncio.to_thread(decode, msg["jpeg"])
 
     async def _publish(self, src: Any, cam: Any, frame: np.ndarray, t: float, seq: int) -> None:
         """Offer a new frame to Studio.latest_frame, as a worker frame would be, so recon can

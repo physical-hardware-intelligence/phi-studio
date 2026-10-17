@@ -26,6 +26,7 @@ Status: unit-tested against a fake bus; not yet run on a physical arm (first rig
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from collections.abc import Callable, Sequence
@@ -38,6 +39,7 @@ from phi_studio.files import lerobot_calibration_dir
 from phi_studio.identity import Calibration, JointCal, load_calibration
 from phi_studio.rig import JOINTS, JointHealth
 
+log = logging.getLogger(__name__)
 RECONNECT_S = 2.0  # how often a lost bus is tried again
 # WHY retries: one lost status packet on a long USB run must not fault a recording; LeRobot's
 # sync_read retries in place (motors_bus.py sync_read num_retry). A bus that misses three in a row
@@ -163,14 +165,38 @@ class FeetechArm:
         return self._bus
 
     def _call(self, fn: Callable[[Any], Any]) -> Any:
-        """Run one bus operation; a failed one drops the bus, so the next call reconnects."""
+        """Run one bus operation; a failed one drops the bus, so the next call reconnects. A servo
+        reporting an overload gets a plain message, and a gripper its torque released."""
         bus = self._ensure()
         try:
             return fn(bus)
         except (OSError, RuntimeError) as e:
+            # WHY log here: the worker reports one line per fault; on a real rig the first failed
+            # exchange, and the library's own reason for it, is what tells cable from code.
+            log.warning("%s on %s: %s (cause: %r)", self.name, self.port, e, e.__cause__)
+            if "Overload error" in str(e):
+                raise RuntimeError(self._overload(bus, str(e))) from e
             if isinstance(e, ConnectionError) or "port" in str(e).lower():
                 self._drop()
             raise
+
+    def _overload(self, bus: Any, text: str) -> str:
+        """A servo flags an overload while it holds torque against something (seen on the rig,
+        2026-10-05: a gripper with LeRobot's 25 % Overload_Torque tripped holding its jaws). A
+        gripper is released at once, as nothing hangs from it and a squeezing gripper burns
+        (RECORDING_DAY.md); an arm joint keeps holding, as releasing it would drop the arm."""
+        m = re.search(r"id_?=(\d+)", text)
+        mid = int(m.group(1)) if m else None
+        joint = next((j for j, i in MOTOR_IDS.items() if i == mid), None)
+        if joint == "gripper":
+            try:
+                bus.write("Torque_Enable", "gripper", 0, normalize=False, num_retry=READ_RETRIES)
+                return (f"{self.name}: the gripper servo reported an overload (it was squeezing "
+                        "against something with torque on). Studio released the gripper.")
+            except Exception:  # still say what happened; the worker faults and holds the rest
+                pass
+        return (f"{self.name}: servo {mid} ({joint or 'unknown'}) reports an overload: it is "
+                "pushing against something with torque on. Support the arm, then release torque.")
 
     def _drop(self) -> None:
         bus, self._bus = self._bus, None
@@ -205,7 +231,19 @@ class FeetechArm:
 
     # -- rig.ArmBus --------------------------------------------------------------------------------
     def read_calibration(self) -> Calibration:
-        return from_motor_calibration(self._call(lambda b: b.read_calibration()))
+        # WHY retry the whole read: LeRobot's read_calibration reads register by register with
+        # no retry, and one lost packet among its 18 reads must not fault a connect.
+        for attempt in range(READ_RETRIES + 1):
+            try:
+                return from_motor_calibration(self._call(lambda b: b.read_calibration()))
+            except ConnectionError:
+                if attempt == READ_RETRIES:
+                    raise
+        raise AssertionError("unreachable")
+
+    @property
+    def calibrated(self) -> bool:
+        return self.calibration is not None
 
     def read_positions(self) -> dict[str, float]:
         if self.calibration is None:
@@ -236,12 +274,16 @@ class FeetechArm:
         0..4095 range, the others what they held; normalising with the same values, as the mock
         does, keeps positions flowing (degrees from the middle pose)."""
         which = list(joints) if joints is not None else list(JOINTS)
-        if self.calibration is None and len(which) < len(JOINTS):
-            raise RuntimeError(f"{self.name} has no calibration file: home every joint")
+        # WHY the registers for an arm with no file: the joints not homed now still need a
+        # calibration to read in degrees while the others sweep, and the servos hold the one
+        # LeRobot last wrote (a new servo: its factory 0..4095).
+        base = self.calibration
+        if base is None and len(which) < len(JOINTS):
+            base = self.read_calibration()
 
         def run(b: Any) -> dict[str, int]:
             homings = {j: int(v) for j, v in b.set_half_turn_homings(which).items()}
-            cal = dict(self.calibration or {})
+            cal = dict(base or {})
             cal |= {j: JointCal(MOTOR_IDS[j], 0, homings[j], 0, FULL_TICKS) for j in homings}
             b.calibration = to_motor_calibration(cal)
             self.calibration = cal
@@ -272,7 +314,46 @@ class FeetechArm:
         self._call(run)
 
     def set_torque(self, on: bool) -> None:
-        self._call(lambda b: b.enable_torque() if on else b.disable_torque())
+        """Torque on or off for every servo, each write retried. WHY the roll-back: LeRobot turns
+        torque on servo by servo, so one that does not answer leaves the ones before it holding
+        while the caller believes the arm is limp (seen on the rig, 2026-10-05: servo 3 missed its
+        reply, 1 and 2 held). A failed torque-on turns every servo off again, on the same open
+        bus, before it raises; torque-off goes past a servo that does not answer, so a release
+        releases every servo it can reach and names the rest."""
+
+        def off_all(b: Any) -> list[str]:
+            silent = []
+            for j in JOINTS:
+                try:
+                    b.write("Torque_Enable", j, 0, normalize=False, num_retry=READ_RETRIES)
+                except (OSError, RuntimeError):
+                    silent.append(j)
+            for j in JOINTS:  # LeRobot's disable_torque unlocks too (feetech.py)
+                try:
+                    b.write("Lock", j, 0, normalize=False, num_retry=READ_RETRIES)
+                except (OSError, RuntimeError):
+                    pass
+            return silent
+
+        def run(b: Any) -> None:
+            if not on:
+                silent = off_all(b)
+                if silent:
+                    raise ConnectionError(f"{self.name}: {', '.join(silent)} did not confirm "
+                                          "torque off. Support the arm, then cut its power.")
+                return
+            try:
+                b.enable_torque(num_retry=READ_RETRIES)
+            except (OSError, RuntimeError) as e:
+                silent = off_all(b)
+                m = re.search(r"id_?=(\d+)", str(e))
+                which = f"servo {m.group(1)}" if m else "a servo"
+                after = ("Studio turned every servo's torque back off." if not silent else
+                         f"{', '.join(silent)} did not confirm torque off: support the arm.")
+                raise ConnectionError(f"{self.name}: {which} did not confirm torque on. {after} "
+                                      "Check the cable into it and the 12 V supply.") from e
+
+        self._call(run)
 
     def read_torque(self) -> bool:
         """True when any servo holds torque: one holding joint is enough to make the arm unsafe to
@@ -287,15 +368,16 @@ class FeetechArm:
 
     def read_health(self) -> dict[str, JointHealth]:
         def read(b: Any) -> dict[str, JointHealth]:
+            n = READ_RETRIES  # WHY: one lost packet among four reads faulted a sweep (2026-10-05)
             pos = (
-                b.sync_read("Present_Position")
+                b.sync_read("Present_Position", num_retry=n)
                 if self.calibration is not None
                 else {j: float("nan") for j in JOINTS}
             )
-            load = b.sync_read("Present_Load", normalize=False)  # sign-magnitude decoded: per mille
-            temp = b.sync_read("Present_Temperature", normalize=False)  # deg C
-            volt = b.sync_read("Present_Voltage", normalize=False)  # 0.1 V
-            status = b.sync_read("Status", normalize=False)
+            load = b.sync_read("Present_Load", normalize=False, num_retry=n)  # per mille, signed
+            temp = b.sync_read("Present_Temperature", normalize=False, num_retry=n)  # deg C
+            volt = b.sync_read("Present_Voltage", normalize=False, num_retry=n)  # 0.1 V
+            status = b.sync_read("Status", normalize=False, num_retry=n)
             return {
                 j: JointHealth(
                     float(pos[j]),

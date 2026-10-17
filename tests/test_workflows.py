@@ -296,6 +296,38 @@ def test_policy_goals_are_clipped_like_teleop() -> None:
     assert leads and max(leads) <= 1.0 + 1e-6
 
 
+def test_a_run_reports_what_the_policy_asked_for_before_the_clip() -> None:
+    """evals.suspect warns on clipping and on chunks that start far from the last goal."""
+    w, clock, out = armed()
+    w.max_step = {j: 1.0 for j in w.max_step}  # tight, so the scripted reach gets clipped
+    start_policy(w)
+    run(w, clock, 2.0)
+    p = of(out, "telemetry")[-1]["policy"]
+    assert 0 < p["clipped"] <= p["step"]
+    assert p["max_jump_deg"] > 0 and p["max_jump_joint"].startswith("follower ")
+    assert 0 <= p["boundary_jump_deg"] <= p["max_jump_deg"]
+
+
+def test_a_chunk_that_starts_far_from_the_last_goal_is_measured() -> None:
+    w, clock, out = armed()
+    start_policy(w)
+    run(w, clock, 0.5)
+    r = w.run
+    assert r is not None
+    r.queue.clear()  # the next tick asks for a new chunk
+    real = r.policy.infer
+
+    def jumpy(t: float, state):  # a chunk that starts 40° off on the pan
+        chunk = real(t, state)
+        chunk[0] = {n: {**g, "shoulder_pan": g["shoulder_pan"] + 40.0} for n, g in chunk[0].items()}
+        return chunk
+
+    r.policy.infer = jumpy  # type: ignore[method-assign]
+    run(w, clock, 0.1)
+    p = of(out, "telemetry")[-1]["policy"]
+    assert p["boundary_jump_deg"] >= 39.0 and p["max_jump_joint"] == "follower shoulder_pan"
+
+
 def test_a_second_episode_starts_after_resume_from_step_zero() -> None:
     w, clock, out = armed()
     start_policy(w, limit_s=1.0)

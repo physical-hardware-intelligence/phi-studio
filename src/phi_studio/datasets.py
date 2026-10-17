@@ -197,11 +197,19 @@ class Dataset:
             if self.v3:
                 import pyarrow.parquet as pq
 
-                t = pq.read_table(self.root / "meta" / "tasks.parquet").to_pandas()
-                if "task" in t.columns:
-                    pairs = zip(t["task_index"], t["task"], strict=True)
-                else:  # the task string is the index
-                    pairs = zip(t["task_index"], t.index, strict=True)
+                # WHY pyarrow alone: Studio's own install has no pandas (LeRobot brings it, a
+                # clean install does not, and CI failed on it). LeRobot writes the tasks with
+                # pandas, the task string as the index, which pyarrow reads back as a column:
+                # "task", or whatever the file's pandas metadata names the index.
+                t = pq.read_table(self.root / "meta" / "tasks.parquet")
+                index = (t.schema.pandas_metadata or {}).get("index_columns", [])
+                key = "task" if "task" in t.column_names else next(
+                    (c for c in index if isinstance(c, str) and c in t.column_names), None
+                )
+                if key is None:
+                    raise ValueError(f"{self.root}: tasks.parquet has no task column")
+                pairs = zip(t.column("task_index").to_pylist(), t.column(key).to_pylist(),
+                            strict=True)  # fmt: skip
                 ordered = sorted(pairs)
                 self._tasks = [str(task) for _, task in ordered]
             else:

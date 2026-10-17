@@ -226,7 +226,7 @@ const PAGE_HELP: { id: Route; title: string; what: string; how: ReactNode }[] = 
   { id: "scene", title: "3D view", what: "The arms as they move, drawn from the SO-101 CAD model.", how: <>
       The follower is solid; the leader, or the policy's target during a run, is a ghost. A joint turns warm within 5%
       of the model's range end and red past it. Place the front and top cameras with <strong>Move</strong>; the wrist
-      camera rides on its mount. Joint angles go through an assumed mapping not yet checked on a physical arm.{" "}
+      camera rides on its mount. Joint angles map one to one onto the model; on a physical arm (2026-10-09) every joint turned the same way as the real one.{" "}
       <strong>Workspace points</strong> turns a camera picture into a 3D point cloud in metres, scaled against the
       table, and refuses when the fit is poor. It needs the depth model, downloaded once (99 MB).
     </> },

@@ -64,18 +64,24 @@ class FakeClock:
         self.t += dt
 
 
-def _calibration(seed: int) -> Calibration:
+def _calibration(
+    seed: int, enc0: dict[str, int], stops: dict[str, tuple[float, float]]
+) -> Calibration:
+    """What LeRobot's hand calibration would have stored for this arm: the homing that reads 2047 at
+    a middle pose posed by eye (a few degrees off), each range where a person swept it, at the stops
+    give or take a degree. WHY not random: auto-calibration compares its sweep with this range, and
+    a stored range wider than the arm's stops is one no arm can have."""
     rng = np.random.default_rng(seed)
-    return {
-        j: JointCal(
-            i + 1,
-            0,
-            int(rng.integers(-2000, 2000)),
-            int(rng.integers(700, 1000)),
-            int(rng.integers(3000, 3400)),
-        )
-        for i, j in enumerate(JOINTS)
-    }
+    out: Calibration = {}
+    for i, j in enumerate(JOINTS):
+        homing = enc0[j] - HALF_TURN + int(rng.integers(-40, 41))
+        if j not in stops:  # wrist roll turns freely: LeRobot stores the whole turn
+            out[j] = JointCal(i + 1, 0, homing, 0, TICKS_PER_REV - 1)
+            continue
+        lo, hi = (enc0[j] + round(x * TICKS_PER_DEG) - homing for x in stops[j])
+        swept = lo + int(rng.integers(0, 12)), hi - int(rng.integers(0, 12))
+        out[j] = JointCal(i + 1, 0, homing, *swept)
+    return out
 
 
 @dataclass
@@ -92,14 +98,13 @@ class MockArm:
     scripted: bool = True  # leader follows the scripted hand
     hand: bool = False  # a limp follower follows a wider scripted hand (calibration sweeps)
     calibration_id: str = ""  # the calibration file this arm is registered with; default its name
+    calibrated: bool = True  # False: no calibration file yet, as a new arm (hardware.py)
     side: str | None = None  # left | right on a bimanual rig
     port: str = ""
 
     def __post_init__(self) -> None:
         self.calibration_id = self.calibration_id or self.name
         self.port = self.port or f"mock://{self.name}"
-        self._own_cal = _calibration(self.seed)
-        self._cal = self._own_cal  # what the port reaches; swap_cables changes it
         rng = np.random.default_rng(1000 + self.seed)
         # Encoder ticks at the home pose: where each servo's magnet happens to sit.
         self._enc0 = {j: int(rng.integers(1300, 2800)) for j in JOINTS}
@@ -109,6 +114,8 @@ class MockArm:
                 _HOME[j] + t / 2 + tol.uniform(-STOP_TOLERANCE, STOP_TOLERANCE))
             for j, t in _TRAVEL.items()
         }  # fmt: skip
+        self._own_cal = _calibration(self.seed, self._enc0, self.stops)
+        self._cal = self._own_cal  # what the port reaches; swap_cables changes it
         self.torque_limit = {j: FULL_TORQUE for j in JOINTS}
         self._t = self.clock()  # type: ignore[operator]
         self._t0 = self._t
@@ -169,6 +176,8 @@ class MockArm:
 
     def read_positions(self) -> dict[str, float]:
         self._check()
+        if not self.calibrated:  # as hardware.py: no degrees without a calibration
+            raise RuntimeError(f"{self.name} has no calibration file ({self.calibration_id}.json)")
         self._step()
         return dict(self.pos)
 
@@ -192,6 +201,7 @@ class MockArm:
             j: JointCal(c.id, c.drive_mode, homings[j], 0, TICKS_PER_REV - 1) if j in homings else c
             for j, c in self._cal.items()
         }  # the servo keeps these: a replug does not undo them
+        self.calibrated = True
         return homings
 
     def write_calibration(self, cal: Calibration) -> None:
@@ -199,6 +209,7 @@ class MockArm:
         Studio refuses to calibrate an arm on a swapped cable."""
         self._check()
         self._cal = self._own_cal = dict(cal)
+        self.calibrated = True
 
     def write_goals(self, goals: dict[str, float]) -> None:
         self._check()
@@ -287,8 +298,9 @@ class MockRig:
     spec: rigspec.RigSpec | None = None  # the LeRobot config this mock stands in for
 
     def calibration_files(self) -> dict[str, Calibration]:
-        """What a calibration directory would hold for these arms: each arm's own file, by id."""
-        return {a.calibration_id: a._own_cal for a in self.arms}
+        """What a calibration directory would hold for these arms: each arm's own file, by id. A
+        new arm (calibrated=False) has none yet."""
+        return {a.calibration_id: a._own_cal for a in self.arms if a.calibrated}
 
     def swap_cables(self, name: str) -> None:
         """Swap the USB cables of `name` and its partner (leader <-> follower): each port now

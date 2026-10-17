@@ -5,7 +5,7 @@ const FAULT_FIX: Array<[RegExp, string]> = [
   [/overload/, "Something is blocking the joint or the gripper is squeezing too hard. Free the joint, then clear."],
   [/overheat/, "Let the servo cool for a few minutes before clearing. Check that nothing is stalling it."],
   [/voltage/, "Check the power supply: the right adapter for this arm, plugged in, cable seated."],
-  [/no status packet|not answering|unplugged/i, "Check the arm's USB cable and power, then clear. The other arms are holding."],
+  [/no status packet|not answering|unplugged/i, "Check the arm's USB cable and power, then clear."],
 ];
 
 function fixFor(fault: string): string {

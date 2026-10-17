@@ -331,3 +331,109 @@ def test_switching_to_real_arms_starts_the_hardware_worker_even_with_nothing_plu
             studio.stop_worker()
 
     asyncio.run(go())
+
+
+def test_saving_the_rig_reloads_real_arms_never_while_holding_torque(tmp_path) -> None:
+    """2026-10-09: onboarding saved three cameras and Studio kept driving the rig it started
+    with, so no camera opened. A save on real arms reloads them; a save while an arm may hold
+    torque is refused before anything is written."""
+    import asyncio
+    import json
+
+    from test_server import until, ws
+
+    single = {"name": "Phi Left Pair", "layout": "single",
+              "ids": {"follower": "phi_follower", "leader": "phi_leader"},
+              "ports": {"leader": "/dev/tty.usbmodemL1", "follower": "/dev/tty.usbmodemF1"},
+              "cameras": {"top": {"source": 2, "width": 640, "height": 480, "fps": 30}},
+              }  # fmt: skip
+    path = tmp_path / "data" / "robot-config.yaml"
+
+    async def go() -> None:
+        studio, server, session = _studio(tmp_path)
+        switched: list[dict] = []
+        studio.switch_rig = switched.append  # type: ignore[method-assign]  # record only
+        await server.start_server()
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            studio.spec["kind"] = "lerobot"  # as if Studio drove the real arms
+            await a.send_str(json.dumps({"cmd": "rig_write", "rig": single}))
+            await until(a, lambda d: d["type"] == "rig_saved")
+            for _ in range(40):
+                if switched:
+                    break
+                await asyncio.sleep(0.05)
+            assert switched == [{"kind": "lerobot", "config": str(path)}]
+            assert "top:" in path.read_text()
+
+            for cmd in ("connect", "confirm", "arm"):
+                await a.send_str(json.dumps({"cmd": cmd}))
+            await until(a, lambda d: d["type"] == "state" and d["state"] == "ARMED", timeout=10)
+            before = path.read_text()
+            await a.send_str(json.dumps({"cmd": "rig_write", "rig": {**single, "name": "Other"}}))
+            err = await until(a, lambda d: d["type"] == "error")
+            assert "holding torque" in err["message"] and "Turn torque off" in err["fix"]
+            assert path.read_text() == before and len(switched) == 1
+
+            studio.spec["kind"] = "mock"  # simulated arms: the file only, no reload
+            await a.send_str(json.dumps({"cmd": "release"}))
+            await until(a, lambda d: d["type"] == "state" and d["state"] == "READY", timeout=10)
+            await a.send_str(json.dumps({"cmd": "rig_write", "rig": {**single, "name": "Third"}}))
+            await until(a, lambda d: d["type"] == "rig_saved")
+            await asyncio.sleep(0.2)
+            assert '"Third"' in path.read_text() and len(switched) == 1
+        finally:
+            await session.close()
+            await server.close()
+            studio.stop_worker()
+
+    asyncio.run(go())
+
+
+def test_cameras_are_written_with_the_format_the_probe_got_and_remembered(tmp_path) -> None:
+    """MJPG only where the camera took it (cameras.probe), and every probed camera's view kept,
+    so the next start can tell which is which (camcheck)."""
+    import asyncio
+    import json
+
+    from test_camcheck import scene
+    from test_server import until, ws
+
+    from phi_studio import camcheck
+
+    ans = O.check_answers({"name": "Phi Left Pair", "layout": "single",
+                           "ids": {"follower": "phi_follower", "leader": "phi_leader"},
+                           "ports": {"leader": "/dev/tty.usbmodemL1",
+                                     "follower": "/dev/tty.usbmodemF1"},
+                           "cameras": {"top": {"source": 2, "fps": 30, "fourcc": "MJPG"},
+                                       "wrist": {"source": 0, "fps": 30}}})  # fmt: skip
+    text = O.build_yaml(ans)
+    top = 'top:\n      type: opencv\n      index_or_path: 2\n      fps: 30\n      fourcc: "MJPG"'
+    assert top in text
+    assert "wrist:\n      type: opencv\n      index_or_path: 0\n      fps: 30\n" in text
+    with pytest.raises(Refusal):
+        O.check_answers({**ans, "cameras": {"top": {"source": 2, "fourcc": "mjpeg!"}}})
+
+    async def go() -> None:
+        studio, server, session = _studio(tmp_path)
+        await server.start_server()
+        try:
+            a = await ws(session, server.port)
+            await until(a, lambda d: d["type"] == "hello")
+            studio.setup_api.last_probe = {0: scene(1), 2: scene(3), 3: scene(4)}  # type: ignore[attr-defined]
+            rig = {"name": "Phi Left Pair", "layout": "single",
+                   "ids": {"follower": "phi_follower", "leader": "phi_leader"},
+                   "ports": {"leader": "/dev/tty.usbmodemL1", "follower": "/dev/tty.usbmodemF1"},
+                   "cameras": {"top": {"source": 2}, "wrist": {"source": 0}}}  # fmt: skip
+            await a.send_str(json.dumps({"cmd": "rig_write", "rig": rig}))
+            await until(a, lambda d: d["type"] == "rig_saved")
+            refs = camcheck.load_refs(tmp_path / "data")
+            assert refs is not None
+            assert {(r["source"], r["role"]) for r in refs} == {(0, "wrist"), (2, "top"), (3, None)}
+        finally:
+            await session.close()
+            await server.close()
+            studio.stop_worker()
+
+    asyncio.run(go())

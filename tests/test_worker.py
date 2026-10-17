@@ -189,6 +189,19 @@ def test_torque_off_is_allowed_during_a_fault_and_the_fault_stays() -> None:
 
 
 # -- review fixes (2026-10-03 adversarial review) -------------------------------------------------
+def test_an_arm_whose_file_has_an_identical_twin_is_its_own() -> None:
+    """2026-10-09: the left follower matched phi_follower.json and phi_bi_follower_left.json (the
+    same numbers on purpose); the twin was listed first, and Studio blocked the test drive with
+    "Some arms do not match their own calibration file"."""
+    w, _, out = make(pairs=1)
+    w.handle({"cmd": "connect"})
+    f = arm(w, "follower")
+    w.calibrations = {"aa_twin": w.calibrations[f.calibration_id], **w.calibrations}
+    w._identify()
+    mine = next(a for a in of(out, "identity")[-1]["arms"] if a["name"] == "follower")
+    assert mine["match"] == f.calibration_id and mine["exact"] and mine["ok"]
+
+
 def test_swapped_cables_are_refused_at_confirm() -> None:
     # The 2026-08-06 incident: each arm matches the OTHER arm's file exactly.
     w, _, out = make()

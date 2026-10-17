@@ -541,10 +541,16 @@ PROBE = """
 import json, importlib.metadata as md
 import lerobot, lerobot.policies  # importing the package registers every policy config
 from lerobot.configs.policies import PreTrainedConfig
+names = set()
+for d in md.distributions():
+    try:
+        names.add(d.metadata["Name"] or "")
+    except Exception:  # unreadable, e.g. macOS's ._x.egg-info beside a checkout on an exFAT drive
+        pass
 print(json.dumps({"version": lerobot.__version__,
                   "policies": sorted(PreTrainedConfig.get_known_choices()),
                   "requires": md.requires("lerobot") or [],
-                  "installed": sorted({(d.metadata["Name"] or "") for d in md.distributions()})}))
+                  "installed": sorted(names)}))
 """
 
 
